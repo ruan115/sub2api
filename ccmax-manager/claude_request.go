@@ -118,6 +118,9 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 	} else if hasAccessToken {
 		rewriteClaudeMetadata(payload, account, r)
 	}
+	if countTokens {
+		sanitizeCountTokensPayload(payload)
+	}
 	stripDeferredToolCacheControl(payload)
 	enforceCacheControlLimit(payload, 4)
 	preparedBody, err := json.Marshal(payload)
@@ -125,6 +128,20 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		return claudePreparedRequest{}, fmt.Errorf("encode Anthropic request: %w", err)
 	}
 	return claudePreparedRequest{Body: preparedBody, Model: model, OAuth: hasAccessToken, Mimic: mimic, ClaudeCode: claudeCode, Stream: stream, CountTokens: countTokens}, nil
+}
+
+func sanitizeCountTokensPayload(payload map[string]any) {
+	for _, field := range []string{
+		"temperature",
+		"top_p",
+		"top_k",
+		"stream",
+		"stop_sequences",
+		"stop",
+		"max_tokens",
+	} {
+		delete(payload, field)
+	}
 }
 
 func accountRequestPassthrough(account gatewayAccount) bool {

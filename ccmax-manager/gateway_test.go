@@ -238,6 +238,11 @@ func TestGatewayFailsOverAndMapsCountTokensModel(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, field := range []string{"temperature", "top_p", "top_k", "stream", "stop_sequences", "stop", "max_tokens"} {
+			if _, exists := body[field]; exists {
+				t.Errorf("count_tokens forwarded generation field %q", field)
+			}
+		}
 		mappedModel <- body["model"].(string)
 		if !strings.Contains(r.Header.Get("anthropic-beta"), "token-counting-2024-11-01") {
 			t.Errorf("count_tokens beta=%s", r.Header.Get("anthropic-beta"))
@@ -251,7 +256,11 @@ func TestGatewayFailsOverAndMapsCountTokensModel(t *testing.T) {
 	extra := map[string]any{"supported_models": []string{"claude-alias"}, "model_mapping": map[string]any{"claude-alias": "claude-upstream"}}
 	createGatewayTestAccount(t, a, handler, "first", first.URL, 0, extra, map[string]any{"access_token": "first-token"})
 	createGatewayTestAccount(t, a, handler, "second", second.URL, 1, extra, map[string]any{"access_token": "second-token"})
-	requestJSON(t, handler, http.MethodPost, "/v1/messages/count_tokens", map[string]any{"model": "claude-alias", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}, nil, key.Key, http.StatusOK, nil)
+	requestJSON(t, handler, http.MethodPost, "/v1/messages/count_tokens", map[string]any{
+		"model": "claude-alias", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		"temperature": 0.7, "top_p": 0.9, "top_k": 40, "stream": true,
+		"stop_sequences": []string{"END"}, "stop": []string{"DONE"}, "max_tokens": 1024,
+	}, nil, key.Key, http.StatusOK, nil)
 	if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
 		t.Fatalf("failover calls first=%d second=%d", firstCalls.Load(), secondCalls.Load())
 	}
