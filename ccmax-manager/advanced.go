@@ -104,6 +104,21 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
 		{"source_hash", "TEXT NOT NULL DEFAULT ''"},
 	}
+	usageColumns := []struct{ name, definition string }{
+		{"user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"},
+		{"api_key_id", "INTEGER REFERENCES api_keys(id) ON DELETE SET NULL"},
+	}
+	for _, column := range usageColumns {
+		if err := addColumnIfMissing(a.db, "usage_logs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := a.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_user_created ON usage_logs(user_id, created_at DESC)`); err != nil {
+		return fmt.Errorf("index usage logs by user: %w", err)
+	}
+	if _, err := a.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_api_key_created ON usage_logs(api_key_id, created_at DESC)`); err != nil {
+		return fmt.Errorf("index usage logs by API key: %w", err)
+	}
 	for _, column := range priceColumns {
 		if err := addColumnIfMissing(a.db, "model_prices", column.name, column.definition); err != nil {
 			return err
@@ -182,10 +197,15 @@ func (a *app) backfillAccountSubscriptions() error {
 
 func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	where := []string{"a.deleted_at IS NULL"}
-	args := []any{}
+	whereArgs := []any{}
+	if user := currentUser(r); user.Role == "user" {
+		condition, args := scopedAccountCondition(user, "a")
+		where = append(where, condition)
+		whereArgs = append(whereArgs, args...)
+	}
 	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupID == "a" || groupID == "b" {
 		where = append(where, `EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`)
-		args = append(args, groupID)
+		whereArgs = append(whereArgs, groupID)
 	}
 	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" {
 		where = append(where, accountStatePredicate("a", status))
@@ -193,23 +213,23 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		where = append(where, "(a.name LIKE ? OR a.notes LIKE ? OR a.credential_hint LIKE ?)")
 		term := "%" + search + "%"
-		args = append(args, term, term, term)
+		whereArgs = append(whereArgs, term, term, term)
 	}
 	join := "LEFT JOIN usage_logs u ON u.account_id = a.id"
+	joinArgs := []any{}
+	if user := currentUser(r); user.Role == "user" {
+		join += " AND u.user_id = ?"
+		joinArgs = append(joinArgs, user.ID)
+	}
 	if from := normalizeDateStart(strings.TrimSpace(r.URL.Query().Get("from"))); from != "" {
 		join += " AND u.created_at >= ?"
-		args = append([]any{from}, args...)
+		joinArgs = append(joinArgs, from)
 	}
 	if to := normalizeDateEnd(strings.TrimSpace(r.URL.Query().Get("to"))); to != "" {
 		join += " AND u.created_at < ?"
-		insertAt := 0
-		if strings.Contains(join, "u.created_at >= ?") {
-			insertAt = 1
-		}
-		args = append(args, nil)
-		copy(args[insertAt+1:], args[insertAt:])
-		args[insertAt] = to
+		joinArgs = append(joinArgs, to)
 	}
+	args := append(joinArgs, whereArgs...)
 	var item accountSummary
 	query := `SELECT COUNT(DISTINCT a.id), COUNT(DISTINCT CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN a.id END), COUNT(u.id), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0) FROM accounts a ` + join + ` WHERE ` + strings.Join(where, " AND ")
 	if err := a.db.QueryRow(query, args...).Scan(&item.Accounts, &item.ActiveAccounts, &item.Requests, &item.InputTokens, &item.OutputTokens, &item.BilledCost, &item.ActualCost); err != nil {

@@ -35,8 +35,11 @@ type authorizationSummary struct {
 }
 
 type authorizationStats struct {
-	Summary authorizationSummary `json:"summary"`
-	Items   []authorizationLog   `json:"items"`
+	Summary    authorizationSummary `json:"summary"`
+	Items      []authorizationLog   `json:"items"`
+	Page       int                  `json:"page"`
+	PageSize   int                  `json:"page_size"`
+	TotalPages int                  `json:"total_pages"`
 }
 
 type dailyStat struct {
@@ -246,6 +249,11 @@ func (a *app) recordAuthorization(accountID, proxyID *int64, accountName, method
 func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 	where := []string{"1 = 1"}
 	args := []any{}
+	if user := currentUser(r); user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
+		where = append(where, `EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = authorization_logs.account_id AND `+condition+`)`)
+		args = append(args, scopeArgs...)
+	}
 	if from := normalizeDateStart(strings.TrimSpace(r.URL.Query().Get("from"))); from != "" {
 		where = append(where, "created_at >= ?")
 		args = append(args, from)
@@ -260,10 +268,7 @@ func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 	case "failed":
 		where = append(where, "success = 0")
 	}
-	limit := 300
-	if value, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && value > 0 {
-		limit = min(value, 1000)
-	}
+	page, pageSize, offset := paginationFromRequest(r, 20, 100)
 	clause := strings.Join(where, " AND ")
 	var result authorizationStats
 	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(success), 0) FROM authorization_logs WHERE `+clause, args...).Scan(&result.Summary.Total, &result.Summary.Successful); err != nil {
@@ -274,8 +279,10 @@ func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 	if result.Summary.Total > 0 {
 		result.Summary.SuccessRate = float64(result.Summary.Successful) * 100 / float64(result.Summary.Total)
 	}
-	queryArgs := append(append([]any{}, args...), limit)
-	rows, err := a.db.Query(`SELECT id, account_id, account_name, proxy_id, proxy_ip, method, success, status_message, subscription_type, client_ip, created_at FROM authorization_logs WHERE `+clause+` ORDER BY id DESC LIMIT ?`, queryArgs...)
+	result.Page, result.PageSize = page, pageSize
+	result.TotalPages = totalPages(result.Summary.Total, pageSize)
+	queryArgs := append(append([]any{}, args...), pageSize, offset)
+	rows, err := a.db.Query(`SELECT id, account_id, account_name, proxy_id, proxy_ip, method, success, status_message, subscription_type, client_ip, created_at FROM authorization_logs WHERE `+clause+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -299,6 +306,7 @@ func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
 	days := 30
 	if value, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && value > 0 {
 		days = min(value, 365)
@@ -309,7 +317,13 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 		date := time.Now().In(time.FixedZone("Asia/Shanghai", 8*60*60)).AddDate(0, 0, -index).Format("2006-01-02")
 		items[date] = &dailyStat{Date: date}
 	}
-	usageRows, err := a.db.Query(`SELECT date(created_at, '`+shanghaiOffset+`'), COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0) FROM usage_logs WHERE date(created_at, '`+shanghaiOffset+`') >= ? GROUP BY 1`, start)
+	usageWhere := `date(created_at, '` + shanghaiOffset + `') >= ?`
+	usageArgs := []any{start}
+	if user.Role == "user" {
+		usageWhere += ` AND user_id = ?`
+		usageArgs = append(usageArgs, user.ID)
+	}
+	usageRows, err := a.db.Query(`SELECT date(created_at, '`+shanghaiOffset+`'), COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0) FROM usage_logs WHERE `+usageWhere+` GROUP BY 1`, usageArgs...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -328,15 +342,22 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	usageRows.Close()
-	if err := a.mergeDailyAccountEvents(items, start, "onboarded", func(item *dailyStat, count int64) { item.AccountsOnboarded = count }); err != nil {
+	if err := a.mergeDailyAccountEvents(items, start, "onboarded", user, func(item *dailyStat, count int64) { item.AccountsOnboarded = count }); err != nil {
 		writeDBError(w, err)
 		return
 	}
-	if err := a.mergeDailyAccountEvents(items, start, "invalidated", func(item *dailyStat, count int64) { item.AccountsDied = count }); err != nil {
+	if err := a.mergeDailyAccountEvents(items, start, "invalidated", user, func(item *dailyStat, count int64) { item.AccountsDied = count }); err != nil {
 		writeDBError(w, err)
 		return
 	}
-	authRows, err := a.db.Query(`SELECT date(created_at, '`+shanghaiOffset+`'), COUNT(*), COALESCE(SUM(success), 0) FROM authorization_logs WHERE date(created_at, '`+shanghaiOffset+`') >= ? GROUP BY 1`, start)
+	authWhere := `date(created_at, '` + shanghaiOffset + `') >= ?`
+	authArgs := []any{start}
+	if user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
+		authWhere += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = authorization_logs.account_id AND ` + condition + `)`
+		authArgs = append(authArgs, scopeArgs...)
+	}
+	authRows, err := a.db.Query(`SELECT date(created_at, '`+shanghaiOffset+`'), COUNT(*), COALESCE(SUM(success), 0) FROM authorization_logs WHERE `+authWhere+` GROUP BY 1`, authArgs...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -362,11 +383,18 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (a *app) mergeDailyAccountEvents(items map[string]*dailyStat, start, eventType string, assign func(*dailyStat, int64)) error {
+func (a *app) mergeDailyAccountEvents(items map[string]*dailyStat, start, eventType string, user panelUser, assign func(*dailyStat, int64)) error {
 	if eventType != "onboarded" && eventType != "invalidated" {
 		return errors.New("invalid account event column")
 	}
-	rows, err := a.db.Query(`SELECT date(created_at, '`+shanghaiOffset+`'), COUNT(*) FROM account_lifecycle_events WHERE event_type = ? AND date(created_at, '`+shanghaiOffset+`') >= ? GROUP BY 1`, eventType, start)
+	where := `event_type = ? AND date(created_at, '` + shanghaiOffset + `') >= ?`
+	args := []any{eventType, start}
+	if user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
+		where += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = account_lifecycle_events.account_id AND ` + condition + `)`
+		args = append(args, scopeArgs...)
+	}
+	rows, err := a.db.Query(`SELECT date(created_at, '`+shanghaiOffset+`'), COUNT(*) FROM account_lifecycle_events WHERE `+where+` GROUP BY 1`, args...)
 	if err != nil {
 		return err
 	}

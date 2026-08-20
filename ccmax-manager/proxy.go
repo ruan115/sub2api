@@ -129,6 +129,11 @@ func (a *app) migrateProxyFeatures() error {
 			return fmt.Errorf("migrate proxy features: %w", err)
 		}
 	}
+	// In-flight counters are process leases. A previous process cannot release
+	// them after a crash or restart, so never carry them into this process.
+	if _, err := a.db.Exec(`DELETE FROM account_inflight`); err != nil {
+		return fmt.Errorf("reset stale account in-flight leases: %w", err)
+	}
 	columns := []struct{ name, definition string }{
 		{"proxy_pool_id", "INTEGER REFERENCES proxy_pools(id)"},
 		{"proxy_id", "INTEGER REFERENCES proxies(id)"},
@@ -221,7 +226,16 @@ func scanProxyPool(row scanner) (proxyPool, error) {
 }
 
 func (a *app) handleProxyPools(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(proxyPoolSelect + ` WHERE p.deleted_at IS NULL ORDER BY p.id`)
+	query := proxyPoolSelect + ` WHERE p.deleted_at IS NULL`
+	args := []any{}
+	user := currentUser(r)
+	if user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
+		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_pool_id = p.id AND scope_account.deleted_at IS NULL AND ` + condition + `)`
+		args = append(args, scopeArgs...)
+	}
+	query += ` ORDER BY p.id`
+	rows, err := a.db.Query(query, args...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -234,7 +248,7 @@ func (a *app) handleProxyPools(w http.ResponseWriter, r *http.Request) {
 			writeDBError(w, err)
 			return
 		}
-		if currentUser(r).Role == "readonly_admin" {
+		if user.Role != "admin" {
 			item.APIHeaders = "{}"
 			item.APIURL = redactProxyAPIURL(item.APIURL)
 		}
@@ -335,6 +349,11 @@ func scanProxy(row scanner) (proxyRecord, error) {
 func (a *app) handleProxies(w http.ResponseWriter, r *http.Request) {
 	query := proxySelect + ` WHERE x.deleted_at IS NULL`
 	args := []any{}
+	if user := currentUser(r); user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
+		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_id = x.id AND scope_account.deleted_at IS NULL AND ` + condition + `)`
+		args = append(args, scopeArgs...)
+	}
 	if poolID, _ := strconv.ParseInt(r.URL.Query().Get("pool_id"), 10, 64); poolID > 0 {
 		query += ` AND x.pool_id = ?`
 		args = append(args, poolID)

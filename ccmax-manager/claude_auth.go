@@ -505,9 +505,14 @@ func refreshClaudeToken(ctx context.Context, refreshToken, proxyURL string) (*cl
 }
 
 func (a *app) ensureGatewayAccountToken(ctx context.Context, account gatewayAccount) (gatewayAccount, error) {
-	if !gatewayTokenNeedsRefresh(account.CredentialsJSON) {
+	return a.refreshGatewayAccountToken(ctx, account, false)
+}
+
+func (a *app) refreshGatewayAccountToken(ctx context.Context, account gatewayAccount, force bool) (gatewayAccount, error) {
+	if !force && !gatewayTokenNeedsRefresh(account.CredentialsJSON) {
 		return account, nil
 	}
+	originalAccessToken := gatewayAccountAccessToken(account)
 	lockValue, _ := a.tokenLocks.LoadOrStore(account.ID, &sync.Mutex{})
 	lock := lockValue.(*sync.Mutex)
 	lock.Lock()
@@ -520,11 +525,18 @@ func (a *app) ensureGatewayAccountToken(ctx context.Context, account gatewayAcco
 	account.AuthType = latestAuthType
 	account.CredentialsJSON = latestCredentials
 	account.ProxyID = latestProxyID
-	if !gatewayTokenNeedsRefresh(account.CredentialsJSON) {
+	if force && gatewayAccountAccessToken(account) != originalAccessToken && !gatewayTokenNeedsRefresh(latestCredentials) {
+		return account, nil
+	}
+	if !force && !gatewayTokenNeedsRefresh(account.CredentialsJSON) {
 		return account, nil
 	}
 	credentials := decodeObject(account.CredentialsJSON)
 	refreshToken, _ := credentials["refresh_token"].(string)
+	if strings.TrimSpace(refreshToken) == "" {
+		a.markAccountReauth(account.ID, "OAuth access token was rejected and no refresh token is available")
+		return account, errors.New("OAuth account has no refresh token; reauthorization is required")
+	}
 	if !account.ProxyID.Valid {
 		return account, errors.New("CCMAX account must bind an active proxy")
 	}
@@ -549,6 +561,18 @@ func (a *app) ensureGatewayAccountToken(ctx context.Context, account gatewayAcco
 	}
 	account.CredentialsJSON = raw
 	return account, nil
+}
+
+func gatewayAccountHasRefreshToken(account gatewayAccount) bool {
+	credentials := decodeObject(account.CredentialsJSON)
+	refreshToken, _ := credentials["refresh_token"].(string)
+	return strings.TrimSpace(refreshToken) != ""
+}
+
+func gatewayAccountAccessToken(account gatewayAccount) string {
+	credentials := decodeObject(account.CredentialsJSON)
+	accessToken, _ := credentials["access_token"].(string)
+	return strings.TrimSpace(accessToken)
 }
 
 func gatewayTokenNeedsRefresh(credentialsJSON string) bool {

@@ -43,6 +43,8 @@ type app struct {
 	oauthSessions *oauthSessionStore
 	priceSync     *priceSyncController
 	tokenLocks    sync.Map
+	quotaLocks    sync.Map
+	budgetLocks   sync.Map
 	queueStates   sync.Map
 }
 
@@ -187,6 +189,8 @@ type modelPrice struct {
 }
 
 type usageInput struct {
+	UserID              int64    `json:"-"`
+	APIKeyID            int64    `json:"-"`
 	RequestID           string   `json:"request_id"`
 	PurposeKey          string   `json:"purpose_key"`
 	GroupID             string   `json:"group_id"`
@@ -203,6 +207,8 @@ type usageInput struct {
 
 type usageLog struct {
 	ID                    int64   `json:"id"`
+	UserID                *int64  `json:"user_id,omitempty"`
+	APIKeyID              *int64  `json:"api_key_id,omitempty"`
 	RequestID             string  `json:"request_id"`
 	PurposeKey            string  `json:"purpose_key"`
 	PurposeName           string  `json:"purpose_name"`
@@ -580,25 +586,39 @@ func (a *app) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (a *app) handleDashboard(w http.ResponseWriter, _ *http.Request) {
+func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
 	var result dashboard
-	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "normal")+` THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "unavailable")+` THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "error")+` THEN 1 ELSE 0 END), 0) FROM accounts WHERE deleted_at IS NULL`).Scan(&result.AccountsTotal, &result.AccountsActive, &result.AccountsUnavailable, &result.AccountsDead); err != nil {
+	accountScope, accountArgs := scopedAccountCondition(user, "accounts")
+	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "normal")+` THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "unavailable")+` THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "error")+` THEN 1 ELSE 0 END), 0) FROM accounts WHERE deleted_at IS NULL AND `+accountScope, accountArgs...).Scan(&result.AccountsTotal, &result.AccountsActive, &result.AccountsUnavailable, &result.AccountsDead); err != nil {
 		writeDBError(w, err)
 		return
 	}
 	var err error
 	result.Purposes, err = a.listPurposes()
+	result.Purposes = scopePurposes(user, result.Purposes)
 	if err == nil {
 		result.Groups, err = a.listGroups()
+		if err == nil {
+			result.Groups, err = a.scopeGroups(user, result.Groups)
+		}
+	}
+	usageScope := usageFilters{}
+	if user.Role == "user" {
+		usageScope.UserID = user.ID
 	}
 	if err == nil {
-		result.Today, err = a.queryTotals(startOfTodayUTC(), "")
+		usageScope.From = startOfTodayUTC()
+		result.Today, err = a.queryTotalsFiltered(usageScope)
 	}
 	if err == nil {
-		result.Month, err = a.queryTotals(startOfMonthUTC(), "")
+		usageScope.From = startOfMonthUTC()
+		result.Month, err = a.queryTotalsFiltered(usageScope)
 	}
 	if err == nil {
-		result.RecentUsage, err = a.listUsage(usageFilters{Limit: 8})
+		usageScope.From = ""
+		usageScope.Limit = 8
+		result.RecentUsage, err = a.listUsage(usageScope)
 	}
 	if err != nil {
 		writeDBError(w, err)
@@ -607,13 +627,40 @@ func (a *app) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (a *app) handleGroups(w http.ResponseWriter, _ *http.Request) {
+func (a *app) handleGroups(w http.ResponseWriter, r *http.Request) {
 	groups, err := a.listGroups()
+	if err == nil {
+		groups, err = a.scopeGroups(currentUser(r), groups)
+	}
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, groups)
+}
+
+func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
+	if user.Role != "user" {
+		return groups, nil
+	}
+	allowed := map[string]bool{}
+	for _, groupID := range scopedGroupIDs(user) {
+		allowed[groupID] = true
+	}
+	result := make([]group, 0, len(groups))
+	for _, item := range groups {
+		if !allowed[item.ID] {
+			continue
+		}
+		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0) FROM usage_logs WHERE group_id = ? AND user_id = ? AND created_at >= ?`, item.ID, user.ID, startOfMonthUTC()).Scan(&item.MonthBilledCost, &item.MonthActualCost); err != nil {
+			return nil, err
+		}
+		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND user_id = ? AND created_at >= ?`, item.ID, user.ID, startOfTodayUTC()).Scan(&item.TodayBilledCost); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, nil
 }
 
 func (a *app) listGroups() ([]group, error) {
@@ -686,13 +733,26 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *app) handlePurposes(w http.ResponseWriter, _ *http.Request) {
+func (a *app) handlePurposes(w http.ResponseWriter, r *http.Request) {
 	items, err := a.listPurposes()
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(w, http.StatusOK, scopePurposes(currentUser(r), items))
+}
+
+func scopePurposes(user panelUser, items []purpose) []purpose {
+	if user.Role != "user" {
+		return items
+	}
+	result := make([]purpose, 0, len(items))
+	for _, item := range items {
+		if userCanAccessGroup(user, item.ActiveGroupID) {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (a *app) listPurposes() ([]purpose, error) {
@@ -873,6 +933,12 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	query := accountSelect + ` WHERE a.deleted_at IS NULL`
 	args := []any{}
+	user := currentUser(r)
+	if user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "a")
+		query += ` AND ` + condition
+		args = append(args, scopeArgs...)
+	}
 	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupID == "a" || groupID == "b" {
 		query += ` AND EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`
 		args = append(args, groupID)
@@ -903,6 +969,15 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeDBError(w, err)
 			return
+		}
+		if user.Role == "user" {
+			visibleGroups := make([]string, 0, len(item.GroupIDs))
+			for _, groupID := range item.GroupIDs {
+				if userCanAccessGroup(user, groupID) {
+					visibleGroups = append(visibleGroups, groupID)
+				}
+			}
+			item.GroupIDs = visibleGroups
 		}
 		items = append(items, item)
 	}
@@ -1535,7 +1610,9 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 		}
 		item.ActualCost = money(*input.ActualCostOverride)
 	}
-	result, err := tx.Exec(`INSERT INTO usage_logs (request_id, purpose_id, purpose_key, purpose_name, group_id, account_id, account_name, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.RequestID, purposeID, item.PurposeKey, item.PurposeName, item.GroupID, item.AccountID, item.AccountName, item.Model, item.InputTokens, item.OutputTokens, item.CacheCreationTokens, item.CacheReadTokens, item.InputCost, item.OutputCost, item.CacheCreationCost, item.CacheReadCost, item.BaseCost, item.BilledCost, item.ActualCost, item.GroupRateMultiplier, item.AccountRateMultiplier, boolInt(item.Stream), item.DurationMS)
+	item.UserID = optionalID(input.UserID)
+	item.APIKeyID = optionalID(input.APIKeyID)
+	result, err := tx.Exec(`INSERT INTO usage_logs (user_id, api_key_id, request_id, purpose_id, purpose_key, purpose_name, group_id, account_id, account_name, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.APIKeyID, item.RequestID, purposeID, item.PurposeKey, item.PurposeName, item.GroupID, item.AccountID, item.AccountName, item.Model, item.InputTokens, item.OutputTokens, item.CacheCreationTokens, item.CacheReadTokens, item.InputCost, item.OutputCost, item.CacheCreationCost, item.CacheReadCost, item.BaseCost, item.BilledCost, item.ActualCost, item.GroupRateMultiplier, item.AccountRateMultiplier, boolInt(item.Stream), item.DurationMS)
 	if err != nil {
 		return usageLog{}, false, err
 	}
@@ -1556,14 +1633,24 @@ func (a *app) getUsageByRequestID(requestID string) (usageLog, error) {
 	return scanUsage(a.db.QueryRow(usageSelect+` WHERE request_id = ?`, requestID))
 }
 
-const usageSelect = `SELECT id, request_id, purpose_key, purpose_name, group_id, account_id, account_name, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms, created_at FROM usage_logs`
+const usageSelect = `SELECT id, user_id, api_key_id, request_id, purpose_key, purpose_name, group_id, account_id, account_name, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms, created_at FROM usage_logs`
 
 func scanUsage(row scanner) (usageLog, error) {
 	var item usageLog
 	var stream int
-	err := row.Scan(&item.ID, &item.RequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
+	var userID, apiKeyID sql.NullInt64
+	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.RequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
+	item.UserID = nullIntPointer(userID)
+	item.APIKeyID = nullIntPointer(apiKeyID)
 	item.Stream = stream == 1
 	return item, err
+}
+
+func optionalID(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }
 
 type usageFilters struct {
@@ -1572,17 +1659,28 @@ type usageFilters struct {
 	GroupID    string
 	PurposeKey string
 	AccountID  int64
+	UserID     int64
 	Limit      int
+	Offset     int
 }
 
 func (a *app) handleUsageList(w http.ResponseWriter, r *http.Request) {
 	filters := filtersFromRequest(r)
+	if user := currentUser(r); user.Role == "user" {
+		filters.UserID = user.ID
+	}
 	items, err := a.listUsage(filters)
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	total, err := a.countUsage(filters)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	page := filters.Offset/filters.Limit + 1
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": filters.Limit, "total_pages": totalPages(total, filters.Limit)})
 }
 
 func filtersFromRequest(r *http.Request) usageFilters {
@@ -1591,12 +1689,12 @@ func filtersFromRequest(r *http.Request) usageFilters {
 		To:         strings.TrimSpace(r.URL.Query().Get("to")),
 		GroupID:    strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))),
 		PurposeKey: strings.ToLower(strings.TrimSpace(r.URL.Query().Get("purpose_key"))),
-		Limit:      100,
+		Limit:      20,
 	}
 	filters.AccountID, _ = strconv.ParseInt(r.URL.Query().Get("account_id"), 10, 64)
-	if limit, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && limit > 0 {
-		filters.Limit = min(limit, 500)
-	}
+	page, pageSize, offset := paginationFromRequest(r, 20, 100)
+	filters.Limit, filters.Offset = pageSize, offset
+	_ = page
 	return filters
 }
 
@@ -1623,13 +1721,17 @@ func buildUsageWhere(filters usageFilters) (string, []any) {
 		conditions = append(conditions, "account_id = ?")
 		args = append(args, filters.AccountID)
 	}
+	if filters.UserID > 0 {
+		conditions = append(conditions, "user_id = ?")
+		args = append(args, filters.UserID)
+	}
 	return strings.Join(conditions, " AND "), args
 }
 
 func (a *app) listUsage(filters usageFilters) ([]usageLog, error) {
 	where, args := buildUsageWhere(filters)
-	args = append(args, filters.Limit)
-	rows, err := a.db.Query(usageSelect+` WHERE `+where+` ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
+	args = append(args, filters.Limit, filters.Offset)
+	rows, err := a.db.Query(usageSelect+` WHERE `+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1645,8 +1747,18 @@ func (a *app) listUsage(filters usageFilters) ([]usageLog, error) {
 	return items, rows.Err()
 }
 
+func (a *app) countUsage(filters usageFilters) (int64, error) {
+	where, args := buildUsageWhere(filters)
+	var total int64
+	err := a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE `+where, args...).Scan(&total)
+	return total, err
+}
+
 func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 	filters := filtersFromRequest(r)
+	if user := currentUser(r); user.Role == "user" {
+		filters.UserID = user.ID
+	}
 	if filters.From == "" {
 		filters.From = startOfMonthUTC()
 	}
@@ -1694,11 +1806,36 @@ func (a *app) queryBreakdown(where string, args []any, keyExpr, nameExpr string)
 }
 
 func (a *app) queryTotals(from, to string) (billingTotals, error) {
-	filters := usageFilters{From: from, To: to}
+	return a.queryTotalsFiltered(usageFilters{From: from, To: to})
+}
+
+func (a *app) queryTotalsFiltered(filters usageFilters) (billingTotals, error) {
 	where, args := buildUsageWhere(filters)
 	var totals billingTotals
 	err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0), COALESCE(SUM(base_cost), 0), COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0), COALESCE(SUM(billed_cost - actual_cost), 0) FROM usage_logs WHERE `+where, args...).Scan(&totals.Requests, &totals.InputTokens, &totals.OutputTokens, &totals.CacheTokens, &totals.BaseCost, &totals.BilledCost, &totals.ActualCost, &totals.Margin)
 	return totals, err
+}
+
+func paginationFromRequest(r *http.Request, defaultSize, maxSize int) (page, pageSize, offset int) {
+	page = 1
+	pageSize = defaultSize
+	if value, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && value > 0 {
+		page = value
+	}
+	if value, err := strconv.Atoi(r.URL.Query().Get("page_size")); err == nil && value > 0 {
+		pageSize = min(value, maxSize)
+	} else if value, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && value > 0 {
+		pageSize = min(value, maxSize)
+	}
+	offset = (page - 1) * pageSize
+	return page, pageSize, offset
+}
+
+func totalPages(total int64, pageSize int) int {
+	if total <= 0 || pageSize <= 0 {
+		return 1
+	}
+	return int((total + int64(pageSize) - 1) / int64(pageSize))
 }
 
 func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
@@ -1809,13 +1946,15 @@ func newRequestID() string {
 }
 
 func startOfTodayUTC() string {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Now().In(location)
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location).UTC().Format(time.RFC3339)
 }
 
 func startOfMonthUTC() string {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Now().In(location)
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, location).UTC().Format(time.RFC3339)
 }
 
 func normalizeDateStart(value string) string {

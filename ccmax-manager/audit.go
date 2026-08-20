@@ -204,6 +204,10 @@ func requestIP(r *http.Request) string {
 func (a *app) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	where := []string{"1 = 1"}
 	args := []any{}
+	if user := currentUser(r); user.Role == "user" {
+		where = append(where, "actor_user_id = ?")
+		args = append(args, user.ID)
+	}
 	if action := strings.TrimSpace(r.URL.Query().Get("action")); action != "" {
 		where = append(where, "action LIKE ?")
 		args = append(args, action+"%")
@@ -220,7 +224,15 @@ func (a *app) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		where = append(where, "created_at < ?")
 		args = append(args, to)
 	}
-	rows, err := a.db.Query(`SELECT id, actor_user_id, actor_username, actor_role, action, method, path, target_type, target_id, request_body, client_ip, user_agent, status_code, duration_ms, created_at FROM audit_logs WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT 500`, args...)
+	clause := strings.Join(where, " AND ")
+	var total int64
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE `+clause, args...).Scan(&total); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	page, pageSize, offset := paginationFromRequest(r, 20, 100)
+	queryArgs := append(append([]any{}, args...), pageSize, offset)
+	rows, err := a.db.Query(`SELECT id, actor_user_id, actor_username, actor_role, action, method, path, target_type, target_id, request_body, client_ip, user_agent, status_code, duration_ms, created_at FROM audit_logs WHERE `+clause+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -237,5 +249,5 @@ func (a *app) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		item.ActorUserID = actorID
 		items = append(items, item)
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages(total, pageSize)})
 }

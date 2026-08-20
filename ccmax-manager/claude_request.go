@@ -101,8 +101,17 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 	_, hasAccessToken := stringObjectValue(credentials, "access_token")
 	stream, _ := payload["stream"].(bool)
 	if accountRequestPassthrough(account) {
+		passthroughBody := append([]byte(nil), body...)
+		if countTokens {
+			sanitizeCountTokensPayload(payload)
+			var err error
+			passthroughBody, err = json.Marshal(payload)
+			if err != nil {
+				return claudePreparedRequest{}, fmt.Errorf("encode Anthropic count_tokens request: %w", err)
+			}
+		}
 		return claudePreparedRequest{
-			Body: append([]byte(nil), body...), Model: model, OAuth: hasAccessToken,
+			Body: passthroughBody, Model: model, OAuth: hasAccessToken,
 			Passthrough: true, Stream: stream, CountTokens: countTokens,
 		}, nil
 	}

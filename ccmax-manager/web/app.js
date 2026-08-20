@@ -26,6 +26,7 @@ const state = {
   batchResults: [],
   paginationPages: {},
   paginationSizes: {},
+  serverPagination: {},
   selectedAccountIDs: new Set(),
 };
 
@@ -118,6 +119,19 @@ function renderPagination(key, total, page, pageSize, totalPages) {
 }
 function paginatedItems(key, items) {
   const config = paginationTables[key];
+  const server = state.serverPagination[key];
+  if (server) {
+    state.paginationPages[key] = server.page;
+    state.paginationSizes[key] = server.pageSize;
+    renderPagination(
+      key,
+      server.total,
+      server.page,
+      server.pageSize,
+      server.totalPages,
+    );
+    return items;
+  }
   const pageSize = Number(state.paginationSizes[key] || config.size);
   const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
   const page = Math.min(
@@ -128,6 +142,30 @@ function paginatedItems(key, items) {
   state.paginationSizes[key] = pageSize;
   renderPagination(key, items.length, page, pageSize, totalPages);
   return items.slice((page - 1) * pageSize, page * pageSize);
+}
+
+function setServerPagination(key, payload) {
+  state.serverPagination[key] = {
+    total: Number(payload.total ?? payload.summary?.total ?? 0),
+    page: Number(payload.page || 1),
+    pageSize: Number(payload.page_size || paginationTables[key].size),
+    totalPages: Number(payload.total_pages || 1),
+  };
+}
+
+function paginationParams(key) {
+  return {
+    page: String(state.paginationPages[key] || 1),
+    page_size: String(
+      state.paginationSizes[key] || paginationTables[key].size,
+    ),
+  };
+}
+
+async function loadServerPage(key) {
+  if (key === "usage") return loadBilling();
+  if (key === "audit") return loadAudit();
+  if (key === "authorization") return loadAuthorization();
 }
 
 function refreshIcons() {
@@ -391,7 +429,7 @@ async function loadAccounts() {
 
 async function loadBilling() {
   if (!canView("billing")) return;
-  const params = new URLSearchParams({ limit: "500" });
+  const params = new URLSearchParams(paginationParams("usage"));
   for (const [key, selector] of [
     ["from", "#billing-from"],
     ["to", "#billing-to"],
@@ -400,10 +438,13 @@ async function loadBilling() {
   ])
     if ($(selector).value) params.set(key, $(selector).value);
   try {
-    [state.billing, state.usage] = await Promise.all([
+    const [billing, usage] = await Promise.all([
       api(`/api/billing?${params}`),
       api(`/api/usage?${params}`),
     ]);
+    state.billing = billing;
+    state.usage = usage.items;
+    setServerPagination("usage", usage);
     renderBilling();
   } catch (error) {
     toast(error.message, "error");
@@ -428,13 +469,15 @@ async function loadAccountSummary() {
 
 async function loadAudit() {
   if (!canView("audit")) return;
-  const params = new URLSearchParams();
+  const params = new URLSearchParams(paginationParams("audit"));
   if ($("#audit-actor").value) params.set("actor", $("#audit-actor").value);
   if ($("#audit-action").value) params.set("action", $("#audit-action").value);
   if ($("#audit-from").value) params.set("from", $("#audit-from").value);
   if ($("#audit-to").value) params.set("to", $("#audit-to").value);
   try {
-    state.audits = await api(`/api/audit-logs?${params}`);
+    const data = await api(`/api/audit-logs?${params}`);
+    state.audits = data.items;
+    setServerPagination("audit", data);
     renderAudit();
   } catch (error) {
     toast(error.message, "error");
@@ -453,7 +496,7 @@ async function loadDaily() {
 
 async function loadAuthorization() {
   if (!canView("authorization")) return;
-  const params = new URLSearchParams({ limit: "1000" });
+  const params = new URLSearchParams(paginationParams("authorization"));
   if ($("#authorization-status").value)
     params.set("status", $("#authorization-status").value);
   if ($("#authorization-from").value)
@@ -462,6 +505,7 @@ async function loadAuthorization() {
     params.set("to", $("#authorization-to").value);
   try {
     state.authorization = await api(`/api/authorization-logs?${params}`);
+    setServerPagination("authorization", state.authorization);
     renderAuthorization();
   } catch (error) {
     toast(error.message, "error");
@@ -839,7 +883,8 @@ function renderPriceSync() {
     `${item.model_count} 个模型 · 最近同步 ${dateTime(item.last_synced_at)} · 每 10 分钟自动检查`;
 }
 function renderAudit() {
-  $("#audit-count").textContent = `${state.audits.length} 条记录`;
+  const total = state.serverPagination.audit?.total ?? state.audits.length;
+  $("#audit-count").textContent = `${total} 条记录`;
   $("#audit-empty").hidden = state.audits.length > 0;
   const names = {
     "auth.login": "登录",
@@ -1266,7 +1311,8 @@ document.addEventListener("click", async (event) => {
     const key = target.dataset.paginationKey;
     state.paginationPages[key] =
       Number(state.paginationPages[key] || 1) + Number(target.dataset.pageStep);
-    paginationTables[key].render();
+    if (state.serverPagination[key]) await loadServerPage(key);
+    else paginationTables[key].render();
     return;
   }
   if (target.hasAttribute("data-close-dialog")) {
@@ -1468,13 +1514,14 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-document.addEventListener("change", (event) => {
+document.addEventListener("change", async (event) => {
   const select = event.target.closest("select[data-pagination-size]");
   if (!select) return;
   const key = select.dataset.paginationSize;
   state.paginationSizes[key] = Number(select.value);
   resetPagination(key);
-  paginationTables[key].render();
+  if (state.serverPagination[key]) await loadServerPage(key);
+  else paginationTables[key].render();
 });
 
 $("#login-form").addEventListener("submit", async (event) => {

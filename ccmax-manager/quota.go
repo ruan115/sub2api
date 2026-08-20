@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -55,10 +55,11 @@ func (a *app) handleAccountQuotaRefresh(w http.ResponseWriter, r *http.Request) 
 
 func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (accountQuota, error) {
 	var authType, credentialsJSON string
+	var proxyID sql.NullInt64
 	var stored accountQuota
 	var fiveReset, sevenReset, sampled sql.NullString
-	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at, quota_sampled_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
-		Scan(&authType, &credentialsJSON, &stored.FiveHour.Utilization, &fiveReset, &stored.SevenDay.Utilization, &sevenReset, &sampled); err != nil {
+	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, proxy_id, quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at, quota_sampled_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+		Scan(&authType, &credentialsJSON, &proxyID, &stored.FiveHour.Utilization, &fiveReset, &stored.SevenDay.Utilization, &sevenReset, &sampled); err != nil {
 		return accountQuota{}, err
 	}
 	stored.Source = "passive"
@@ -68,57 +69,71 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 	if authType != "oauth" {
 		return stored, nil
 	}
-	credentials := decodeObject(credentialsJSON)
-	accessToken, _ := credentials["access_token"].(string)
-	if accessToken == "" {
-		a.markAccountReauth(accountID, "account has no OAuth access token")
-		return accountQuota{}, errors.New("account has no OAuth access token; reauthorization is required")
-	}
-	proxyURL, err := a.accountProxyString(accountID)
+	account := gatewayAccount{ID: accountID, AuthType: authType, CredentialsJSON: credentialsJSON, ProxyID: proxyID}
+	account, err := a.ensureGatewayAccountToken(ctx, account)
 	if err != nil {
 		return accountQuota{}, err
 	}
-	proxy, err := parseProxyURL(proxyURL)
+	if !account.ProxyID.Valid {
+		return accountQuota{}, errors.New("CCMAX account must bind an active proxy")
+	}
+	proxy, err := a.proxyURL(account.ProxyID.Int64)
 	if err != nil {
-		return accountQuota{}, err
+		return accountQuota{}, errors.New("CCMAX account proxy is unavailable")
 	}
 	client, err := clientForProxy(proxy)
 	if err != nil {
 		return accountQuota{}, err
 	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
-	request.Header.Set("Accept", "application/json, text/plain, */*")
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+accessToken)
-	request.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	request.Header.Set("User-Agent", "claude-code/2.1.7")
-	response, err := client.Do(request)
-	if err != nil {
-		return accountQuota{}, fmt.Errorf("fetch account quota: %w", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		credentials := decodeObject(account.CredentialsJSON)
+		accessToken, _ := credentials["access_token"].(string)
+		if strings.TrimSpace(accessToken) == "" {
+			a.markAccountReauth(accountID, "account has no OAuth access token")
+			return accountQuota{}, errors.New("account has no OAuth access token; reauthorization is required")
+		}
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
+		request.Header.Set("Accept", "application/json, text/plain, */*")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		request.Header.Set("User-Agent", "claude-code/2.1.7")
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			return accountQuota{}, fmt.Errorf("fetch account quota: %w", requestErr)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		response.Body.Close()
+		if readErr != nil {
+			return accountQuota{}, fmt.Errorf("read Anthropic quota: %w", readErr)
+		}
+		if response.StatusCode == http.StatusUnauthorized && gatewayAccountHasRefreshToken(account) && attempt == 0 {
+			refreshed, refreshErr := a.refreshGatewayAccountToken(ctx, account, true)
+			if refreshErr == nil {
+				account = refreshed
+				continue
+			}
+		}
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			a.captureAccountUpstreamFailure(account, response.StatusCode, body)
+			return accountQuota{}, fmt.Errorf("Anthropic usage API authorization failed (status %d)", response.StatusCode)
+		}
+		if response.StatusCode != http.StatusOK {
+			return accountQuota{}, fmt.Errorf("Anthropic usage API returned status %d", response.StatusCode)
+		}
+		var upstream claudeUsageResponse
+		if err := json.Unmarshal(body, &upstream); err != nil {
+			return accountQuota{}, fmt.Errorf("decode Anthropic quota: %w", err)
+		}
+		quota := accountQuota{Source: "active", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		quota.FiveHour = quotaWindow{Utilization: upstream.FiveHour.Utilization, ResetsAt: normalizeUpstreamTime(upstream.FiveHour.ResetsAt)}
+		quota.SevenDay = quotaWindow{Utilization: upstream.SevenDay.Utilization, ResetsAt: normalizeUpstreamTime(upstream.SevenDay.ResetsAt)}
+		if err := a.persistAccountQuota(accountID, quota, true); err != nil {
+			return accountQuota{}, err
+		}
+		return quota, nil
 	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		a.markAccountReauth(accountID, "Anthropic OAuth authorization expired")
-		return accountQuota{}, errors.New("Anthropic authorization expired; reauthorization is required")
-	}
-	if response.StatusCode != http.StatusOK {
-		return accountQuota{}, fmt.Errorf("Anthropic usage API returned status %d", response.StatusCode)
-	}
-	var upstream claudeUsageResponse
-	if err := json.NewDecoder(response.Body).Decode(&upstream); err != nil {
-		return accountQuota{}, fmt.Errorf("decode Anthropic quota: %w", err)
-	}
-	quota := accountQuota{Source: "active", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	quota.FiveHour = quotaWindow{Utilization: upstream.FiveHour.Utilization, ResetsAt: normalizeUpstreamTime(upstream.FiveHour.ResetsAt)}
-	quota.SevenDay = quotaWindow{Utilization: upstream.SevenDay.Utilization, ResetsAt: normalizeUpstreamTime(upstream.SevenDay.ResetsAt)}
-	if err := a.persistAccountQuota(accountID, quota, true); err != nil {
-		return accountQuota{}, err
-	}
-	return quota, nil
-}
-
-func parseProxyURL(raw string) (*url.URL, error) {
-	return url.Parse(raw)
+	return accountQuota{}, errors.New("Anthropic usage API authorization failed")
 }
 
 func normalizeUpstreamTime(raw string) string {
@@ -212,10 +227,6 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 	if response == nil {
 		return
 	}
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		a.markAccountReauth(accountID, "upstream rejected the account authorization")
-		return
-	}
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		_, _ = a.db.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, accountID)
 	}
@@ -231,4 +242,42 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 			_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, updated_at = `+nowSQL+` WHERE id = ?`, value, accountID)
 		}
 	}
+}
+
+func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, body []byte) {
+	message := strings.TrimSpace(upstreamErrorMessage(body))
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	switch status {
+	case http.StatusUnauthorized:
+		if !gatewayAccountHasRefreshToken(account) {
+			a.markAccountReauth(account.ID, "upstream authentication failed: "+message)
+			return
+		}
+		until := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, "OAuth refresh temporarily failed: "+message, "OAuth refresh temporarily failed: "+message, account.ID)
+	case http.StatusForbidden:
+		until := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
+		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, "upstream access forbidden: "+message, "upstream access forbidden: "+message, account.ID)
+	}
+}
+
+func upstreamErrorMessage(body []byte) string {
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return string(body)
+	}
+	if value, ok := payload["error"].(map[string]any); ok {
+		if message, ok := value["message"].(string); ok {
+			return message
+		}
+	}
+	if message, ok := payload["message"].(string); ok {
+		return message
+	}
+	return ""
 }

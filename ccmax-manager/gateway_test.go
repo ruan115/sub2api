@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -342,6 +344,131 @@ func TestGatewayNeverDispatchesWithoutAnActiveProxy(t *testing.T) {
 	}
 }
 
+func TestPassthroughCountTokensStillRemovesGenerationFields(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- body
+		_, _ = w.Write([]byte(`{"input_tokens":12}`))
+	}))
+	defer upstream.Close()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "passthrough-count", upstream.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
+
+	requestJSON(t, handler, http.MethodPost, "/v1/messages/count_tokens", map[string]any{
+		"model": "claude-test", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		"max_tokens": 512, "stream": true, "temperature": 0.7, "custom_parameter": map[string]any{"keep": true},
+	}, nil, key.Key, http.StatusOK, nil)
+	body := <-captured
+	for _, field := range []string{"max_tokens", "stream", "temperature"} {
+		if _, ok := body[field]; ok {
+			t.Fatalf("passthrough count_tokens retained %s: %#v", field, body)
+		}
+	}
+	if custom, _ := body["custom_parameter"].(map[string]any); custom["keep"] != true {
+		t.Fatalf("custom passthrough field changed: %#v", body)
+	}
+}
+
+func TestGatewayTruncatedStreamEmitsErrorAndRecordsPartialUsage(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("request-id", "req-truncated-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"cache_read_input_tokens\":2}}}\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n")
+	}))
+	defer upstream.Close()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "truncated-stream", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "upstream_disconnected") {
+		t.Fatalf("truncated stream response=%d %s", response.Code, response.Body.String())
+	}
+	var input, output, cacheRead int64
+	if err := a.db.QueryRow(`SELECT input_tokens, output_tokens, cache_read_tokens FROM usage_logs WHERE request_id = 'req-truncated-stream'`).Scan(&input, &output, &cacheRead); err != nil {
+		t.Fatal(err)
+	}
+	if input != 9 || output != 3 || cacheRead != 2 {
+		t.Fatalf("partial usage=%d/%d/%d", input, output, cacheRead)
+	}
+}
+
+func TestGatewayUnauthorizedRefreshesAndRetriesSameAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		if r.Header.Get("Authorization") == "Bearer stale-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"message":"expired access token"}}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer fresh-token" {
+			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("request-id", "req-refreshed")
+		_, _ = w.Write([]byte(`{"id":"msg_refreshed","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600,"token_type":"bearer"}`))
+	}))
+	defer tokenServer.Close()
+	previousEndpoint := claudeTokenEndpoint
+	claudeTokenEndpoint = tokenServer.URL
+	t.Cleanup(func() { claudeTokenEndpoint = previousEndpoint })
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "refresh-on-401", upstream.URL, 0, nil, map[string]any{
+		"access_token": "stale-token", "refresh_token": "refresh-token", "expires_at": time.Now().Add(time.Hour).Unix(),
+	})
+	var response map[string]any
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-test", "max_tokens": 8, "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}, nil, key.Key, http.StatusOK, &response)
+	if response["id"] != "msg_refreshed" || upstreamCalls.Load() != 2 {
+		t.Fatalf("response=%#v upstream calls=%d", response, upstreamCalls.Load())
+	}
+	var authStatus, credentials string
+	if err := a.db.QueryRow(`SELECT auth_status, credentials_json FROM accounts WHERE id = ?`, created.ID).Scan(&authStatus, &credentials); err != nil {
+		t.Fatal(err)
+	}
+	if authStatus != "valid" || !strings.Contains(credentials, "fresh-token") {
+		t.Fatalf("account auth=%s credentials=%s", authStatus, credentials)
+	}
+}
+
+func TestSerialQueueTimeoutIsReturned(t *testing.T) {
+	previous := gatewaySerialQueueTimeout
+	gatewaySerialQueueTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { gatewaySerialQueueTimeout = previous })
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	_ = handler
+	account := gatewayAccount{ID: 99, UserMsgQueueMode: "serial", BaseRPM: 15}
+	release, err := a.acquireUserMessageQueue(context.Background(), account, []byte(`{"messages":[{"role":"user","content":"one"}]}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := a.acquireUserMessageQueue(context.Background(), account, []byte(`{"messages":[{"role":"user","content":"two"}]}`), false); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queue timeout err=%v", err)
+	}
+}
+
 func TestConcurrentTokenRefreshUsesSingleUpstreamCall(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var calls atomic.Int32
@@ -385,6 +512,78 @@ func TestConcurrentTokenRefreshUsesSingleUpstreamCall(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("refresh calls=%d, want 1", calls.Load())
+	}
+}
+
+func TestConcurrentForcedTokenRefreshUsesSingleUpstreamCall(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"forced-token","refresh_token":"forced-refresh","expires_in":3600,"token_type":"bearer"}`))
+	}))
+	defer server.Close()
+	previousEndpoint := claudeTokenEndpoint
+	claudeTokenEndpoint = server.URL
+	defer func() { claudeTokenEndpoint = previousEndpoint }()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "forced-refresh", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "rejected-token", "refresh_token": "old-refresh", "expires_at": time.Now().Add(time.Hour).Unix()},
+		"extra":       map[string]any{}, "status": "active", "schedulable": true, "concurrency": 10, "priority": 0, "rate_multiplier": 1, "group_ids": []string{"a"},
+		"proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+	base := gatewayAccount{ID: created.ID, AuthType: "oauth", CredentialsJSON: `{"access_token":"rejected-token","refresh_token":"old-refresh"}`}
+	var wait sync.WaitGroup
+	errorsCh := make(chan error, 8)
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := a.refreshGatewayAccountToken(context.Background(), base, true)
+			errorsCh <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("forced refresh calls=%d, want 1", calls.Load())
+	}
+}
+
+func TestGatewayRetryRecordsRateLimitReset(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	reset := time.Now().UTC().Add(time.Hour).Unix()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "1")
+		w.Header().Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset, 10))
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"message":"rate limited"}}`))
+	}))
+	defer upstream.Close()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "rate-limited", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-test", "max_tokens": 8, "messages": []map[string]string{{"role": "user", "content": "hello"}},
+	}, nil, key.Key, http.StatusTooManyRequests, nil)
+	var resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&resetAt); err != nil {
+		t.Fatal(err)
+	}
+	if !resetAt.Valid || resetAt.String == "" {
+		t.Fatal("429 response did not persist a rate-limit reset")
 	}
 }
 

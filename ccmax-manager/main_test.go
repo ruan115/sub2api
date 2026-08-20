@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -525,8 +526,11 @@ func TestAuditLogsLoginMutationsAndRedactsSecrets(t *testing.T) {
 		"username": "logged-user", "name": "Logged", "password": "private-password", "role": "user",
 		"status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 0,
 	}, cookie, "", http.StatusCreated, nil)
-	var logs []auditLog
-	requestJSON(t, handler, http.MethodGet, "/api/audit-logs", nil, cookie, "", http.StatusOK, &logs)
+	var page struct {
+		Items []auditLog `json:"items"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/audit-logs", nil, cookie, "", http.StatusOK, &page)
+	logs := page.Items
 	var loginSeen, createSeen bool
 	for _, item := range logs {
 		switch item.Action {
@@ -541,6 +545,230 @@ func TestAuditLogsLoginMutationsAndRedactsSecrets(t *testing.T) {
 	}
 	if !loginSeen || !createSeen {
 		t.Fatalf("audit logs missing login=%v create=%v: %+v", loginSeen, createSeen, logs)
+	}
+}
+
+func TestAuditLogsUseServerSidePagination(t *testing.T) {
+	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	cookie := loginCookie(t, handler, "admin", "admin-password")
+	for index := 0; index < 25; index++ {
+		a.insertAudit(panelUser{Username: "admin", Role: "admin"}, "test.event", http.MethodPost, "/api/test", "test", strconv.Itoa(index), "{}", "127.0.0.1", "test", http.StatusOK, 1)
+	}
+	var page struct {
+		Items      []auditLog `json:"items"`
+		Total      int64      `json:"total"`
+		Page       int        `json:"page"`
+		PageSize   int        `json:"page_size"`
+		TotalPages int        `json:"total_pages"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/audit-logs?action=test.event&page=2&page_size=10", nil, cookie, "", http.StatusOK, &page)
+	if page.Total != 25 || page.Page != 2 || page.PageSize != 10 || page.TotalPages != 3 || len(page.Items) != 10 {
+		t.Fatalf("audit page=%+v", page)
+	}
+}
+
+func TestStartupClearsStaleAccountInflightLeases(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	databasePath := filepath.Join(t.TempDir(), "test.db")
+	a, err := newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := a.db.Exec(`INSERT INTO accounts (name) VALUES ('stale-inflight')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	if _, err := a.db.Exec(`INSERT INTO account_inflight (account_id, requests) VALUES (?, 1)`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.db.Close()
+	var count int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM account_inflight`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale in-flight rows=%d", count)
+	}
+}
+
+func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
+	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	adminCookie := loginCookie(t, handler, "admin", "admin-password")
+	var userA, userB panelUser
+	pages := []string{"overview", "accounts", "daily", "authorization", "proxies", "access", "billing", "audit"}
+	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "tenant-a", "name": "Tenant A", "password": "tenant-password", "role": "user",
+		"status": "active", "allowed_group_ids": []string{"a"}, "visible_pages": pages, "rpm_limit": 0,
+	}, adminCookie, "", http.StatusCreated, &userA)
+	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "tenant-b", "name": "Tenant B", "password": "tenant-password", "role": "user",
+		"status": "active", "allowed_group_ids": []string{"b"}, "visible_pages": pages, "rpm_limit": 0,
+	}, adminCookie, "", http.StatusCreated, &userB)
+
+	createAccount := func(name, groupID string) account {
+		proxyID := createTestForwardProxy(t, a)
+		var created account
+		requestJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": name, "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": "token-" + groupID}, "extra": map[string]any{},
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 1, "group_ids": []string{groupID}, "proxy_pool_id": 1, "proxy_id": proxyID,
+		}, adminCookie, "", http.StatusCreated, &created)
+		return created
+	}
+	accountA := createAccount("account-a", "a")
+	accountB := createAccount("account-b", "b")
+	if _, err := a.db.Exec(`INSERT INTO account_groups (account_id, group_id, priority) VALUES (?, 'b', 10)`, accountA.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.recordUsage(usageInput{UserID: userA.ID, RequestID: "tenant-a-usage", PurposeKey: "default", GroupID: "a", AccountID: accountA.ID, Model: "claude-test", InputTokens: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.recordUsage(usageInput{UserID: userB.ID, RequestID: "tenant-b-usage", PurposeKey: "default", GroupID: "b", AccountID: accountB.ID, Model: "claude-test", InputTokens: 200}); err != nil {
+		t.Fatal(err)
+	}
+	a.recordAuthorization(&accountA.ID, accountA.ProxyID, accountA.Name, "test", true, "ok", "max", "127.0.0.1")
+	a.recordAuthorization(&accountB.ID, accountB.ProxyID, accountB.Name, "test", true, "ok", "max", "127.0.0.1")
+	a.insertAudit(userA, "tenant-a.event", http.MethodGet, "/api/test", "test", "a", "{}", "127.0.0.1", "ok", http.StatusOK, 1)
+	a.insertAudit(userB, "tenant-b.event", http.MethodGet, "/api/test", "test", "b", "{}", "127.0.0.1", "ok", http.StatusOK, 1)
+
+	userCookie := loginCookie(t, handler, "tenant-a", "tenant-password")
+	var accounts []account
+	requestJSON(t, handler, http.MethodGet, "/api/accounts", nil, userCookie, "", http.StatusOK, &accounts)
+	if len(accounts) != 1 || accounts[0].ID != accountA.ID || len(accounts[0].GroupIDs) != 1 || accounts[0].GroupIDs[0] != "a" {
+		t.Fatalf("scoped accounts=%+v", accounts)
+	}
+	var summary accountSummary
+	requestJSON(t, handler, http.MethodGet, "/api/accounts/summary", nil, userCookie, "", http.StatusOK, &summary)
+	if summary.Accounts != 1 || summary.Requests != 1 {
+		t.Fatalf("scoped account summary=%+v", summary)
+	}
+	var dashboard dashboard
+	requestJSON(t, handler, http.MethodGet, "/api/dashboard", nil, userCookie, "", http.StatusOK, &dashboard)
+	if dashboard.AccountsTotal != 1 || len(dashboard.Groups) != 1 || dashboard.Groups[0].ID != "a" || dashboard.Today.Requests != 1 {
+		t.Fatalf("scoped dashboard=%+v", dashboard)
+	}
+	var proxies []proxyRecord
+	requestJSON(t, handler, http.MethodGet, "/api/proxies", nil, userCookie, "", http.StatusOK, &proxies)
+	if len(proxies) != 1 || accountA.ProxyID == nil || proxies[0].ID != *accountA.ProxyID {
+		t.Fatalf("scoped proxies=%+v", proxies)
+	}
+	var usagePage struct {
+		Items []usageLog `json:"items"`
+		Total int64      `json:"total"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/usage", nil, userCookie, "", http.StatusOK, &usagePage)
+	if usagePage.Total != 1 || len(usagePage.Items) != 1 || usagePage.Items[0].RequestID != "tenant-a-usage" {
+		t.Fatalf("scoped usage=%+v", usagePage)
+	}
+	var authorization authorizationStats
+	requestJSON(t, handler, http.MethodGet, "/api/authorization-logs", nil, userCookie, "", http.StatusOK, &authorization)
+	if authorization.Summary.Total != 1 || len(authorization.Items) != 1 || authorization.Items[0].AccountID == nil || *authorization.Items[0].AccountID != accountA.ID {
+		t.Fatalf("scoped authorization=%+v", authorization)
+	}
+	var audits struct {
+		Items []auditLog `json:"items"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/audit-logs", nil, userCookie, "", http.StatusOK, &audits)
+	for _, item := range audits.Items {
+		if item.ActorUserID == nil || *item.ActorUserID != userA.ID {
+			t.Fatalf("unscoped audit item=%+v", item)
+		}
+	}
+}
+
+func TestGatewayEnforcesGroupBillingLimit(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		_, _ = w.Write([]byte(`{"id":"unexpected"}`))
+	}))
+	defer upstream.Close()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	account := createGatewayTestAccount(t, a, handler, "budget", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+	if _, _, err := a.recordUsage(usageInput{UserID: key.UserID, APIKeyID: key.ID, RequestID: "budget-spent", PurposeKey: "default", GroupID: "a", AccountID: account.ID, Model: "claude-test", InputTokens: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET daily_limit_usd = 0.000001, monthly_limit_usd = 100 WHERE id = 'a'`); err != nil {
+		t.Fatal(err)
+	}
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-test", "max_tokens": 8, "messages": []map[string]string{{"role": "user", "content": "hello"}},
+	}, nil, key.Key, http.StatusForbidden, nil)
+	if upstreamCalls != 0 {
+		t.Fatalf("group budget allowed %d upstream calls", upstreamCalls)
+	}
+}
+
+func TestConcurrentRequestsDoNotOverrunAPIKeyQuota(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var requestNumber int
+	var requestMu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestMu.Lock()
+		requestNumber++
+		current := requestNumber
+		requestMu.Unlock()
+		w.Header().Set("request-id", "quota-"+strconv.Itoa(current))
+		_, _ = w.Write([]byte(`{"id":"msg","usage":{"input_tokens":100,"output_tokens":100}}`))
+	}))
+	defer upstream.Close()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	if _, err := a.db.Exec(`UPDATE api_keys SET quota = 0.0001 WHERE id = ?`, key.ID); err != nil {
+		t.Fatal(err)
+	}
+	createGatewayTestAccount(t, a, handler, "quota", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	var wait sync.WaitGroup
+	for index := 0; index < 2; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			body := bytes.NewBufferString(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`)
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+			request.Header.Set("Authorization", "Bearer "+key.Key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			statuses <- response.Code
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(statuses)
+	counts := map[int]int{}
+	for status := range statuses {
+		counts[status]++
+	}
+	if counts[http.StatusOK] != 1 || counts[http.StatusForbidden] != 1 || requestNumber != 1 {
+		t.Fatalf("statuses=%v upstream requests=%d", counts, requestNumber)
 	}
 }
 

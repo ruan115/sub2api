@@ -14,6 +14,8 @@ type gatewayQueueState struct {
 	last   time.Time
 }
 
+var gatewaySerialQueueTimeout = 2 * time.Minute
+
 func (a *app) acquireUserMessageQueue(ctx context.Context, account gatewayAccount, body []byte, countTokens bool) (func(), error) {
 	noop := func() {}
 	if countTokens || account.UserMsgQueueMode == "" || account.UserMsgQueueMode == "off" || !isRealUserMessage(body) {
@@ -28,7 +30,7 @@ func (a *app) acquireUserMessageQueue(ctx context.Context, account gatewayAccoun
 	if account.UserMsgQueueMode != "serial" {
 		return noop, nil
 	}
-	timer := time.NewTimer(2 * time.Minute)
+	timer := time.NewTimer(gatewaySerialQueueTimeout)
 	defer timer.Stop()
 	select {
 	case state.serial <- struct{}{}:

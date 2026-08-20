@@ -305,6 +305,44 @@ func currentUser(r *http.Request) panelUser {
 	return user
 }
 
+func scopedGroupIDs(user panelUser) []string {
+	if user.Role != "user" {
+		return []string{"a", "b"}
+	}
+	return uniqueGroups(user.AllowedGroupIDs)
+}
+
+func scopedGroupCondition(user panelUser, column string) (string, []any) {
+	groups := scopedGroupIDs(user)
+	if len(groups) == 0 {
+		return "0 = 1", nil
+	}
+	placeholders := make([]string, len(groups))
+	args := make([]any, len(groups))
+	for index, groupID := range groups {
+		placeholders[index] = "?"
+		args[index] = groupID
+	}
+	return column + " IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
+func scopedAccountCondition(user panelUser, accountAlias string) (string, []any) {
+	if user.Role != "user" {
+		return "1 = 1", nil
+	}
+	condition, args := scopedGroupCondition(user, "scope_ag.group_id")
+	return "EXISTS (SELECT 1 FROM account_groups scope_ag WHERE scope_ag.account_id = " + accountAlias + ".id AND " + condition + ")", args
+}
+
+func userCanAccessGroup(user panelUser, groupID string) bool {
+	for _, allowed := range scopedGroupIDs(user) {
+		if allowed == groupID {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *app) userBySession(token string) (panelUser, error) {
 	return a.scanUser(a.db.QueryRow(`SELECT u.id, u.username, u.name, u.role, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.rpm_limit, u.created_at, u.updated_at
 		FROM panel_sessions s JOIN users u ON u.id = s.user_id

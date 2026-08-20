@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,6 +56,10 @@ type tokenUsage struct {
 	CacheRead     int64
 }
 
+func (u tokenUsage) hasUsage() bool {
+	return u.Input > 0 || u.Output > 0 || u.CacheCreation > 0 || u.CacheRead > 0
+}
+
 func (a *app) handleMessages(w http.ResponseWriter, r *http.Request) {
 	a.handleClaudeGateway(w, r, false)
 }
@@ -80,6 +86,16 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		writeError(w, http.StatusUnauthorized, "invalid or unavailable API key")
 		return
 	}
+	quotaRelease := func() {}
+	if key.Quota > 0 {
+		quotaRelease = a.acquireGatewayQuotaLock(key.ID)
+		defer quotaRelease()
+		key, err = a.authenticateGatewayKey(secret)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid or unavailable API key")
+			return
+		}
+	}
 	if key.Quota > 0 && key.QuotaUsed >= key.Quota {
 		writeError(w, http.StatusForbidden, "API key quota exhausted")
 		return
@@ -87,6 +103,18 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	if ok := groupAllowedJSON(key.UserRole, key.Allowed, key.GroupID); !ok {
 		writeError(w, http.StatusForbidden, "API key group is no longer allowed")
 		return
+	}
+	if !countTokens {
+		budgetRelease, lockErr := a.acquireGatewayBudgetLock(key.GroupID)
+		if lockErr != nil {
+			writeError(w, http.StatusForbidden, lockErr.Error())
+			return
+		}
+		defer budgetRelease()
+		if err := a.checkGatewayGroupBudget(key.GroupID); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
 	if err != nil {
@@ -104,6 +132,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	}
 	session := messageSession(r, envelope.Metadata)
 	excluded := map[int64]bool{}
+	refreshedAfterUnauthorized := map[int64]bool{}
 	var lastFailure *gatewayUpstreamFailure
 	var lastDispatchError error
 	for attempt := 0; attempt < gatewayMaxAttempts(); attempt++ {
@@ -164,8 +193,11 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			continue
 		}
 		queueRelease, queueErr := a.acquireUserMessageQueue(r.Context(), account, body, countTokens)
-		if queueErr != nil && r.Context().Err() != nil {
+		if queueErr != nil {
 			a.releaseGatewayAccount(account.ID)
+			if r.Context().Err() == nil {
+				writeError(w, http.StatusTooManyRequests, "user message queue wait timed out")
+			}
 			return
 		}
 		started := time.Now()
@@ -181,21 +213,34 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 			response.Body.Close()
 			a.releaseGatewayAccount(account.ID)
+			if response.StatusCode == http.StatusUnauthorized && gatewayAccountHasRefreshToken(account) && !refreshedAfterUnauthorized[account.ID] {
+				refreshedAfterUnauthorized[account.ID] = true
+				if _, refreshErr := a.refreshGatewayAccountToken(r.Context(), account, true); refreshErr == nil {
+					delete(excluded, account.ID)
+					continue
+				}
+			}
+			a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 			lastFailure = &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}
 			continue
 		}
 		usage, forwardErr := forwardGatewayResponse(w, response, prepared.Stream && !countTokens, account, key.GroupID)
 		response.Body.Close()
 		a.releaseGatewayAccount(account.ID)
-		if forwardErr != nil {
-			return
-		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			if countTokens {
+				if forwardErr != nil {
+					return
+				}
 				_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
 				return
 			}
-			a.recordGatewayUsage(key, account, envelope.Model, prepared.Stream, response.Header.Get("request-id"), usage, started)
+			if forwardErr == nil || usage.hasUsage() {
+				a.recordGatewayUsage(key, account, envelope.Model, prepared.Stream, response.Header.Get("request-id"), usage, started)
+			}
+		}
+		if forwardErr != nil {
+			return
 		}
 		return
 	}
@@ -216,6 +261,53 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 	}
 	writeError(w, status, message)
+}
+
+func (a *app) acquireGatewayQuotaLock(keyID int64) func() {
+	value, _ := a.quotaLocks.LoadOrStore(keyID, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
+func (a *app) acquireGatewayBudgetLock(groupID string) (func(), error) {
+	var dailyLimit, monthlyLimit sql.NullFloat64
+	if err := a.db.QueryRow(`SELECT daily_limit_usd, monthly_limit_usd FROM groups WHERE id = ? AND status = 'active'`, groupID).Scan(&dailyLimit, &monthlyLimit); err != nil {
+		return nil, errors.New("API key group is unavailable")
+	}
+	if (!dailyLimit.Valid || dailyLimit.Float64 <= 0) && (!monthlyLimit.Valid || monthlyLimit.Float64 <= 0) {
+		return func() {}, nil
+	}
+	value, _ := a.budgetLocks.LoadOrStore(groupID, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock, nil
+}
+
+func (a *app) checkGatewayGroupBudget(groupID string) error {
+	var dailyLimit, monthlyLimit sql.NullFloat64
+	if err := a.db.QueryRow(`SELECT daily_limit_usd, monthly_limit_usd FROM groups WHERE id = ? AND status = 'active'`, groupID).Scan(&dailyLimit, &monthlyLimit); err != nil {
+		return errors.New("API key group is unavailable")
+	}
+	if dailyLimit.Valid && dailyLimit.Float64 > 0 {
+		var spent float64
+		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, groupID, startOfTodayUTC()).Scan(&spent); err != nil {
+			return err
+		}
+		if spent >= dailyLimit.Float64 {
+			return errors.New("group daily billing limit reached")
+		}
+	}
+	if monthlyLimit.Valid && monthlyLimit.Float64 > 0 {
+		var spent float64
+		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, groupID, startOfMonthUTC()).Scan(&spent); err != nil {
+			return err
+		}
+		if spent >= monthlyLimit.Float64 {
+			return errors.New("group monthly billing limit reached")
+		}
+	}
+	return nil
 }
 
 func gatewayMaxAttempts() int {
@@ -253,23 +345,63 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReaderSize(response.Body, 64<<10)
 	usage := tokenUsage{}
+	terminalSeen := false
+	var clientWriteErr error
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			usage = mergeTokenUsage(usage, parseAnthropicUsage(line, true))
-			if _, writeErr := w.Write(line); writeErr != nil {
-				return usage, writeErr
+			eventType := gatewaySSEEventType(line)
+			if eventType == "message_stop" {
+				terminalSeen = true
 			}
-			if flusher != nil {
+			if clientWriteErr == nil {
+				if _, writeErr := w.Write(line); writeErr != nil {
+					clientWriteErr = writeErr
+				}
+			}
+			if clientWriteErr == nil && flusher != nil {
 				flusher.Flush()
+			}
+			if eventType == "error" {
+				return usage, errors.New("upstream stream returned an error event")
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return usage, nil
+			if clientWriteErr != nil {
+				return usage, fmt.Errorf("client disconnected during streaming: %w", clientWriteErr)
 			}
-			return usage, err
+			if errors.Is(err, io.EOF) {
+				if terminalSeen {
+					return usage, nil
+				}
+				writeGatewaySSEError(w, flusher, "upstream_disconnected", "upstream stream ended before message_stop")
+				return usage, errors.New("upstream stream ended before message_stop")
+			}
+			writeGatewaySSEError(w, flusher, "stream_read_error", "upstream stream disconnected")
+			return usage, fmt.Errorf("upstream stream read failed: %w", err)
 		}
+	}
+}
+
+func gatewaySSEEventType(line []byte) string {
+	value := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(value, "data:") {
+		return ""
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(value, "data:"))), &payload) != nil {
+		return ""
+	}
+	eventType, _ := payload["type"].(string)
+	return eventType
+}
+
+func writeGatewaySSEError(w http.ResponseWriter, flusher http.Flusher, errorType, message string) {
+	payload, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": errorType, "message": message}})
+	_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload)
+	if flusher != nil {
+		flusher.Flush()
 	}
 }
 
@@ -294,7 +426,7 @@ func copyGatewayResponseHeaders(target, source http.Header) {
 
 func (a *app) recordGatewayUsage(key gatewayKey, account gatewayAccount, model string, stream bool, requestID string, usage tokenUsage, started time.Time) {
 	item, _, usageErr := a.recordUsage(usageInput{
-		RequestID: requestID, PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, Model: model,
+		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, Model: model,
 		InputTokens: usage.Input, OutputTokens: usage.Output, CacheCreationTokens: usage.CacheCreation,
 		CacheReadTokens: usage.CacheRead, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
 	})

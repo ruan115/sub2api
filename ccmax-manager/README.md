@@ -89,7 +89,7 @@ curl http://127.0.0.1:8088/v1/models \
 
 OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system prompt 和缓存结构；其他客户端会按 Sub2API 规则转换成 Claude Code 请求，补齐 billing attribution、稳定账号身份、CLI 字段和 beta。客户端 Cookie、下游鉴权头及非白名单头不会转发到上游。流式响应会在收到 SSE 事件后立即 flush，账号遇到授权失败、429 或可重试的 5xx 时会切换到同组的其他可用账号。
 
-需要使用上游自身的参数处理逻辑时，可以为账号开启“原始请求参数透传”。开启后 `/v1/messages` 和 `/v1/messages/count_tokens` 的请求体不会被重新序列化，也不会执行提示词注入、metadata 重写、模型映射或缓存字段清理；用户 SK 仍会被替换为账号上游凭证。
+需要使用上游自身的参数处理逻辑时，可以为账号开启“原始请求参数透传”。开启后 `/v1/messages` 会保留请求体原始字节，不执行提示词注入、metadata 重写、模型映射或缓存字段清理；`/v1/messages/count_tokens` 会保留自定义参数，但仍会按 Anthropic 接口约束移除 `max_tokens`、`stream`、`temperature` 等生成字段。用户 SK 始终会被替换为账号上游凭证。
 
 账号凭证 JSON 支持：
 
