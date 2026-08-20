@@ -36,6 +36,8 @@ type claudeUsageResponse struct {
 	} `json:"seven_day"`
 }
 
+var claudeUsageEndpoint = "https://api.anthropic.com/api/oauth/usage"
+
 func (a *app) handleAccountQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := pathID(w, r)
 	if !ok {
@@ -92,7 +94,7 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 			a.markAccountReauth(accountID, "account has no OAuth access token")
 			return accountQuota{}, errors.New("account has no OAuth access token; reauthorization is required")
 		}
-		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageEndpoint, nil)
 		request.Header.Set("Accept", "application/json, text/plain, */*")
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Authorization", "Bearer "+accessToken)
@@ -157,7 +159,8 @@ func (a *app) persistAccountQuota(accountID int64, quota accountQuota, active bo
 	}
 	defer tx.Rollback()
 	var extraJSON string
-	if err := tx.QueryRow(`SELECT extra_json FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&extraJSON); err != nil {
+	var previousInvalidated sql.NullString
+	if err := tx.QueryRow(`SELECT extra_json, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&extraJSON, &previousInvalidated); err != nil {
 		return err
 	}
 	extra := decodeObject(extraJSON)
@@ -172,9 +175,14 @@ func (a *app) persistAccountQuota(accountID int64, quota accountQuota, active bo
 	if active {
 		authStatus = "'valid'"
 	}
-	_, err = tx.Exec(`UPDATE accounts SET quota_5h_utilization = ?, quota_5h_reset_at = NULLIF(?, ''), quota_7d_utilization = ?, quota_7d_reset_at = NULLIF(?, ''), quota_sampled_at = ?, extra_json = ?, auth_status = `+authStatus+`, auth_error = CASE WHEN ? THEN '' ELSE auth_error END, auth_checked_at = CASE WHEN ? THEN `+nowSQL+` ELSE auth_checked_at END, updated_at = `+nowSQL+` WHERE id = ?`, quota.FiveHour.Utilization, quota.FiveHour.ResetsAt, quota.SevenDay.Utilization, quota.SevenDay.ResetsAt, quota.UpdatedAt, string(encoded), active, active, accountID)
+	_, err = tx.Exec(`UPDATE accounts SET quota_5h_utilization = ?, quota_5h_reset_at = NULLIF(?, ''), quota_7d_utilization = ?, quota_7d_reset_at = NULLIF(?, ''), quota_sampled_at = ?, extra_json = ?, auth_status = `+authStatus+`, auth_error = CASE WHEN ? THEN '' ELSE auth_error END, auth_checked_at = CASE WHEN ? THEN `+nowSQL+` ELSE auth_checked_at END, onboarded_at = CASE WHEN ? AND invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = CASE WHEN ? THEN NULL ELSE invalidated_at END, status = CASE WHEN ? AND status = 'error' THEN 'active' ELSE status END, error_message = CASE WHEN ? THEN '' ELSE error_message END, updated_at = `+nowSQL+` WHERE id = ?`, quota.FiveHour.Utilization, quota.FiveHour.ResetsAt, quota.SevenDay.Utilization, quota.SevenDay.ResetsAt, quota.UpdatedAt, string(encoded), active, active, active, active, active, active, accountID)
 	if err != nil {
 		return err
+	}
+	if active && previousInvalidated.Valid {
+		if _, err := tx.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type) VALUES (?, 'onboarded')`, accountID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

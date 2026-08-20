@@ -17,14 +17,58 @@ import (
 
 func TestAccountSurvivalSecondsUsesNowUntilInvalidated(t *testing.T) {
 	started := time.Now().UTC().Add(-10 * time.Second)
-	live := accountSurvivalSeconds(started.Format(time.RFC3339Nano), "")
+	live := accountSurvivalSeconds(started.Format(time.RFC3339Nano), "", 0)
 	if live < 9 || live > 11 {
 		t.Fatalf("live survival = %d seconds, want about 10", live)
 	}
 	invalidated := started.Add(4 * time.Second)
-	fixed := accountSurvivalSeconds(started.Format(time.RFC3339Nano), invalidated.Format(time.RFC3339Nano))
+	fixed := accountSurvivalSeconds(started.Format(time.RFC3339Nano), invalidated.Format(time.RFC3339Nano), 4)
 	if fixed != 4 {
 		t.Fatalf("fixed survival = %d seconds, want 4", fixed)
+	}
+}
+
+func TestAccountSurvivalAccumulatesAcrossAuthorizationCycles(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "survival@example.com", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "first-token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+
+	firstStarted := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET onboarded_at = ? WHERE id = ?`, firstStarted, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.markAccountReauth(created.ID, "first cycle ended")
+	if err := a.saveClaudeToken(created.ID, "oauth", &claudeTokenInfo{AccessToken: "second-token", ExpiresAt: 4_102_444_800}, false); err != nil {
+		t.Fatal(err)
+	}
+	secondStarted := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET onboarded_at = ? WHERE id = ?`, secondStarted, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.markAccountReauth(created.ID, "second cycle ended")
+
+	var accounts []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts", nil, http.StatusOK, &accounts)
+	if len(accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(accounts))
+	}
+	if accounts[0].SurvivalSeconds < 718 || accounts[0].SurvivalSeconds > 722 {
+		t.Fatalf("accumulated survival = %d, want about 720 seconds", accounts[0].SurvivalSeconds)
+	}
+	if accounts[0].SurvivalTotal != accounts[0].SurvivalSeconds {
+		t.Fatalf("stored total = %d, displayed = %d", accounts[0].SurvivalTotal, accounts[0].SurvivalSeconds)
 	}
 }
 

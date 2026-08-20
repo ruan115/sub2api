@@ -42,6 +42,7 @@ type app struct {
 	authDisabled  bool
 	oauthSessions *oauthSessionStore
 	priceSync     *priceSyncController
+	accountHealth *accountHealthController
 	tokenLocks    sync.Map
 	quotaLocks    sync.Map
 	budgetLocks   sync.Map
@@ -118,6 +119,7 @@ type account struct {
 	AccountPrice     float64        `json:"account_price"`
 	OnboardedAt      string         `json:"onboarded_at"`
 	InvalidatedAt    string         `json:"invalidated_at"`
+	SurvivalTotal    int64          `json:"survival_seconds_total"`
 	SurvivalSeconds  int64          `json:"survival_seconds"`
 	RequestCount     int64          `json:"request_count"`
 	InputTokens      int64          `json:"input_tokens"`
@@ -285,6 +287,8 @@ func main() {
 	defer a.db.Close()
 	stopPricing := a.startPriceSyncScheduler()
 	defer stopPricing()
+	stopAccountHealth := a.startAccountHealthScheduler()
+	defer stopAccountHealth()
 
 	server := &http.Server{
 		Addr:              addr,
@@ -333,6 +337,7 @@ func newApp(dataPath string) (*app, error) {
 		authDisabled:  strings.EqualFold(strings.TrimSpace(os.Getenv("CCMAX_AUTH_DISABLED")), "true") || strings.TrimSpace(os.Getenv("CCMAX_AUTH_DISABLED")) == "1",
 		oauthSessions: newOAuthSessionStore(),
 		priceSync:     newPriceSyncController(),
+		accountHealth: newAccountHealthController(),
 	}
 	if err := a.migrate(); err != nil {
 		db.Close()
@@ -500,6 +505,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/accounts", a.handleAccountCreate)
 	mux.HandleFunc("POST /api/accounts/batch-authorize", a.handleBatchAuthorization)
 	mux.HandleFunc("POST /api/accounts/batch-delete", a.handleAccountBatchDelete)
+	mux.HandleFunc("POST /api/accounts/health/refresh", a.handleAccountHealthRefresh)
 	mux.HandleFunc("PUT /api/accounts/{id}", a.handleAccountUpdate)
 	mux.HandleFunc("DELETE /api/accounts/{id}", a.handleAccountDelete)
 	mux.HandleFunc("POST /api/accounts/{id}/quota/refresh", a.handleAccountQuotaRefresh)
@@ -889,7 +895,7 @@ const accountSelect = `SELECT a.id, a.name, a.platform, a.auth_type, a.credentia
 	a.auto_proxy, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode,
 	a.auth_status, a.auth_error, a.auth_checked_at, a.token_expires_at,
 	a.quota_5h_utilization, a.quota_5h_reset_at, a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_sampled_at,
-	a.subscription_type, a.account_price, a.onboarded_at, a.invalidated_at, COALESCE(px.status, ''),
+	a.subscription_type, a.account_price, a.onboarded_at, a.invalidated_at, a.survival_seconds_total, COALESCE(px.status, ''),
 	(SELECT COUNT(*) FROM usage_logs u WHERE u.account_id = a.id),
 	COALESCE((SELECT SUM(u.input_tokens) FROM usage_logs u WHERE u.account_id = a.id), 0),
 	COALESCE((SELECT SUM(u.output_tokens) FROM usage_logs u WHERE u.account_id = a.id), 0),
@@ -903,7 +909,7 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 	var proxyPoolID, proxyID sql.NullInt64
 	var lastUsed, expires, rateLimit, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, invalidated sql.NullString
 	var credentialsJSON, extraJSON string
-	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.AccountPrice, &onboarded, &invalidated, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
+	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.AccountPrice, &onboarded, &invalidated, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
 	if err != nil {
 		return item, err
 	}
@@ -921,7 +927,7 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 	item.QuotaSampledAt = nullText(quotaSampled)
 	item.OnboardedAt = nullText(onboarded)
 	item.InvalidatedAt = nullText(invalidated)
-	item.SurvivalSeconds = accountSurvivalSeconds(item.OnboardedAt, item.InvalidatedAt)
+	item.SurvivalSeconds = accountSurvivalSeconds(item.OnboardedAt, item.InvalidatedAt, item.SurvivalTotal)
 	item.DispatchStatus = accountDispatchState(item)
 	item.Extra = decodeObject(extraJSON)
 	if reveal {
@@ -1155,7 +1161,7 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if (credentialsProvided && credentialsJSON == "{}") || (input.Status == "error" && !previousInvalidated.Valid) {
-		if _, err := tx.Exec(`UPDATE accounts SET auth_status = 'reauth_required', auth_error = CASE WHEN auth_error = '' THEN '等待重新授权' ELSE auth_error END, invalidated_at = COALESCE(invalidated_at, `+nowSQL+`), schedulable = 0, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END WHERE id = ?`, id); err != nil {
+		if _, err := tx.Exec(`UPDATE accounts SET `+accumulateAccountSurvivalSQL+`, auth_status = 'reauth_required', auth_error = CASE WHEN auth_error = '' THEN '等待重新授权' ELSE auth_error END, invalidated_at = COALESCE(invalidated_at, `+nowSQL+`), schedulable = 0, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END WHERE id = ?`, id); err != nil {
 			writeDBError(w, err)
 			return
 		}

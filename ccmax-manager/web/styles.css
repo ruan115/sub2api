@@ -554,6 +554,58 @@ svg {
   font-size: 10px;
   text-align: center;
 }
+.compact-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.compact-toggle input {
+  position: absolute;
+  right: 0;
+  width: 34px;
+  height: 20px;
+  min-height: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.compact-toggle i {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 34px;
+  border-radius: 10px;
+  background: #c8ceca;
+  transition: background 160ms ease;
+}
+.compact-toggle i::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 160ms ease;
+}
+.compact-toggle input:checked + i {
+  background: var(--a);
+}
+.compact-toggle input:checked + i::after {
+  transform: translateX(14px);
+}
+.compact-toggle input:focus-visible + i {
+  outline: 2px solid var(--a);
+  outline-offset: 2px;
+}
 
 .purpose-list {
   min-height: 250px;
@@ -2286,6 +2338,21 @@ label small {
   .heading-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+  .accounts-panel .section-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .account-heading-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: auto minmax(82px, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+  }
+  .account-heading-actions .compact-toggle {
+    justify-self: end;
   }
   .gateway-endpoint {
     align-items: flex-start;

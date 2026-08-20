@@ -94,6 +94,7 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"account_price", "REAL NOT NULL DEFAULT 0"},
 		{"onboarded_at", "TEXT"},
 		{"invalidated_at", "TEXT"},
+		{"survival_seconds_total", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, column := range accountColumns {
 		if err := addColumnIfMissing(a.db, "accounts", column.name, column.definition); err != nil {
@@ -141,6 +142,9 @@ func (a *app) migrateAdvancedFeatures() error {
 	}
 	if _, err := a.db.Exec(`UPDATE accounts SET invalidated_at = COALESCE(auth_checked_at, updated_at) WHERE invalidated_at IS NULL AND (status = 'error' OR (auth_status = 'reauth_required' AND onboarded_at IS NOT NULL))`); err != nil {
 		return fmt.Errorf("initialize account invalidation time: %w", err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET survival_seconds_total = MAX(0, CAST(strftime('%s', invalidated_at) AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER)) WHERE survival_seconds_total = 0 AND onboarded_at IS NOT NULL AND invalidated_at IS NOT NULL`); err != nil {
+		return fmt.Errorf("initialize account accumulated survival: %w", err)
 	}
 	if _, err := a.db.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type, created_at)
 		SELECT id, 'onboarded', onboarded_at FROM accounts a WHERE onboarded_at IS NOT NULL

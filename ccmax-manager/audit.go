@@ -166,6 +166,9 @@ func auditAction(r *http.Request) (string, string, string) {
 	if path == "accounts/batch-delete" {
 		action = "account.delete"
 	}
+	if path == "accounts/health/refresh" {
+		action = "account.health_refresh"
+	}
 	if strings.HasSuffix(path, "/auth-url") {
 		action = "account.oauth_start"
 	}

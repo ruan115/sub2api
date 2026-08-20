@@ -82,24 +82,24 @@ type batchAuthorizationResponse struct {
 	Items   []batchAuthorizationResult `json:"items"`
 }
 
-func accountSurvivalSeconds(onboardedAt, invalidatedAt string) int64 {
-	if onboardedAt == "" {
-		return 0
+const accumulateAccountSurvivalSQL = `survival_seconds_total = survival_seconds_total + CASE
+	WHEN invalidated_at IS NULL AND onboarded_at IS NOT NULL
+	THEN MAX(0, CAST(strftime('%s','now') AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER))
+	ELSE 0 END`
+
+func accountSurvivalSeconds(onboardedAt, invalidatedAt string, accumulated int64) int64 {
+	if onboardedAt == "" || invalidatedAt != "" {
+		return max(0, accumulated)
 	}
 	started, err := time.Parse(time.RFC3339Nano, onboardedAt)
 	if err != nil {
-		return 0
+		return max(0, accumulated)
 	}
 	ended := time.Now().UTC()
-	if invalidatedAt != "" {
-		if parsed, parseErr := time.Parse(time.RFC3339Nano, invalidatedAt); parseErr == nil {
-			ended = parsed
-		}
-	}
 	if ended.Before(started) {
-		return 0
+		return max(0, accumulated)
 	}
-	return int64(ended.Sub(started).Seconds())
+	return max(0, accumulated) + int64(ended.Sub(started).Seconds())
 }
 
 func accountDispatchState(item account) string {

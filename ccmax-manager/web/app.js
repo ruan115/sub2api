@@ -20,6 +20,8 @@ const state = {
   accountSearch: "",
   accountStatus: "",
   accountsLoadedAt: 0,
+  accountsLoading: null,
+  accountAutoRefresh: true,
   breakdown: "group",
   proxyPoolFilter: "",
   oauthSessionID: "",
@@ -67,6 +69,8 @@ const canView = (page) =>
   state.me?.role === "admin" || state.me?.visible_pages?.includes(page);
 const uiChoices = new Map();
 const sidebarStorageKey = "ccmax.sidebar.collapsed";
+const accountAutoRefreshStorageKey = "ccmax.accounts.auto-refresh";
+const accountAutoRefreshInterval = 30000;
 const paginationTables = {
   accounts: { body: "accounts-body", size: 20, render: renderAccounts },
   dead: { body: "dead-accounts-body", size: 20, render: renderDeadAccounts },
@@ -416,15 +420,62 @@ async function loadCore() {
 async function loadAccounts() {
   if (!canView("accounts") && !canView("dead") && !canView("onboarding"))
     return;
-  state.accounts = await api("/api/accounts");
-  const accountIDs = new Set(state.accounts.map((item) => item.id));
-  state.selectedAccountIDs = new Set(
-    [...state.selectedAccountIDs].filter((id) => accountIDs.has(id)),
-  );
-  state.accountsLoadedAt = performance.now();
-  renderAccounts();
-  renderDeadAccounts();
-  if (canView("accounts")) await loadAccountSummary();
+  if (state.accountsLoading) return state.accountsLoading;
+  state.accountsLoading = (async () => {
+    state.accounts = await api("/api/accounts");
+    const accountIDs = new Set(state.accounts.map((item) => item.id));
+    state.selectedAccountIDs = new Set(
+      [...state.selectedAccountIDs].filter((id) => accountIDs.has(id)),
+    );
+    state.accountsLoadedAt = performance.now();
+    renderAccounts();
+    renderDeadAccounts();
+    if (canView("accounts")) await loadAccountSummary();
+  })();
+  try {
+    return await state.accountsLoading;
+  } finally {
+    state.accountsLoading = null;
+  }
+}
+
+function initializeAccountAutoRefresh() {
+  try {
+    state.accountAutoRefresh =
+      localStorage.getItem(accountAutoRefreshStorageKey) !== "false";
+  } catch {
+    state.accountAutoRefresh = true;
+  }
+  const toggle = $("#account-auto-refresh");
+  toggle.checked = state.accountAutoRefresh;
+  toggle.addEventListener("change", () => {
+    state.accountAutoRefresh = toggle.checked;
+    try {
+      localStorage.setItem(
+        accountAutoRefreshStorageKey,
+        String(state.accountAutoRefresh),
+      );
+    } catch {
+      // Automatic refresh still works when persistence is unavailable.
+    }
+  });
+  window.setInterval(async () => {
+    if (
+      !state.accountAutoRefresh ||
+      !state.me ||
+      document.hidden ||
+      $("dialog[open]") ||
+      state.accountsLoading ||
+      !["accounts", "dead", "onboarding"].includes(state.view) ||
+      (!canView("accounts") && !canView("dead") && !canView("onboarding"))
+    )
+      return;
+    try {
+      await loadAccounts();
+    } catch {
+      // Keep the last good account snapshot; the next interval retries.
+    }
+  }, accountAutoRefreshInterval);
 }
 
 async function loadBilling() {
@@ -704,7 +755,11 @@ function renderAccounts() {
       const actions = isAdmin()
         ? `<span class="row-actions"><button data-refresh-quota="${item.id}" title="刷新配额"><i data-lucide="gauge"></i></button><button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权"><i data-lucide="key-round"></i></button><button data-toggle-account="${item.id}" title="${item.schedulable ? "暂停调度" : "恢复调度"}"><i data-lucide="${item.schedulable ? "pause" : "play"}"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button class="danger" data-delete-account="${item.id}" title="删除账号"><i data-lucide="trash-2"></i></button></span>`
         : '<span class="muted">只读</span>';
-      return `<tr><td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono">${escapeHTML(item.proxy_hint || "未绑定代理")}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle">${escapeHTML(item.auth_error || authText)}</span></td><td><span class="subscription-badge">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono">${dateTime(item.onboarded_at)}</td><td>${survivalCell(item)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td class="actions">${actions}</td></tr>`;
+      const authDetail = item.auth_error || authText;
+      const checked = item.auth_checked_at
+        ? ` · 检测 ${dateTime(item.auth_checked_at)}`
+        : " · 尚未检测";
+      return `<tr><td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono">${escapeHTML(item.proxy_hint || "未绑定代理")}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle">${escapeHTML(authDetail)}${escapeHTML(checked)}</span></td><td><span class="subscription-badge">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono">${dateTime(item.onboarded_at)}</td><td>${survivalCell(item)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td class="actions">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -1580,10 +1635,27 @@ $("#refresh-accounts").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   try {
     button.disabled = true;
+    let health = null;
+    const visibleAccountIDs = $$('[data-account-select]').map((node) =>
+      Number(node.dataset.accountSelect),
+    );
+    if (isAdmin() && visibleAccountIDs.length)
+      health = await api("/api/accounts/health/refresh", {
+        method: "POST",
+        body: JSON.stringify({ ids: visibleAccountIDs }),
+      });
     await loadAccounts();
-    toast("账号列表已刷新");
+    if (health)
+      toast(
+        `检测 ${health.checked} 个账号：${health.healthy} 个正常，${health.failed} 个失败`,
+        health.failed ? "error" : "success",
+      );
+    else toast("账号列表已刷新");
   } catch (error) {
-    toast(error.message, "error");
+    if (error.message.includes("存活检测正在运行")) {
+      await loadAccounts();
+      toast("后台存活检测正在运行，已刷新当前状态");
+    } else toast(error.message, "error");
   } finally {
     button.disabled = false;
   }
@@ -2097,5 +2169,6 @@ function initializeDates() {
   $("#authorization-from").value = from;
   $("#authorization-to").value = to;
 }
+initializeAccountAutoRefresh();
 window.setInterval(updateSurvivalClocks, 60000);
 boot();

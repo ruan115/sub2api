@@ -296,12 +296,23 @@
                 <span class="section-count" id="account-list-count"
                   >0 个账号</span
                 >
+                <label
+                  class="compact-toggle"
+                  title="每 30 秒自动更新账户状态；页面隐藏或弹窗打开时暂停"
+                >
+                  <span>自动更新</span>
+                  <input
+                    id="account-auto-refresh"
+                    type="checkbox"
+                    aria-label="自动更新账户状态"
+                  /><i></i>
+                </label>
                 <button
                   class="icon-button compact"
                   id="refresh-accounts"
                   type="button"
-                  title="刷新账号列表"
-                  aria-label="刷新账号列表"
+                  title="检测当前页账号存活状态并刷新列表"
+                  aria-label="检测当前页账号存活状态并刷新列表"
                 >
                   <i data-lucide="refresh-cw"></i>
                 </button>

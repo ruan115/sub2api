@@ -476,7 +476,7 @@ func (a *app) markAccountReauth(accountID int64, reason string) {
 	if err := tx.QueryRow(`SELECT invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&invalidated); err != nil {
 		return
 	}
-	if _, err := tx.Exec(`UPDATE accounts SET auth_status = 'reauth_required', auth_error = ?, auth_checked_at = `+nowSQL+`, invalidated_at = COALESCE(invalidated_at, `+nowSQL+`), error_message = ?, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END, updated_at = `+nowSQL+` WHERE id = ?`, reason, reason, accountID); err != nil {
+	if _, err := tx.Exec(`UPDATE accounts SET `+accumulateAccountSurvivalSQL+`, auth_status = 'reauth_required', auth_error = ?, auth_checked_at = `+nowSQL+`, invalidated_at = COALESCE(invalidated_at, `+nowSQL+`), error_message = ?, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END, updated_at = `+nowSQL+` WHERE id = ?`, reason, reason, accountID); err != nil {
 		return
 	}
 	if !invalidated.Valid {
