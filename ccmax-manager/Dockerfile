@@ -1,0 +1,15 @@
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/ccmax-manager .
+
+FROM debian:bookworm-slim
+RUN groupadd --system ccmax && useradd --system --gid ccmax ccmax && mkdir -p /data && chown ccmax:ccmax /data
+USER ccmax
+COPY --from=build /out/ccmax-manager /usr/local/bin/ccmax-manager
+ENV CCMAX_ADDR=0.0.0.0:8088
+ENV CCMAX_DATA=/data/ccmax-manager.db
+EXPOSE 8088
+ENTRYPOINT ["ccmax-manager"]

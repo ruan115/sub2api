@@ -1,0 +1,29 @@
+[Unit]
+Description=CCMAX Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ccmax
+Group=ccmax
+WorkingDirectory=/var/lib/ccmax-manager
+EnvironmentFile=/etc/ccmax-manager.env
+ExecStart=/opt/ccmax-manager/ccmax-manager
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/ccmax-manager
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

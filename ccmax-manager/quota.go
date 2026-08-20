@@ -1,0 +1,234 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type quotaWindow struct {
+	Utilization float64 `json:"utilization"`
+	ResetsAt    string  `json:"resets_at"`
+}
+
+type accountQuota struct {
+	Source    string      `json:"source"`
+	UpdatedAt string      `json:"updated_at"`
+	FiveHour  quotaWindow `json:"five_hour"`
+	SevenDay  quotaWindow `json:"seven_day"`
+}
+
+type claudeUsageResponse struct {
+	FiveHour struct {
+		Utilization float64 `json:"utilization"`
+		ResetsAt    string  `json:"resets_at"`
+	} `json:"five_hour"`
+	SevenDay struct {
+		Utilization float64 `json:"utilization"`
+		ResetsAt    string  `json:"resets_at"`
+	} `json:"seven_day"`
+}
+
+func (a *app) handleAccountQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	quota, err := a.refreshAccountQuota(r.Context(), accountID)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, quota)
+}
+
+func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (accountQuota, error) {
+	var authType, credentialsJSON string
+	var stored accountQuota
+	var fiveReset, sevenReset, sampled sql.NullString
+	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at, quota_sampled_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+		Scan(&authType, &credentialsJSON, &stored.FiveHour.Utilization, &fiveReset, &stored.SevenDay.Utilization, &sevenReset, &sampled); err != nil {
+		return accountQuota{}, err
+	}
+	stored.Source = "passive"
+	stored.FiveHour.ResetsAt = nullText(fiveReset)
+	stored.SevenDay.ResetsAt = nullText(sevenReset)
+	stored.UpdatedAt = nullText(sampled)
+	if authType != "oauth" {
+		return stored, nil
+	}
+	credentials := decodeObject(credentialsJSON)
+	accessToken, _ := credentials["access_token"].(string)
+	if accessToken == "" {
+		a.markAccountReauth(accountID, "account has no OAuth access token")
+		return accountQuota{}, errors.New("account has no OAuth access token; reauthorization is required")
+	}
+	proxyURL, err := a.accountProxyString(accountID)
+	if err != nil {
+		return accountQuota{}, err
+	}
+	proxy, err := parseProxyURL(proxyURL)
+	if err != nil {
+		return accountQuota{}, err
+	}
+	client, err := clientForProxy(proxy)
+	if err != nil {
+		return accountQuota{}, err
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
+	request.Header.Set("Accept", "application/json, text/plain, */*")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	request.Header.Set("User-Agent", "claude-code/2.1.7")
+	response, err := client.Do(request)
+	if err != nil {
+		return accountQuota{}, fmt.Errorf("fetch account quota: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		a.markAccountReauth(accountID, "Anthropic OAuth authorization expired")
+		return accountQuota{}, errors.New("Anthropic authorization expired; reauthorization is required")
+	}
+	if response.StatusCode != http.StatusOK {
+		return accountQuota{}, fmt.Errorf("Anthropic usage API returned status %d", response.StatusCode)
+	}
+	var upstream claudeUsageResponse
+	if err := json.NewDecoder(response.Body).Decode(&upstream); err != nil {
+		return accountQuota{}, fmt.Errorf("decode Anthropic quota: %w", err)
+	}
+	quota := accountQuota{Source: "active", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	quota.FiveHour = quotaWindow{Utilization: upstream.FiveHour.Utilization, ResetsAt: normalizeUpstreamTime(upstream.FiveHour.ResetsAt)}
+	quota.SevenDay = quotaWindow{Utilization: upstream.SevenDay.Utilization, ResetsAt: normalizeUpstreamTime(upstream.SevenDay.ResetsAt)}
+	if err := a.persistAccountQuota(accountID, quota, true); err != nil {
+		return accountQuota{}, err
+	}
+	return quota, nil
+}
+
+func parseProxyURL(raw string) (*url.URL, error) {
+	return url.Parse(raw)
+}
+
+func normalizeUpstreamTime(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed.UTC().Format(time.RFC3339Nano)
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed.UTC().Format(time.RFC3339Nano)
+	}
+	return raw
+}
+
+func (a *app) persistAccountQuota(accountID int64, quota accountQuota, active bool) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var extraJSON string
+	if err := tx.QueryRow(`SELECT extra_json FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&extraJSON); err != nil {
+		return err
+	}
+	extra := decodeObject(extraJSON)
+	extra["session_window_utilization"] = quota.FiveHour.Utilization / 100
+	extra["passive_usage_7d_utilization"] = quota.SevenDay.Utilization / 100
+	if reset := unixFromTime(quota.SevenDay.ResetsAt); reset > 0 {
+		extra["passive_usage_7d_reset"] = reset
+	}
+	extra["passive_usage_sampled_at"] = quota.UpdatedAt
+	encoded, _ := json.Marshal(extra)
+	authStatus := "auth_status"
+	if active {
+		authStatus = "'valid'"
+	}
+	_, err = tx.Exec(`UPDATE accounts SET quota_5h_utilization = ?, quota_5h_reset_at = NULLIF(?, ''), quota_7d_utilization = ?, quota_7d_reset_at = NULLIF(?, ''), quota_sampled_at = ?, extra_json = ?, auth_status = `+authStatus+`, auth_error = CASE WHEN ? THEN '' ELSE auth_error END, auth_checked_at = CASE WHEN ? THEN `+nowSQL+` ELSE auth_checked_at END, updated_at = `+nowSQL+` WHERE id = ?`, quota.FiveHour.Utilization, quota.FiveHour.ResetsAt, quota.SevenDay.Utilization, quota.SevenDay.ResetsAt, quota.UpdatedAt, string(encoded), active, active, accountID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func unixFromTime(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		parsed, err = time.Parse(time.RFC3339, value)
+	}
+	if err != nil {
+		return 0
+	}
+	return parsed.Unix()
+}
+
+func quotaFromHeaders(headers http.Header) (accountQuota, bool) {
+	quota := accountQuota{Source: "passive", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	found := false
+	if value, err := strconv.ParseFloat(strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-5h-utilization")), 64); err == nil {
+		quota.FiveHour.Utilization = value * 100
+		found = true
+	}
+	if value, err := strconv.ParseFloat(strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-7d-utilization")), 64); err == nil {
+		quota.SevenDay.Utilization = value * 100
+		found = true
+	}
+	quota.FiveHour.ResetsAt = resetHeaderTime(headers.Get("anthropic-ratelimit-unified-5h-reset"))
+	quota.SevenDay.ResetsAt = resetHeaderTime(headers.Get("anthropic-ratelimit-unified-7d-reset"))
+	if quota.FiveHour.ResetsAt != "" || quota.SevenDay.ResetsAt != "" {
+		found = true
+	}
+	return quota, found
+}
+
+func resetHeaderTime(raw string) string {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value <= 0 {
+		return ""
+	}
+	if value > 1e11 {
+		value /= 1000
+	}
+	return time.Unix(value, 0).UTC().Format(time.RFC3339Nano)
+}
+
+func (a *app) captureAccountUpstreamState(accountID int64, response *http.Response) {
+	if response == nil {
+		return
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		a.markAccountReauth(accountID, "upstream rejected the account authorization")
+		return
+	}
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		_, _ = a.db.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, accountID)
+	}
+	if quota, ok := quotaFromHeaders(response.Header); ok {
+		_ = a.persistAccountQuota(accountID, quota, false)
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		reset := response.Header.Get("anthropic-ratelimit-unified-7d-reset")
+		if strings.TrimSpace(response.Header.Get("anthropic-ratelimit-unified-7d-utilization")) != "1" {
+			reset = response.Header.Get("anthropic-ratelimit-unified-5h-reset")
+		}
+		if value := resetHeaderTime(reset); value != "" {
+			_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, updated_at = `+nowSQL+` WHERE id = ?`, value, accountID)
+		}
+	}
+}

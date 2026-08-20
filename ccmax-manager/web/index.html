@@ -1,0 +1,1469 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>CCMAX Control</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/lib/choices.min.css?v=__ASSET_VERSION__" />
+    <link rel="stylesheet" href="/styles.css?v=__ASSET_VERSION__" />
+  </head>
+  <body>
+    <svg class="svg-symbols" aria-hidden="true">
+      <symbol id="claude-group-icon" viewBox="0 0 16 16">
+        <path
+          d="m3.127 10.604 3.135-1.76.053-.153-.053-.085H6.11l-.525-.032-1.791-.048-1.554-.065-1.505-.08-.38-.081L0 7.832l.036-.234.32-.214.455.04 1.009.069 1.513.105 1.097.064 1.626.17h.259l.036-.105-.089-.065-.068-.064-1.566-1.062-1.695-1.121-.887-.646-.48-.327-.243-.306-.104-.67.435-.48.585.04.15.04.593.456 1.267.981 1.654 1.218.242.202.097-.068.012-.049-.109-.181-.9-1.626-.96-1.655-.428-.686-.113-.411a2 2 0 0 1-.068-.484l.496-.674L4.446 0l.662.089.279.242.411.94.666 1.48 1.033 2.014.302.597.162.553.06.17h.105v-.097l.085-1.134.157-1.392.154-1.792.052-.504.25-.605.497-.327.387.186.319.456-.045.294-.19 1.23-.37 1.93-.243 1.29h.142l.161-.16.654-.868 1.097-1.372.484-.545.565-.601.363-.287h.686l.505.751-.226.775-.707.895-.585.759-.839 1.13-.524.904.048.072.125-.012 1.897-.403 1.024-.186 1.223-.21.553.258.06.263-.218.536-1.307.323-1.533.307-2.284.54-.028.02.032.04 1.029.098.44.024h1.077l2.005.15.525.346.315.424-.053.323-.807.411-3.631-.863-.872-.218h-.12v.073l.726.71 1.331 1.202 1.667 1.55.084.383-.214.302-.226-.032-1.464-1.101-.565-.497-1.28-1.077h-.084v.113l.295.432 1.557 2.34.08.718-.112.234-.404.141-.444-.08-.911-1.28-.94-1.44-.759-1.291-.093.053-.448 4.821-.21.246-.484.186-.403-.307-.214-.496.214-.98.258-1.28.21-1.016.19-1.263.112-.42-.008-.028-.092.012-.953 1.307-1.448 1.957-1.146 1.227-.274.109-.477-.247.045-.44.266-.39 1.586-2.018.956-1.25.617-.723-.004-.105h-.036l-4.212 2.736-.75.096-.324-.302.04-.496.154-.162 1.267-.871z"
+        />
+      </symbol>
+    </svg>
+    <section class="login-screen" id="login-screen" hidden>
+      <form class="login-panel" id="login-form">
+        <div class="brand login-brand">
+          <div class="brand-mark"><span>A</span><span>B</span></div>
+          <div><strong>CCMAX</strong><small>POOL CONTROL</small></div>
+        </div>
+        <div class="login-body">
+          <p class="kicker">AUTHENTICATION</p>
+          <h1>管理端登录</h1>
+          <label
+            ><span>用户名</span
+            ><input
+              id="login-username"
+              autocomplete="username"
+              value="admin"
+              required
+          /></label>
+          <label
+            ><span>密码</span
+            ><input
+              id="login-password"
+              type="password"
+              autocomplete="current-password"
+              required
+          /></label>
+          <button class="button primary" type="submit">登录控制台</button>
+          <p class="login-error" id="login-error"></p>
+        </div>
+      </form>
+    </section>
+
+    <div class="app-shell" id="app-shell" hidden>
+      <aside class="sidebar" id="sidebar">
+        <div class="brand sidebar-brand">
+          <div class="brand-mark"><span>A</span><span>B</span></div>
+          <div class="brand-copy">
+            <strong>CCMAX</strong><small>POOL CONTROL</small>
+          </div>
+          <button
+            class="sidebar-toggle"
+            id="sidebar-toggle"
+            type="button"
+            aria-controls="sidebar"
+            aria-expanded="true"
+            aria-label="收起侧栏"
+            title="收起侧栏"
+          >
+            <i data-lucide="panel-left-close"></i>
+          </button>
+        </div>
+        <nav class="nav" aria-label="主导航">
+          <button
+            class="nav-item active"
+            data-view="overview"
+            data-role-view="manager"
+            title="首页"
+          >
+            <span class="nav-icon"><i data-lucide="layout-dashboard"></i></span
+            ><span>首页</span>
+          </button>
+          <button
+            class="nav-item"
+            data-view="accounts"
+            data-role-view="manager"
+            title="账号池"
+          >
+            <span class="nav-icon"><i data-lucide="users-round"></i></span
+            ><span>账号池</span><b id="nav-account-count">0</b>
+          </button>
+          <button class="nav-item" data-view="dead" title="死亡账户">
+            <span class="nav-icon"><i data-lucide="skull"></i></span
+            ><span>死亡账户</span><b id="nav-dead-count">0</b>
+          </button>
+          <button class="nav-item" data-view="onboarding" title="批量上号">
+            <span class="nav-icon"><i data-lucide="user-plus"></i></span
+            ><span>批量上号</span>
+          </button>
+          <button class="nav-item" data-view="daily" title="每日统计">
+            <span class="nav-icon"><i data-lucide="calendar-days"></i></span
+            ><span>每日统计</span>
+          </button>
+          <button class="nav-item" data-view="authorization" title="授权统计">
+            <span class="nav-icon"><i data-lucide="percent"></i></span
+            ><span>授权统计</span>
+          </button>
+          <button
+            class="nav-item"
+            data-view="proxies"
+            data-role-view="manager"
+            title="代理池"
+          >
+            <span class="nav-icon"><i data-lucide="network"></i></span
+            ><span>代理池</span><b id="nav-proxy-count">0</b>
+          </button>
+          <button
+            class="nav-item"
+            data-view="access"
+            data-role-view="access"
+            title="用户与 SK"
+          >
+            <span class="nav-icon"><i data-lucide="key-round"></i></span
+            ><span>用户与 SK</span>
+          </button>
+          <button
+            class="nav-item"
+            data-view="pricing"
+            data-role-view="manager"
+            title="模型价格"
+          >
+            <span class="nav-icon"><i data-lucide="badge-dollar-sign"></i></span
+            ><span>模型价格</span>
+          </button>
+          <button
+            class="nav-item"
+            data-view="billing"
+            data-role-view="manager"
+            title="计费中心"
+          >
+            <span class="nav-icon"><i data-lucide="receipt-text"></i></span
+            ><span>计费中心</span>
+          </button>
+          <button
+            class="nav-item"
+            data-view="audit"
+            data-role-view="manager"
+            title="操作日志"
+          >
+            <span class="nav-icon"><i data-lucide="scroll-text"></i></span
+            ><span>操作日志</span>
+          </button>
+        </nav>
+        <div class="sidebar-status">
+          <span class="status-dot"></span>
+          <div>
+            <strong>SQLite</strong
+            ><small id="connection-status">正在连接</small>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">CONTROL / OVERVIEW</p>
+            <h1 id="page-title">运行概览</h1>
+          </div>
+          <div class="top-actions">
+            <div class="identity">
+              <strong id="identity-name">—</strong
+              ><small id="identity-role">—</small>
+            </div>
+            <button
+              class="icon-button"
+              id="logout-button"
+              title="退出登录"
+              aria-label="退出登录"
+            >
+              <i data-lucide="log-out"></i>
+            </button>
+            <button
+              class="icon-button"
+              id="refresh-button"
+              title="刷新数据"
+              aria-label="刷新数据"
+            >
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="button primary" id="primary-action">
+              <i data-lucide="plus"></i
+              ><span id="primary-action-label">新增用途</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="view active" id="view-overview">
+          <div class="readonly-banner" id="readonly-banner" hidden>
+            <strong>只读模式</strong
+            ><span>可以查看账号池与计费信息，无法修改配置。</span>
+          </div>
+          <div class="metrics" id="overview-metrics"></div>
+          <div class="overview-grid">
+            <section class="panel purpose-panel">
+              <div class="section-heading">
+                <div>
+                  <p class="kicker">PURPOSE ROUTING</p>
+                  <h2>用途切换</h2>
+                </div>
+                <button class="text-button write-action" data-open-purpose>
+                  管理用途
+                </button>
+              </div>
+              <div id="purpose-list" class="purpose-list"></div>
+            </section>
+            <section class="panel group-panel">
+              <div class="section-heading">
+                <div>
+                  <p class="kicker">POOL STATUS</p>
+                  <h2>A / B 分组</h2>
+                </div>
+              </div>
+              <div id="group-cards" class="group-cards"></div>
+            </section>
+          </div>
+          <section class="panel table-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">LIVE LEDGER</p>
+                <h2>最近计费</h2>
+              </div>
+              <button class="text-button" data-view-jump="billing">
+                查看全部
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>用途 / 分组</th>
+                    <th>账号</th>
+                    <th>模型</th>
+                    <th class="num">Tokens</th>
+                    <th class="num">计费</th>
+                    <th class="num">成本</th>
+                  </tr>
+                </thead>
+                <tbody id="recent-usage-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-accounts">
+          <section class="panel filter-bar account-filters">
+            <label class="search-field"
+              ><i data-lucide="search"></i
+              ><input
+                id="account-search"
+                type="search"
+                placeholder="搜索名称、备注或凭证尾号"
+            /></label>
+            <div class="segmented" id="account-group-filter">
+              <button class="active" data-group="">全部</button
+              ><button data-group="a">
+                <svg class="inline-claude-icon" aria-hidden="true">
+                  <use href="#claude-group-icon"></use></svg
+                ><span>A 组</span></button
+              ><button data-group="b">
+                <svg class="inline-claude-icon" aria-hidden="true">
+                  <use href="#claude-group-icon"></use></svg
+                ><span>B 组</span>
+              </button>
+            </div>
+            <label class="date-filter"
+              ><span>开始</span><input type="date" id="account-from" /></label
+            ><label class="date-filter"
+              ><span>结束</span><input type="date" id="account-to"
+            /></label>
+          </section>
+          <div
+            class="metrics compact-metrics"
+            id="account-summary-metrics"
+          ></div>
+          <div class="status-tabs" id="account-status-tabs">
+            <button class="active" data-account-status="">全部 <b id="status-all-count">0</b></button>
+            <button data-account-status="normal">正常 <b id="status-normal-count">0</b></button>
+            <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
+            <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
+          </div>
+          <section class="panel table-panel accounts-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">ACCOUNT INVENTORY</p>
+                <h2>账号池</h2>
+              </div>
+              <div class="heading-actions account-heading-actions">
+                <span class="section-count" id="account-list-count"
+                  >0 个账号</span
+                >
+                <button
+                  class="icon-button compact"
+                  id="refresh-accounts"
+                  type="button"
+                  title="刷新账号列表"
+                  aria-label="刷新账号列表"
+                >
+                  <i data-lucide="refresh-cw"></i>
+                </button>
+                <button
+                  class="button danger small write-action"
+                  id="delete-selected-accounts"
+                  type="button"
+                  disabled
+                >
+                  <i data-lucide="trash-2"></i
+                  ><span>删除已选</span
+                  ><b id="selected-account-count">0</b>
+                </button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="accounts-table">
+                <thead>
+                  <tr>
+                    <th class="select-column"><input type="checkbox" id="select-all-accounts" aria-label="选择全部账号" /></th>
+                    <th>账号</th>
+                    <th>状态</th>
+                    <th>订阅类型</th>
+                    <th class="num">账号价格</th>
+                    <th class="num">账号总计费</th>
+                    <th>用量窗口</th>
+                    <th class="num">请求数</th>
+                    <th>上号时间</th>
+                    <th>存活时间</th>
+                    <th>最近使用</th>
+                    <th class="actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="accounts-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="accounts-empty" hidden>
+              <strong>没有匹配账号</strong><span>调整筛选条件或新建账号。</span>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-dead">
+          <div class="metrics compact-metrics" id="dead-metrics"></div>
+          <section class="panel table-panel">
+            <div class="section-heading">
+              <div><p class="kicker">ACCOUNT LIFECYCLE</p><h2>死亡账户</h2></div>
+              <span class="section-count" id="dead-list-count">0 个账号</span>
+            </div>
+            <div class="table-wrap">
+              <table class="dead-table">
+                <thead><tr><th>账号</th><th>订阅</th><th>代理 / IP</th><th>上号时间</th><th>失效时间</th><th>存活时间</th><th class="num">请求数</th><th class="num">总计费</th><th>失效原因</th><th class="actions">操作</th></tr></thead>
+                <tbody id="dead-accounts-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="dead-empty" hidden><strong>暂无死亡账户</strong><span>授权失效或状态错误的账号会显示在这里。</span></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-onboarding">
+          <section class="panel onboarding-panel">
+            <div class="section-heading">
+              <div><p class="kicker">BATCH ONBOARDING</p><h2>批量授权上号</h2></div>
+              <span class="section-count">每个账号独享一个代理 IP</span>
+            </div>
+            <form id="batch-auth-form" class="batch-auth-grid">
+              <label class="span-2"><span>Claude Session Keys</span><textarea id="batch-session-keys" rows="12" spellcheck="false" placeholder="每行一个 sk-ant-sid..." required></textarea><small>成功后读取 Token 中的邮箱作为账号名称；Session Key 不会写入日志或数据库。</small></label>
+              <label><span>代理池</span><select id="batch-proxy-pool" required></select></label>
+              <label><span>授权类型</span><select id="batch-auth-type"><option value="oauth">OAuth · 完整配额</option><option value="setup_token">Setup Token · 推理权限</option></select></label>
+              <label><span>账号价格 USD</span><input id="batch-account-price" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>并发数</span><input id="batch-concurrency" type="number" min="1" value="3" /></label>
+              <label><span>基础 RPM</span><input id="batch-base-rpm" type="number" min="0" max="10000" value="15" /></label>
+              <fieldset class="group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
+              <div class="span-2 batch-auth-actions"><button class="button primary write-action" id="batch-auth-submit" type="submit"><i data-lucide="key-round"></i><span>开始批量授权</span></button></div>
+            </form>
+          </section>
+          <section class="panel table-panel" id="batch-result-panel" hidden>
+            <div class="section-heading"><div><p class="kicker">ONBOARDING RESULT</p><h2>上号结果</h2></div><span class="section-count" id="batch-result-summary"></span></div>
+            <div class="table-wrap"><table><thead><tr><th>#</th><th>账号</th><th>订阅</th><th>代理 IP</th><th>状态</th><th>说明</th></tr></thead><tbody id="batch-result-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-daily">
+          <section class="panel table-panel">
+            <div class="section-heading"><div><p class="kicker">DAILY OPERATIONS</p><h2>每日统计</h2></div><select id="daily-days"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option></select></div>
+            <div class="table-wrap"><table class="daily-table"><thead><tr><th>日期</th><th class="num">请求数</th><th class="num">Token</th><th class="num">计费</th><th class="num">成本</th><th class="num">上号</th><th class="num">死亡</th><th class="num">授权成功 / 总数</th></tr></thead><tbody id="daily-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-authorization">
+          <section class="panel filter-bar authorization-filters">
+            <select id="authorization-status"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select>
+            <label class="date-filter"><span>开始</span><input type="date" id="authorization-from" /></label>
+            <label class="date-filter"><span>结束</span><input type="date" id="authorization-to" /></label>
+            <button class="button secondary" id="apply-authorization-filters">查询</button>
+          </section>
+          <div class="metrics compact-metrics" id="authorization-metrics"></div>
+          <section class="panel table-panel">
+            <div class="section-heading"><div><p class="kicker">AUTHORIZATION LEDGER</p><h2>授权日志</h2></div><span class="section-count" id="authorization-count">0 条记录</span></div>
+            <div class="table-wrap"><table class="authorization-table"><thead><tr><th>时间</th><th>账号</th><th>代理 IP</th><th>方式</th><th>订阅</th><th>状态</th><th>操作 IP</th><th>说明</th></tr></thead><tbody id="authorization-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-proxies">
+          <div class="proxy-layout">
+            <section class="panel">
+              <div class="section-heading">
+                <div>
+                  <p class="kicker">PROXY POOLS</p>
+                  <h2>代理池</h2>
+                </div>
+                <button
+                  class="button secondary small write-action"
+                  id="add-proxy-pool"
+                >
+                  + 新增池
+                </button>
+              </div>
+              <div class="pool-list" id="proxy-pool-list"></div>
+            </section>
+            <section class="panel table-panel proxy-table-panel">
+              <div class="section-heading">
+                <div>
+                  <p class="kicker">PROXY INVENTORY</p>
+                  <h2>代理清单</h2>
+                </div>
+                <div class="heading-actions">
+                  <select id="proxy-pool-filter"></select
+                  ><button
+                    class="button secondary small write-action"
+                    id="import-proxies"
+                  >
+                    批量导入
+                  </button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="proxy-table">
+                  <thead>
+                    <tr>
+                      <th>代理</th>
+                      <th>协议</th>
+                      <th>出口 IP</th>
+                      <th class="num">延迟</th>
+                      <th>独享账号</th>
+                      <th>状态</th>
+                      <th>最近检测</th>
+                      <th class="actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="proxies-body"></tbody>
+                </table>
+              </div>
+              <div class="empty-state" id="proxies-empty" hidden>
+                <strong>当前代理池为空</strong
+                ><span>批量导入或配置代理 API。</span>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-access">
+          <section class="panel access-toolbar" id="user-toolbar">
+            <div>
+              <p class="kicker">ACCESS CONTROL</p>
+              <h2>用户与权限</h2>
+            </div>
+            <button class="button secondary small" id="add-user">
+              + 新增用户
+            </button>
+          </section>
+          <section class="panel table-panel" id="users-panel">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>角色</th>
+                    <th>允许分组</th>
+                    <th class="num">用户 RPM</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                    <th class="actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="users-body"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel table-panel keys-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">API ACCESS</p>
+                <h2>API Keys</h2>
+              </div>
+              <button class="button primary small" id="add-api-key">
+                + 生成 SK
+              </button>
+            </div>
+            <div class="gateway-endpoint">
+              <span>Anthropic Messages</span><code id="gateway-endpoint"></code>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>名称 / SK</th>
+                    <th>所属用户</th>
+                    <th>调度分组</th>
+                    <th class="num">已用 / 配额</th>
+                    <th>过期时间</th>
+                    <th>最后调用</th>
+                    <th>状态</th>
+                    <th class="actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="keys-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="keys-empty" hidden>
+              <strong>还没有 API Key</strong
+              ><span>生成 SK 后即可调用调度接口。</span>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-billing">
+          <section class="panel filter-bar billing-filters">
+            <label
+              ><span>开始日期</span
+              ><input type="date" id="billing-from" /></label
+            ><label
+              ><span>结束日期</span><input type="date" id="billing-to" /></label
+            ><label
+              ><span>分组</span
+              ><select id="billing-group">
+                <option value="">全部分组</option>
+                <option value="a">A 分组</option>
+                <option value="b">B 分组</option>
+              </select></label
+            ><label
+              ><span>用途</span
+              ><select id="billing-purpose">
+                <option value="">全部用途</option>
+              </select></label
+            ><button class="button secondary" id="apply-billing-filters">
+              查询
+            </button>
+          </section>
+          <div class="metrics" id="billing-metrics"></div>
+          <section class="panel breakdown-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">COST SPLIT</p>
+                <h2>账单拆分</h2>
+              </div>
+            </div>
+            <div class="tabs" id="breakdown-tabs">
+              <button class="active" data-breakdown="group">按分组</button
+              ><button data-breakdown="account">按账号</button
+              ><button data-breakdown="purpose">按用途</button>
+            </div>
+            <div id="breakdown-list" class="breakdown-list"></div>
+          </section>
+          <section class="panel table-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">USAGE LOG</p>
+                <h2>计费流水</h2>
+              </div>
+              <button
+                class="button secondary small write-action"
+                id="record-usage"
+              >
+                + 记录用量
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>请求 / 时间</th>
+                    <th>用途</th>
+                    <th>账号</th>
+                    <th>模型</th>
+                    <th class="num">输入</th>
+                    <th class="num">输出</th>
+                    <th class="num">缓存</th>
+                    <th class="num">计费</th>
+                    <th class="num">成本</th>
+                    <th class="num">毛差</th>
+                  </tr>
+                </thead>
+                <tbody id="usage-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="usage-empty" hidden>
+              <strong>当前区间没有流水</strong>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-pricing">
+          <section class="panel sync-panel">
+            <div>
+              <p class="kicker">SUB2API PRICE SYNC</p>
+              <h2>模型价格自动同步</h2>
+              <p id="price-sync-detail">正在读取同步状态</p>
+            </div>
+            <div class="sync-actions">
+              <span class="pill" id="price-sync-status">读取中</span
+              ><button class="button secondary write-action" id="sync-prices">
+                <i data-lucide="cloud-download"></i
+                ><span>立即同步</span></button
+              ><button class="button primary write-action" id="add-price">
+                <i data-lucide="plus"></i><span>手动价格</span>
+              </button>
+            </div>
+          </section>
+          <section class="panel table-panel pricing-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">PRICE BOOK</p>
+                <h2>Anthropic 模型价格</h2>
+              </div>
+              <span class="section-count" id="price-count">0 个模型</span>
+            </div>
+            <div class="table-wrap">
+              <table class="price-table">
+                <thead>
+                  <tr>
+                    <th>模型</th>
+                    <th>来源</th>
+                    <th class="num">输入 / M</th>
+                    <th class="num">输出 / M</th>
+                    <th class="num">缓存写 / M</th>
+                    <th class="num">缓存读 / M</th>
+                    <th>更新时间</th>
+                    <th class="actions"></th>
+                  </tr>
+                </thead>
+                <tbody id="prices-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-audit">
+          <section class="panel filter-bar audit-filters">
+            <label class="search-field"
+              ><i data-lucide="search"></i
+              ><input
+                id="audit-actor"
+                type="search"
+                placeholder="筛选操作用户" /></label
+            ><select id="audit-action" data-choice>
+              <option value="">全部操作</option>
+              <option value="auth">登录与会话</option>
+              <option value="account">账号</option>
+              <option value="api_key">API Key</option>
+              <option value="user">用户</option>
+              <option value="proxy">代理</option>
+              <option value="price">价格</option></select
+            ><label class="date-filter"
+              ><span>开始</span><input type="date" id="audit-from" /></label
+            ><label class="date-filter"
+              ><span>结束</span><input type="date" id="audit-to" /></label
+            ><button class="button secondary" id="apply-audit-filters">
+              <i data-lucide="list-filter"></i><span>筛选</span>
+            </button>
+          </section>
+          <section class="panel table-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">AUDIT TRAIL</p>
+                <h2>操作日志</h2>
+              </div>
+              <span class="section-count" id="audit-count">0 条记录</span>
+            </div>
+            <div class="table-wrap">
+              <table class="audit-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>用户</th>
+                    <th>操作</th>
+                    <th>目标</th>
+                    <th>结果</th>
+                    <th>IP</th>
+                    <th class="num">耗时</th>
+                  </tr>
+                </thead>
+                <tbody id="audit-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="audit-empty" hidden>
+              <strong>当前条件没有操作记录</strong>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="account-dialog" class="modal wide">
+      <form method="dialog" id="account-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">ACCOUNT / CCMAX</p>
+            <h2 id="account-dialog-title">新增账号</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <input type="hidden" id="account-id" />
+        <div class="form-grid">
+          <div class="form-section span-2">
+            <strong>基础配置</strong><span>账号身份、调度分组与计费参数</span>
+          </div>
+          <label class="span-2"
+            ><span>账号名称</span
+            ><input
+              id="account-name"
+              required
+              maxlength="100"
+              placeholder="例如：CCMAX-01" /></label
+          ><label
+            ><span>认证类型</span
+            ><select id="account-auth-type">
+              <option value="oauth">OAuth</option>
+              <option value="setup_token">Setup Token</option>
+              <option value="api_key">API Key</option>
+            </select></label
+          ><label
+            ><span>状态</span
+            ><select id="account-status">
+              <option value="active">正常</option>
+              <option value="error">异常</option>
+              <option value="disabled">停用</option>
+            </select></label
+          ><label class="span-2" id="account-session-key-field" hidden
+            ><span>Claude Session Key（可选）</span
+            ><input
+              id="account-session-key"
+              class="secure-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="sk-ant-sid..."
+            /><small>填写后会先验证并换取 OAuth；留空则创建待授权账号，暂不参与调度。</small></label
+          ><label class="toggle-field"
+            ><span>参与调度</span
+            ><input
+              type="checkbox"
+              id="account-schedulable"
+              checked /><i></i></label
+          ><label
+            ><span>并发数</span
+            ><input
+              id="account-concurrency"
+              type="number"
+              min="1"
+              value="3"
+              required /></label
+          ><label
+            ><span>优先级</span
+            ><input
+              id="account-priority"
+              type="number"
+              value="50"
+              required /></label
+          ><label
+            ><span>账号计费倍率</span
+            ><input
+              id="account-rate"
+              type="number"
+              min="0"
+              step="0.01"
+              value="1"
+              required
+          /></label>
+          <label
+            ><span>账号价格 USD</span
+            ><input
+              id="account-price"
+              type="number"
+              min="0"
+              step="0.01"
+              value="0"
+              required
+          /></label>
+          <fieldset class="group-picker">
+            <legend>所属分组</legend>
+            <label class="group-choice group-a"
+              ><input
+                type="checkbox"
+                name="account-group"
+                value="a"
+                checked
+              /><span class="group-choice-icon"
+                ><svg aria-hidden="true">
+                  <use href="#claude-group-icon"></use></svg></span
+              ><b>A 分组</b></label
+            ><label class="group-choice group-b"
+              ><input type="checkbox" name="account-group" value="b" /><span
+                class="group-choice-icon"
+                ><svg aria-hidden="true">
+                  <use href="#claude-group-icon"></use></svg></span
+              ><b>B 分组</b></label
+            >
+          </fieldset>
+          <div class="form-section span-2">
+            <strong>代理与独享 IP</strong
+            ><span
+              >沿用 Sub2API 账号代理绑定，一个自动匹配账号独占一个代理</span
+            >
+          </div>
+          <label
+            ><span>代理池</span
+            ><select id="account-proxy-pool">
+              <option value="">未绑定（不可授权/调度）</option>
+            </select></label
+          ><label class="toggle-field"
+            ><span>自动匹配代理</span
+            ><input type="checkbox" id="account-auto-proxy" /><i></i></label
+          ><label class="span-2"
+            ><span>指定代理</span
+            ><select id="account-proxy">
+              <option value="">未选择</option></select
+            ><small id="proxy-help"
+              >CCMAX 授权、配额与请求必须使用绑定代理，不会回退直连；自动匹配会分配未占用代理。</small
+            ></label
+          >
+          <div class="form-section span-2">
+            <strong>RPM 限制</strong><span>原版三区模型与粘性豁免策略</span>
+          </div>
+          <label class="toggle-field"
+            ><span>启用 RPM 限制</span
+            ><input type="checkbox" id="account-rpm-enabled" /><i></i></label
+          ><label
+            ><span>基础 RPM</span
+            ><input
+              id="account-base-rpm"
+              type="number"
+              min="0"
+              max="10000"
+              value="15" /></label
+          ><label
+            ><span>RPM 策略</span
+            ><select id="account-rpm-strategy">
+              <option value="tiered">三区模型</option>
+              <option value="sticky_exempt">粘性豁免</option>
+            </select></label
+          ><label
+            ><span>粘性缓冲区</span
+            ><input
+              id="account-rpm-buffer"
+              type="number"
+              min="0"
+              value="0"
+            /><small>0 使用并发数与基础 RPM 自动计算</small></label
+          ><label class="span-2"
+            ><span>用户消息限速</span
+            ><select id="account-queue-mode">
+              <option value="off">关闭</option>
+              <option value="soft">软性限速</option>
+              <option value="serial">串行队列</option>
+            </select></label
+          >
+          <div class="form-section span-2">
+            <strong>请求处理</strong
+            ><span>按账号选择 CCMAX 转换或原始参数透传</span>
+          </div>
+          <label class="toggle-field span-2"
+            ><span>原始请求参数透传</span
+            ><input type="checkbox" id="account-request-passthrough" /><i></i></label
+          >
+          <div class="form-section span-2"><strong>凭证与生命周期</strong></div>
+          <label
+            ><span>过期时间</span
+            ><input id="account-expires" type="datetime-local" /></label
+          ><label
+            ><span>限流解除时间</span
+            ><input id="account-rate-reset" type="datetime-local" /></label
+          ><label class="span-2" id="account-credentials-field"
+            ><span>凭证 JSON</span
+            ><textarea
+              id="account-credentials"
+              rows="5"
+              spellcheck="false"
+              placeholder='{"access_token":"..."}'
+            ></textarea
+            ><small id="credential-help"
+              >编辑时留空表示保持原凭证。</small
+            ></label
+          ><label class="span-2"
+            ><span>扩展数据 JSON</span
+            ><textarea
+              id="account-extra"
+              rows="3"
+              spellcheck="false"
+              placeholder='{"custom_forward_url":"https://..."}'
+            ></textarea></label
+          ><label class="span-2"
+            ><span>异常信息</span><input id="account-error" /></label
+          ><label class="span-2"
+            ><span>备注</span><textarea id="account-notes" rows="2"></textarea>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" id="account-submit" type="submit">
+            <i data-lucide="key-round"></i><span>创建账号</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="purpose-dialog" class="modal">
+      <form method="dialog" id="purpose-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">PURPOSE</p>
+            <h2 id="purpose-dialog-title">新增用途</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <input type="hidden" id="purpose-id" />
+        <div class="form-stack">
+          <label
+            ><span>用途标识</span
+            ><input
+              id="purpose-key"
+              required
+              pattern="[a-z0-9][a-z0-9_-]{0,39}" /></label
+          ><label
+            ><span>用途名称</span><input id="purpose-name" required /></label
+          ><label
+            ><span>当前分组</span
+            ><select id="purpose-group">
+              <option value="a">A 分组</option>
+              <option value="b">B 分组</option>
+            </select></label
+          ><label
+            ><span>备注</span
+            ><textarea id="purpose-description" rows="3"></textarea>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">保存用途</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="group-dialog" class="modal">
+      <form method="dialog" id="group-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">GROUP</p>
+            <h2 id="group-dialog-title">编辑分组</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <input type="hidden" id="group-id" />
+        <div class="form-stack">
+          <label><span>分组名称</span><input id="group-name" required /></label
+          ><label
+            ><span>说明</span
+            ><textarea id="group-description" rows="3"></textarea>
+          </label>
+          <div class="form-grid compact-grid">
+            <label
+              ><span>计费倍率</span
+              ><input
+                id="group-rate"
+                type="number"
+                min="0"
+                step="0.01"
+                required /></label
+            ><label
+              ><span>状态</span
+              ><select id="group-status">
+                <option value="active">启用</option>
+                <option value="disabled">停用</option>
+              </select></label
+            ><label
+              ><span>日限额 USD</span
+              ><input
+                id="group-daily"
+                type="number"
+                min="0"
+                step="0.01" /></label
+            ><label
+              ><span>月限额 USD</span
+              ><input id="group-monthly" type="number" min="0" step="0.01"
+            /></label>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">保存分组</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="proxy-pool-dialog" class="modal">
+      <form method="dialog" id="proxy-pool-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">PROXY POOL</p>
+            <h2 id="proxy-pool-title">新增代理池</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <input type="hidden" id="proxy-pool-id" />
+        <div class="form-stack">
+          <label
+            ><span>代理池名称</span
+            ><input id="proxy-pool-name" required /></label
+          ><label
+            ><span>来源</span
+            ><select id="proxy-pool-source">
+              <option value="manual">手动导入</option>
+              <option value="api">代理 API</option>
+            </select></label
+          ><label
+            ><span>默认协议</span
+            ><select id="proxy-pool-protocol">
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </select></label
+          ><label
+            ><span>状态</span
+            ><select id="proxy-pool-status">
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
+            </select></label
+          ><label class="api-source-field"
+            ><span>代理 API URL</span
+            ><input
+              id="proxy-pool-api-url"
+              type="url"
+              placeholder="https://provider.example/api/proxies" /></label
+          ><label class="api-source-field"
+            ><span>请求 Headers JSON</span
+            ><textarea id="proxy-pool-headers" rows="3" spellcheck="false">
+{}</textarea
+            >
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">保存代理池</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="proxy-import-dialog" class="modal">
+      <form method="dialog" id="proxy-import-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">BATCH IMPORT</p>
+            <h2>批量增加代理</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <div class="form-stack">
+          <label
+            ><span>目标代理池</span
+            ><select id="proxy-import-pool" required></select></label
+          ><label
+            ><span>代理列表</span
+            ><textarea
+              id="proxy-import-text"
+              rows="10"
+              required
+              spellcheck="false"
+              placeholder="host:port:user:pass&#10;user:pass:host:port&#10;user:pass@host:port&#10;host:port@user:pass"
+            ></textarea
+            ><small
+              >支持 socks5/http/https URL、host:port，以及四种常见账号密码顺序，每行一个。</small
+            ></label
+          >
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">导入代理</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="user-dialog" class="modal">
+      <form method="dialog" id="user-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">USER</p>
+            <h2 id="user-title">新增用户</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <input type="hidden" id="user-id" />
+        <div class="form-stack">
+          <label
+            ><span>用户名</span
+            ><input
+              id="user-username"
+              autocomplete="username"
+              required /></label
+          ><label
+            ><span>显示名称</span
+            ><input id="user-name" autocomplete="name" /></label
+          ><label
+            ><span>密码</span
+            ><input
+              id="user-password"
+              type="password"
+              minlength="8"
+              autocomplete="new-password"
+            /><small id="user-password-help">至少 8 位</small></label
+          ><label
+            ><span>角色</span
+            ><select id="user-role">
+              <option value="user">普通用户</option>
+              <option value="readonly_admin">只读管理员</option>
+              <option value="admin">管理员</option>
+            </select></label
+          >
+          <fieldset class="group-picker">
+            <legend>允许调度分组</legend>
+            <label class="group-choice group-a"
+              ><input
+                type="checkbox"
+                name="user-group"
+                value="a"
+                checked
+              /><span class="group-choice-icon"
+                ><svg aria-hidden="true">
+                  <use href="#claude-group-icon"></use></svg></span
+              ><b>A 分组</b></label
+            ><label class="group-choice group-b"
+              ><input type="checkbox" name="user-group" value="b" /><span
+                class="group-choice-icon"
+                ><svg aria-hidden="true">
+                  <use href="#claude-group-icon"></use></svg></span
+              ><b>B 分组</b></label
+            >
+          </fieldset>
+          <fieldset class="page-picker">
+            <legend>可见页面</legend>
+            <label><input type="checkbox" name="user-page" value="overview" /><span>首页</span></label>
+            <label><input type="checkbox" name="user-page" value="accounts" /><span>账号池</span></label>
+            <label><input type="checkbox" name="user-page" value="dead" /><span>死亡账户</span></label>
+            <label><input type="checkbox" name="user-page" value="onboarding" /><span>批量上号</span></label>
+            <label><input type="checkbox" name="user-page" value="daily" /><span>每日统计</span></label>
+            <label><input type="checkbox" name="user-page" value="authorization" /><span>授权统计</span></label>
+            <label><input type="checkbox" name="user-page" value="proxies" /><span>代理池</span></label>
+            <label><input type="checkbox" name="user-page" value="access" /><span>用户与 SK</span></label>
+            <label><input type="checkbox" name="user-page" value="pricing" /><span>模型价格</span></label>
+            <label><input type="checkbox" name="user-page" value="billing" /><span>计费中心</span></label>
+            <label><input type="checkbox" name="user-page" value="audit" /><span>操作日志</span></label>
+            <small>页面权限仅控制查看范围；普通用户不能修改系统配置，只读管理员不能执行任何写操作。</small>
+          </fieldset>
+          <label
+            ><span>用户 RPM（0 不限制）</span
+            ><input id="user-rpm" type="number" min="0" value="0" /></label
+          ><label
+            ><span>状态</span
+            ><select id="user-status">
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
+            </select></label
+          >
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">保存用户</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="key-dialog" class="modal">
+      <form method="dialog" id="key-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">API KEY</p>
+            <h2>生成 SK</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <input type="hidden" id="key-id" />
+        <div class="form-stack">
+          <label id="key-user-field"
+            ><span>所属用户</span
+            ><select id="key-user"></select></label
+          ><label
+            ><span>名称</span
+            ><input
+              id="key-name"
+              required
+              placeholder="例如：Claude Code" /></label
+          ><label
+            ><span>调度分组</span
+            ><select id="key-group">
+              <option value="a">A 分组</option>
+              <option value="b">B 分组</option>
+            </select></label
+          ><label
+            ><span>配额 USD（0 不限制）</span
+            ><input
+              id="key-quota"
+              type="number"
+              min="0"
+              step="0.01"
+              value="0" /></label
+          ><label
+            ><span>过期时间</span
+            ><input id="key-expires" type="datetime-local" /></label
+          ><label id="key-status-field"
+            ><span>状态</span
+            ><select id="key-status">
+              <option value="active">启用</option>
+              <option value="disabled">停用</option>
+            </select></label
+          >
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">生成 SK</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="secret-dialog" class="modal">
+      <div class="modal-head">
+        <div>
+          <p class="kicker">SECRET CREATED</p>
+          <h2>SK 已生成</h2>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog>×</button>
+      </div>
+      <div class="secret-body">
+        <p>密钥只在本次显示，请立即保存。</p>
+        <code id="created-secret"></code
+        ><button class="button secondary" id="copy-secret">复制 SK</button>
+      </div>
+    </dialog>
+    <dialog id="price-dialog" class="modal">
+      <form method="dialog" id="price-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">PRICE</p>
+            <h2>模型价格</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <div class="form-stack">
+          <label
+            ><span>模型名称</span><input id="price-model" required
+          /></label>
+          <div class="form-grid compact-grid">
+            <label
+              ><span>输入 / 百万</span
+              ><input
+                id="price-input"
+                type="number"
+                min="0"
+                step="0.0001"
+                required /></label
+            ><label
+              ><span>输出 / 百万</span
+              ><input
+                id="price-output"
+                type="number"
+                min="0"
+                step="0.0001"
+                required /></label
+            ><label
+              ><span>缓存写入 / 百万</span
+              ><input
+                id="price-cache-create"
+                type="number"
+                min="0"
+                step="0.0001"
+                required /></label
+            ><label
+              ><span>缓存读取 / 百万</span
+              ><input
+                id="price-cache-read"
+                type="number"
+                min="0"
+                step="0.0001"
+                required
+            /></label>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">保存价格</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="usage-dialog" class="modal">
+      <form method="dialog" id="usage-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">USAGE</p>
+            <h2>记录用量</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <div class="form-stack">
+          <label
+            ><span>用途</span
+            ><select id="usage-purpose" required></select></label
+          ><label
+            ><span>指定账号</span
+            ><select id="usage-account">
+              <option value="">自动选择</option>
+            </select></label
+          ><label><span>模型</span><input id="usage-model" required /></label>
+          <div class="form-grid compact-grid">
+            <label
+              ><span>输入 Tokens</span
+              ><input id="usage-input" type="number" min="0" value="0" /></label
+            ><label
+              ><span>输出 Tokens</span
+              ><input
+                id="usage-output"
+                type="number"
+                min="0"
+                value="0" /></label
+            ><label
+              ><span>缓存写入</span
+              ><input
+                id="usage-cache-create"
+                type="number"
+                min="0"
+                value="0" /></label
+            ><label
+              ><span>缓存读取</span
+              ><input id="usage-cache-read" type="number" min="0" value="0"
+            /></label>
+          </div>
+          <label
+            ><span>实际成本覆盖 USD</span
+            ><input id="usage-actual" type="number" min="0" step="0.000001"
+          /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>
+            取消</button
+          ><button class="button primary" type="submit">写入流水</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="account-auth-dialog" class="modal">
+      <div class="modal-head">
+        <div>
+          <p class="kicker">CCMAX AUTHORIZATION</p>
+          <h2 id="account-auth-title">更新账号授权</h2>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog>×</button>
+      </div>
+      <input type="hidden" id="auth-account-id" />
+      <div class="form-stack auth-stack">
+        <label
+          ><span>授权类型</span
+          ><select id="auth-mode" data-choice>
+            <option value="oauth">OAuth · 完整配额</option>
+            <option value="setup_token">Setup Token · 推理权限</option></select
+          ><small>授权请求始终使用账号当前绑定的独享代理。</small></label
+        >
+        <div class="auth-method">
+          <div>
+            <strong>Claude Session Key 自动更新</strong
+            ><small
+              >输入 claude.ai 的 Session Key，自动换取 Access Token 与 Refresh
+              Token。</small
+            >
+          </div>
+          <label
+            ><span>Claude Session Key</span
+            ><input
+              id="auth-session-key"
+              class="secure-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="sk-ant-sid..." /></label
+          ><button class="button primary" id="session-auth-submit">
+            <i data-lucide="sparkles"></i><span>自动更新授权</span>
+          </button>
+        </div>
+        <div class="auth-divider"><span>或使用浏览器 OAuth</span></div>
+        <div class="auth-method">
+          <button class="button secondary" id="oauth-start">
+            <i data-lucide="external-link"></i><span>获取 OAuth 链接</span>
+          </button>
+          <div id="oauth-exchange-fields" hidden>
+            <a
+              class="oauth-link"
+              id="oauth-link"
+              href="#"
+              target="_blank"
+              rel="noopener"
+              >在新窗口完成授权</a
+            ><label
+              ><span>回调授权码</span
+              ><input
+                id="oauth-code"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="粘贴授权页返回的 code#state" /></label
+            ><button class="button primary" id="oauth-exchange">
+              <i data-lucide="key-round"></i><span>保存 OAuth 授权</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="modal confirm-modal">
+      <form method="dialog">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">CONFIRM ACTION</p>
+            <h2 id="confirm-title">确认操作</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="submit"
+            value="cancel"
+            aria-label="关闭确认框"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="confirm-body">
+          <span class="confirm-icon"><i data-lucide="triangle-alert"></i></span>
+          <p id="confirm-message"></p>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="submit" value="cancel">
+            取消</button
+          ><button
+            class="button danger"
+            id="confirm-submit"
+            type="submit"
+            value="confirm"
+          >
+            确认删除
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+    <script src="/lib/choices.min.js?v=__ASSET_VERSION__" defer></script>
+    <script src="/lib/lucide.min.js?v=__ASSET_VERSION__" defer></script>
+    <script src="/app.js?v=__ASSET_VERSION__" defer></script>
+  </body>
+</html>

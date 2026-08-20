@@ -1,0 +1,6 @@
+/ccmax-manager
+/*.db
+/*.db-shm
+/*.db-wal
+/.playwright-cli/
+/output/

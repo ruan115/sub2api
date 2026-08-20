@@ -1,0 +1,694 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestAccountPoolRoutingAndBilling(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "主池", "rate_multiplier": 2.0, "status": "active",
+	}, http.StatusOK, nil)
+
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "ccmax-a-01", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "secret-token-a"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 3, "priority": 0,
+		"rate_multiplier": 0.5, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+	if created.Priority != 0 {
+		t.Fatalf("priority = %d, want 0", created.Priority)
+	}
+	if created.Credentials != nil {
+		t.Fatal("account create response must not reveal credentials")
+	}
+
+	var resolved struct {
+		GroupID string  `json:"group_id"`
+		Account account `json:"account"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/pool/resolve", map[string]any{"purpose_key": "default"}, http.StatusOK, &resolved)
+	if resolved.GroupID != "a" || resolved.Account.ID != created.ID {
+		t.Fatalf("resolved %+v, want group a account %d", resolved, created.ID)
+	}
+	if resolved.Account.Credentials["access_token"] != "secret-token-a" {
+		t.Fatal("pool resolve must return credentials to the authenticated integration")
+	}
+
+	usagePayload := map[string]any{
+		"request_id": "req-test-1", "purpose_key": "default", "model": "claude-test",
+		"input_tokens": 1_000_000, "output_tokens": 1_000_000,
+		"cache_creation_tokens": 0, "cache_read_tokens": 0,
+	}
+	var usage usageLog
+	putJSON(t, handler, http.MethodPost, "/api/usage", usagePayload, http.StatusCreated, &usage)
+	assertClose(t, usage.BaseCost, 18)
+	assertClose(t, usage.BilledCost, 36)
+	assertClose(t, usage.ActualCost, 9)
+
+	var duplicate usageLog
+	putJSON(t, handler, http.MethodPost, "/api/usage", usagePayload, http.StatusOK, &duplicate)
+	if duplicate.ID != usage.ID {
+		t.Fatalf("duplicate usage id = %d, want %d", duplicate.ID, usage.ID)
+	}
+	var count int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE request_id = 'req-test-1'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("usage count = %d, want 1", count)
+	}
+}
+
+func TestPurposeSwitchChangesResolvedPool(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	for _, groupID := range []string{"a", "b"} {
+		proxyID := createTestForwardProxy(t, a)
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": "ccmax-" + groupID, "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": "token-" + groupID}, "extra": map[string]any{},
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 0.0, "group_ids": []string{groupID}, "proxy_pool_id": 1, "proxy_id": proxyID,
+		}, http.StatusCreated, nil)
+	}
+
+	var purposes []purpose
+	putJSON(t, handler, http.MethodGet, "/api/purposes", nil, http.StatusOK, &purposes)
+	if len(purposes) != 1 {
+		t.Fatalf("purpose count = %d, want 1", len(purposes))
+	}
+	item := purposes[0]
+	putJSON(t, handler, http.MethodPut, "/api/purposes/1", map[string]any{
+		"key": item.Key, "name": item.Name, "description": item.Description, "active_group_id": "b",
+	}, http.StatusOK, nil)
+
+	var resolved struct {
+		GroupID string  `json:"group_id"`
+		Account account `json:"account"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/pool/resolve", map[string]any{"purpose_key": "default"}, http.StatusOK, &resolved)
+	if resolved.GroupID != "b" || resolved.Account.Name != "ccmax-b" {
+		t.Fatalf("resolved group=%s account=%s, want b/ccmax-b", resolved.GroupID, resolved.Account.Name)
+	}
+	if resolved.Account.RateMultiplier != 0 {
+		t.Fatalf("zero account multiplier changed to %v", resolved.Account.RateMultiplier)
+	}
+}
+
+func TestAccountBatchDelete(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	ids := make([]int64, 0, 3)
+	for index := 1; index <= 3; index++ {
+		var created account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": "batch-delete-" + strconv.Itoa(index), "platform": "anthropic", "auth_type": "oauth",
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 1, "group_ids": []string{"a"}, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+		}, http.StatusCreated, &created)
+		ids = append(ids, created.ID)
+	}
+
+	var result struct {
+		Deleted int64 `json:"deleted"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-delete", map[string]any{"ids": []int64{ids[0], ids[1], ids[1]}}, http.StatusOK, &result)
+	if result.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", result.Deleted)
+	}
+	var active, disabled int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NOT NULL AND schedulable = 0 AND status = 'disabled'`).Scan(&disabled); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || disabled != 2 {
+		t.Fatalf("active=%d disabled=%d, want 1 and 2", active, disabled)
+	}
+	var action string
+	if err := a.db.QueryRow(`SELECT action FROM audit_logs WHERE path = '/api/accounts/batch-delete' ORDER BY id DESC LIMIT 1`).Scan(&action); err != nil {
+		t.Fatal(err)
+	}
+	if action != "account.delete" {
+		t.Fatalf("audit action = %q, want account.delete", action)
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-delete", map[string]any{"ids": []int64{}}, http.StatusBadRequest, nil)
+}
+
+func TestAutomaticProxyAssignmentIsExclusive(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": 1, "text": "socks5://127.0.0.1:12001\nsocks5://127.0.0.1:12002",
+	}, http.StatusCreated, nil)
+
+	proxyIDs := map[int64]bool{}
+	for _, name := range []string{"ccmax-proxy-1", "ccmax-proxy-2"} {
+		var created account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": name, "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+			"auto_proxy": true, "base_rpm": 15, "rpm_strategy": "tiered",
+			"rpm_sticky_buffer": 0, "user_msg_queue_mode": "off",
+		}, http.StatusCreated, &created)
+		if created.ProxyID == nil {
+			t.Fatal("automatic proxy assignment returned no proxy")
+		}
+		if proxyIDs[*created.ProxyID] {
+			t.Fatalf("proxy %d was assigned to two automatic accounts", *created.ProxyID)
+		}
+		proxyIDs[*created.ProxyID] = true
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "ccmax-proxy-overflow", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+		"auto_proxy": true, "base_rpm": 15, "rpm_strategy": "tiered",
+		"rpm_sticky_buffer": 0, "user_msg_queue_mode": "off",
+	}, http.StatusConflict, nil)
+}
+
+func TestProxyDeleteReassignsAutomaticAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": 1, "text": "http://127.0.0.1:14001\nhttp://127.0.0.1:14002",
+	}, http.StatusCreated, nil)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "auto-delete", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+		"auto_proxy": true, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}, http.StatusCreated, &created)
+	if created.ProxyID == nil {
+		t.Fatal("automatic account has no proxy")
+	}
+	deletedID := *created.ProxyID
+	var result struct {
+		Reassigned int `json:"reassigned_accounts"`
+		Paused     int `json:"paused_accounts"`
+	}
+	putJSON(t, handler, http.MethodDelete, "/api/proxies/"+strconv.FormatInt(deletedID, 10), nil, http.StatusOK, &result)
+	if result.Reassigned != 1 || result.Paused != 0 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	updated, err := a.getAccount(created.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Schedulable || updated.ProxyID == nil || *updated.ProxyID == deletedID {
+		t.Fatalf("automatic account was not moved to another proxy: %+v", updated)
+	}
+}
+
+func TestProxyDeletePausesManualAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": 1, "text": "http://127.0.0.1:15001",
+	}, http.StatusCreated, nil)
+	var proxies []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "manual-delete", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+		"proxy_id": proxies[0].ID, "auto_proxy": false, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}, http.StatusCreated, &created)
+	var result struct {
+		Reassigned int `json:"reassigned_accounts"`
+		Paused     int `json:"paused_accounts"`
+	}
+	putJSON(t, handler, http.MethodDelete, "/api/proxies/"+strconv.FormatInt(proxies[0].ID, 10), nil, http.StatusOK, &result)
+	if result.Reassigned != 0 || result.Paused != 1 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	updated, err := a.getAccount(created.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Schedulable || updated.ProxyID != nil || !strings.Contains(updated.ErrorMessage, "独享 IP") {
+		t.Fatalf("manual account was not safely paused: %+v", updated)
+	}
+}
+
+func TestAccountCreateSupportsDeferredSessionAuthorization(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/organizations":
+			cookie, err := r.Cookie("sessionKey")
+			if err != nil || cookie.Value != "valid-session" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, []map[string]any{{"uuid": "org-1"}})
+		case "/v1/oauth/org-1/authorize":
+			writeJSON(w, http.StatusOK, map[string]string{
+				"redirect_uri": "https://platform.claude.com/oauth/code/callback?code=code-1&state=state-1",
+			})
+		case "/token":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"access_token": "access-1", "refresh_token": "refresh-1", "token_type": "bearer",
+				"expires_in": 3600, "scope": claudeOAuthAPIScope,
+				"organization": map[string]string{"uuid": "org-1"},
+				"account":      map[string]string{"uuid": "account-1", "email_address": "user@example.com"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	previousOrganizations := claudeOrganizationsEndpoint
+	previousAuthorize := claudeSessionAuthorizeBaseURL
+	previousToken := claudeTokenEndpoint
+	claudeOrganizationsEndpoint = server.URL + "/organizations"
+	claudeSessionAuthorizeBaseURL = server.URL + "/v1/oauth"
+	claudeTokenEndpoint = server.URL + "/token"
+	defer func() {
+		claudeOrganizationsEndpoint = previousOrganizations
+		claudeSessionAuthorizeBaseURL = previousAuthorize
+		claudeTokenEndpoint = previousToken
+	}()
+
+	payload := map[string]any{
+		"name": "session-create", "platform": "anthropic", "auth_type": "oauth", "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}
+	var deferred account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusCreated, &deferred)
+	if deferred.AuthStatus != "reauth_required" || deferred.HasCredentials || deferred.Schedulable || deferred.AuthError != "等待授权" {
+		t.Fatalf("deferred account has unsafe state: %+v", deferred)
+	}
+	if deferred.DispatchStatus != "unavailable" {
+		t.Fatalf("deferred account dispatch status = %q, want unavailable", deferred.DispatchStatus)
+	}
+	payload["name"] = "session-invalid"
+	payload["session_key"] = "invalid-session"
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusConflict, nil)
+	proxyID := createTestForwardProxy(t, a)
+	payload["proxy_pool_id"] = 1
+	payload["proxy_id"] = proxyID
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusBadGateway, nil)
+	var count int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failed authorization left %d accounts, err=%v", count, err)
+	}
+
+	payload["name"] = "session-valid"
+	payload["session_key"] = "valid-session"
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusCreated, &created)
+	if created.AuthStatus != "valid" || !created.HasCredentials || created.TokenExpiresAt == "" {
+		t.Fatalf("created account is not fully authorized: %+v", created)
+	}
+	var credentials string
+	if err := a.db.QueryRow(`SELECT credentials_json FROM accounts WHERE id = ?`, created.ID).Scan(&credentials); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(credentials, "access-1") || !strings.Contains(credentials, "refresh-1") {
+		t.Fatalf("authorized credentials were not stored: %s", credentialHint(credentials))
+	}
+}
+
+func TestIndexUsesContentVersionedAssets(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	response := httptest.NewRecorder()
+	a.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("index status = %d", response.Code)
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "__ASSET_VERSION__") || !strings.Contains(body, "/styles.css?v=") || !strings.Contains(body, "/app.js?v=") {
+		t.Fatalf("index assets are not versioned: %s", body[:min(len(body), 500)])
+	}
+	if !strings.Contains(response.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("index Cache-Control = %q", response.Header().Get("Cache-Control"))
+	}
+}
+
+func TestReadOnlyAdministratorCannotWrite(t *testing.T) {
+	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	adminCookie := loginCookie(t, handler, "admin", "admin-password")
+
+	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "auditor", "name": "Auditor", "password": "auditor-password",
+		"role": "readonly_admin", "status": "active", "allowed_group_ids": []string{"a", "b"}, "rpm_limit": 0,
+	}, adminCookie, "", http.StatusCreated, nil)
+	readonlyCookie := loginCookie(t, handler, "auditor", "auditor-password")
+
+	requestJSON(t, handler, http.MethodGet, "/api/accounts", nil, readonlyCookie, "", http.StatusOK, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "changed", "description": "", "rate_multiplier": 1, "status": "active",
+	}, readonlyCookie, "", http.StatusForbidden, nil)
+	requestJSON(t, handler, http.MethodPost, "/api/pool/resolve", map[string]any{"purpose_key": "default"}, readonlyCookie, "", http.StatusForbidden, nil)
+}
+
+func TestAPIKeyGatewayDispatchAndBilling(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-token" {
+			t.Fatalf("upstream authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("request-id", "req-gateway-test")
+		_, _ = w.Write([]byte(`{"id":"msg_1","usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":5,"cache_read_input_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var user panelUser
+	putJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "client", "name": "Client", "password": "client-password", "role": "user",
+		"status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 10,
+	}, http.StatusCreated, &user)
+	var key apiKeyRecord
+	putJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"user_id": user.ID, "name": "test-key", "group_id": "a", "status": "active", "quota": 10,
+	}, http.StatusCreated, &key)
+	if !strings.HasPrefix(key.Key, "sk-") {
+		t.Fatalf("generated key = %q", key.Key)
+	}
+	proxyID := createTestForwardProxy(t, a)
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "gateway-account", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "upstream-token"},
+		"extra":       map[string]any{"custom_forward_url": upstream.URL}, "status": "active", "schedulable": true,
+		"concurrency": 2, "priority": 1, "rate_multiplier": 1, "group_ids": []string{"a"},
+		"proxy_pool_id": 1, "proxy_id": proxyID,
+		"base_rpm": 15, "rpm_strategy": "tiered", "rpm_sticky_buffer": 0, "user_msg_queue_mode": "off",
+	}, http.StatusCreated, nil)
+
+	var response map[string]any
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-test", "max_tokens": 32, "messages": []map[string]string{{"role": "user", "content": "hello"}},
+	}, nil, key.Key, http.StatusOK, &response)
+	if response["id"] != "msg_1" {
+		t.Fatalf("gateway response = %#v", response)
+	}
+	var usageCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE request_id = 'req-gateway-test' AND input_tokens = 100 AND output_tokens = 20`).Scan(&usageCount); err != nil || usageCount != 1 {
+		t.Fatalf("usageCount=%d err=%v", usageCount, err)
+	}
+}
+
+func TestIndependentAPIKeysCanBeDisabledImmediately(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	users := make([]panelUser, 2)
+	keys := make([]apiKeyRecord, 2)
+	for i := range users {
+		putJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+			"username": "client-" + string(rune('a'+i)), "name": "Client", "password": "client-password", "role": "user",
+			"status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 0,
+		}, http.StatusCreated, &users[i])
+		putJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+			"user_id": users[i].ID, "name": "key", "group_id": "a", "status": "active", "quota": 0,
+		}, http.StatusCreated, &keys[i])
+	}
+	if keys[0].UserID == keys[1].UserID || keys[0].Key == keys[1].Key {
+		t.Fatal("API keys must have independent owners and secrets")
+	}
+	if _, err := a.authenticateGatewayKey(keys[0].Key); err != nil {
+		t.Fatalf("active key rejected: %v", err)
+	}
+	putJSON(t, handler, http.MethodPatch, "/api/api-keys/"+strconv.FormatInt(keys[0].ID, 10)+"/status", map[string]any{"status": "disabled"}, http.StatusOK, nil)
+	if _, err := a.authenticateGatewayKey(keys[0].Key); err == nil {
+		t.Fatal("disabled key remained usable")
+	}
+	if _, err := a.authenticateGatewayKey(keys[1].Key); err != nil {
+		t.Fatalf("disabling one user's key affected another user: %v", err)
+	}
+}
+
+func TestAuditLogsLoginMutationsAndRedactsSecrets(t *testing.T) {
+	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	cookie := loginCookie(t, handler, "admin", "admin-password")
+	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "logged-user", "name": "Logged", "password": "private-password", "role": "user",
+		"status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 0,
+	}, cookie, "", http.StatusCreated, nil)
+	var logs []auditLog
+	requestJSON(t, handler, http.MethodGet, "/api/audit-logs", nil, cookie, "", http.StatusOK, &logs)
+	var loginSeen, createSeen bool
+	for _, item := range logs {
+		switch item.Action {
+		case "auth.login":
+			loginSeen = true
+		case "user.create":
+			createSeen = true
+			if strings.Contains(item.RequestBody, "private-password") || !strings.Contains(item.RequestBody, "[REDACTED]") {
+				t.Fatalf("audit body was not redacted: %s", item.RequestBody)
+			}
+		}
+	}
+	if !loginSeen || !createSeen {
+		t.Fatalf("audit logs missing login=%v create=%v: %+v", loginSeen, createSeen, logs)
+	}
+}
+
+func TestManualProxyAssignmentIsAlsoExclusive(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{"pool_id": 1, "text": "http://127.0.0.1:13001"}, http.StatusCreated, nil)
+	var proxies []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
+	if len(proxies) != 1 {
+		t.Fatalf("proxy count = %d", len(proxies))
+	}
+	payload := map[string]any{
+		"name": "manual-one", "platform": "anthropic", "auth_type": "oauth", "credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10, "rate_multiplier": 1, "group_ids": []string{"a"},
+		"proxy_pool_id": 1, "proxy_id": proxies[0].ID, "auto_proxy": false, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusCreated, nil)
+	payload["name"] = "manual-two"
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusConflict, nil)
+}
+
+func TestQuotaHeadersAndFilteredAccountSummary(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "summary-account", "platform": "anthropic", "auth_type": "oauth", "credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10, "rate_multiplier": 1, "group_ids": []string{"a"},
+	}, http.StatusCreated, &created)
+	reset := time.Now().Add(time.Hour).Unix()
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.25")
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset, 10))
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", "0.60")
+	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(reset, 10))
+	a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: http.StatusOK, Header: headers})
+	updated, err := a.getAccount(created.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Quota5H != 25 || updated.Quota7D != 60 || updated.AuthStatus != "valid" {
+		t.Fatalf("quota/auth snapshot = %+v", updated)
+	}
+	putJSON(t, handler, http.MethodPost, "/api/usage", map[string]any{"request_id": "summary-req", "purpose_key": "default", "account_id": created.ID, "model": "claude-test", "input_tokens": 1000, "output_tokens": 2000}, http.StatusCreated, nil)
+	var summary accountSummary
+	putJSON(t, handler, http.MethodGet, "/api/accounts/summary?search=summary&group_id=a", nil, http.StatusOK, &summary)
+	if summary.Accounts != 1 || summary.Requests != 1 || summary.BilledCost <= 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestModelPricesSyncFromSub2APICompatibleSource(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	pricing := []byte(`{"claude-test":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015,"cache_creation_input_token_cost":0.00000375,"cache_read_input_token_cost":0.0000003,"litellm_provider":"anthropic"},"gpt-test":{"input_cost_per_token":1,"output_cost_per_token":1,"litellm_provider":"openai"}}`)
+	hash := sha256.Sum256(pricing)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sha256") {
+			_, _ = w.Write([]byte(hex.EncodeToString(hash[:])))
+			return
+		}
+		_, _ = w.Write(pricing)
+	}))
+	defer server.Close()
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	_, _ = a.db.Exec(`UPDATE pricing_sync_state SET remote_url = ?, hash_url = ? WHERE id = 1`, server.URL+"/prices.json", server.URL+"/prices.sha256")
+	state, err := a.syncModelPrices(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ModelCount != 1 || state.Status != "current" {
+		t.Fatalf("sync state = %+v", state)
+	}
+	var input, output float64
+	var source string
+	if err := a.db.QueryRow(`SELECT input_per_million, output_per_million, source FROM model_prices WHERE model = 'claude-test'`).Scan(&input, &output, &source); err != nil {
+		t.Fatal(err)
+	}
+	if input != 3 || output != 15 || source != "remote" {
+		t.Fatalf("synced price input=%v output=%v source=%s", input, output, source)
+	}
+}
+
+func loginCookie(t *testing.T, handler http.Handler, username, password string) *http.Cookie {
+	t.Helper()
+	response := requestJSON(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": username, "password": password}, nil, "", http.StatusOK, nil)
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == sessionCookie {
+			return cookie
+		}
+	}
+	t.Fatal("login response has no session cookie")
+	return nil
+}
+
+func requestJSON(t *testing.T, handler http.Handler, method, path string, input any, cookie *http.Cookie, apiKey string, wantStatus int, output any) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	if input != nil {
+		if err := json.NewEncoder(&body).Encode(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(method, path, &body)
+	if input != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != nil {
+		request.AddCookie(cookie)
+	}
+	if apiKey != "" {
+		request.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != wantStatus {
+		t.Fatalf("%s %s status = %d, want %d; body=%s", method, path, response.Code, wantStatus, response.Body.String())
+	}
+	if output != nil && response.Code != http.StatusNoContent {
+		if err := json.NewDecoder(response.Body).Decode(output); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return response
+}
+
+func putJSON(t *testing.T, handler http.Handler, method, path string, input any, wantStatus int, output any) {
+	t.Helper()
+	requestJSON(t, handler, method, path, input, nil, "", wantStatus, output)
+}
+
+func assertClose(t *testing.T, got, want float64) {
+	t.Helper()
+	if math.Abs(got-want) > 1e-8 {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
