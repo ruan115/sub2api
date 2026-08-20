@@ -238,7 +238,7 @@ func TestGatewayFailsOverAndMapsCountTokensModel(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		for _, field := range []string{"temperature", "top_p", "top_k", "stream", "stop_sequences", "stop", "max_tokens"} {
+		for _, field := range []string{"temperature", "top_p", "top_k", "stream", "stop_sequences", "stop", "max_tokens", "metadata"} {
 			if _, exists := body[field]; exists {
 				t.Errorf("count_tokens forwarded generation field %q", field)
 			}

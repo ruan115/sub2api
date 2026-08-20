@@ -139,6 +139,9 @@ func sanitizeCountTokensPayload(payload map[string]any) {
 		"stop_sequences",
 		"stop",
 		"max_tokens",
+		// The shared OAuth rewrite adds message metadata, while Anthropic's
+		// count_tokens request schema accepts input fields only.
+		"metadata",
 	} {
 		delete(payload, field)
 	}
