@@ -790,6 +790,31 @@ svg {
   font-family: "SFMono-Regular", monospace;
   font-size: 13px;
 }
+.group-mode-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.group-mode-setting > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.group-mode-setting strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+.group-mode-setting small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.group-mode-setting .compact-toggle {
+  flex: 0 0 auto;
+}
 .capacity-bar {
   display: flex;
   height: 6px;

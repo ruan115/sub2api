@@ -87,6 +87,10 @@ func TestOAuthGatewayMimicsClaudeCodeAndFiltersHeaders(t *testing.T) {
 	if len(system) != 3 {
 		t.Fatalf("system blocks=%d body=%#v", len(system), got.Body)
 	}
+	expansion, _ := system[2].(map[string]any)["text"].(string)
+	if !strings.Contains(expansion, "authorized security testing") {
+		t.Fatalf("default group must retain Sub2API expansion: %q", expansion)
+	}
 	billing, _ := system[0].(map[string]any)["text"].(string)
 	if !strings.HasPrefix(billing, "x-anthropic-billing-header: cc_version="+claudeCLIVersion+".") {
 		t.Fatalf("billing block=%q", billing)
@@ -106,6 +110,57 @@ func TestOAuthGatewayMimicsClaudeCodeAndFiltersHeaders(t *testing.T) {
 	}
 	if !strings.Contains(fingerprintJSON, "ClientID") || strings.Contains(extraJSON, sub2FingerprintExtraKey) {
 		t.Fatalf("fingerprint storage=%s extra=%s", fingerprintJSON, extraJSON)
+	}
+}
+
+func TestOAuthGatewayUsesGroupNormalRequestMode(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	captured := make(chan capturedClaudeRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- capturedClaudeRequest{Header: r.Header.Clone(), Body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_normal","usage":{"input_tokens":2,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "普通客户端", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": true,
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "normal-mode", upstream.URL, 0, nil, map[string]any{
+		"access_token": "oauth-token", "account_uuid": "account-uuid",
+	})
+
+	body := []byte(`{"model":"claude-fable-5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	got := <-captured
+	system, _ := got.Body["system"].([]any)
+	if len(system) != 3 {
+		t.Fatalf("system blocks=%d body=%#v", len(system), got.Body)
+	}
+	expansion, _ := system[2].(map[string]any)["text"].(string)
+	if !strings.Contains(expansion, "interactive assistant") || strings.Contains(expansion, "authorized security testing") {
+		t.Fatalf("normal request expansion=%q", expansion)
+	}
+	billing, _ := system[0].(map[string]any)["text"].(string)
+	if !strings.HasPrefix(billing, "x-anthropic-billing-header: cc_version="+claudeCLIVersion+".") {
+		t.Fatalf("billing block=%q", billing)
+	}
+	if got.Header.Get("X-App") != "cli" || !strings.Contains(got.Header.Get("anthropic-beta"), "claude-code-20250219") {
+		t.Fatalf("normal mode lost OAuth mimicry headers: %#v", got.Header)
 	}
 }
 

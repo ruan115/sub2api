@@ -50,28 +50,30 @@ type app struct {
 }
 
 type group struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	RateMultiplier  float64  `json:"rate_multiplier"`
-	DailyLimitUSD   *float64 `json:"daily_limit_usd"`
-	MonthlyLimitUSD *float64 `json:"monthly_limit_usd"`
-	Status          string   `json:"status"`
-	ActiveAccounts  int      `json:"active_accounts"`
-	TotalAccounts   int      `json:"total_accounts"`
-	MonthBilledCost float64  `json:"month_billed_cost"`
-	MonthActualCost float64  `json:"month_actual_cost"`
-	TodayBilledCost float64  `json:"today_billed_cost"`
-	UpdatedAt       string   `json:"updated_at"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	RateMultiplier    float64  `json:"rate_multiplier"`
+	DailyLimitUSD     *float64 `json:"daily_limit_usd"`
+	MonthlyLimitUSD   *float64 `json:"monthly_limit_usd"`
+	NormalRequestMode bool     `json:"normal_request_mode"`
+	Status            string   `json:"status"`
+	ActiveAccounts    int      `json:"active_accounts"`
+	TotalAccounts     int      `json:"total_accounts"`
+	MonthBilledCost   float64  `json:"month_billed_cost"`
+	MonthActualCost   float64  `json:"month_actual_cost"`
+	TodayBilledCost   float64  `json:"today_billed_cost"`
+	UpdatedAt         string   `json:"updated_at"`
 }
 
 type groupInput struct {
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	RateMultiplier  float64  `json:"rate_multiplier"`
-	DailyLimitUSD   *float64 `json:"daily_limit_usd"`
-	MonthlyLimitUSD *float64 `json:"monthly_limit_usd"`
-	Status          string   `json:"status"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	RateMultiplier    float64  `json:"rate_multiplier"`
+	DailyLimitUSD     *float64 `json:"daily_limit_usd"`
+	MonthlyLimitUSD   *float64 `json:"monthly_limit_usd"`
+	NormalRequestMode bool     `json:"normal_request_mode"`
+	Status            string   `json:"status"`
 }
 
 type account struct {
@@ -365,6 +367,7 @@ func (a *app) migrate() error {
 			rate_multiplier REAL NOT NULL DEFAULT 1 CHECK (rate_multiplier >= 0),
 			daily_limit_usd REAL,
 			monthly_limit_usd REAL,
+			normal_request_mode INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -680,7 +683,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -689,7 +692,7 @@ func (a *app) listGroups() ([]group, error) {
 	for rows.Next() {
 		var item group
 		var daily, monthly sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -727,7 +730,7 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "limits must be non-negative")
 		return
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, strings.TrimSpace(input.Description), input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, input.Status, id)
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, strings.TrimSpace(input.Description), input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

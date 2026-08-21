@@ -41,7 +41,13 @@ type CCMaxCompatibilityInput struct {
 	// ForceNonClaudeCode keeps protocol bridges on the same mimicry lane as
 	// Sub2API's Chat Completions handler, regardless of the caller User-Agent.
 	ForceNonClaudeCode bool
+	// NormalRequestMode retains the OAuth mimicry wire shape while replacing
+	// the security-oriented Claude Code expansion with a neutral assistant
+	// prompt. The default false value preserves the original Sub2API lane.
+	NormalRequestMode bool
 }
+
+const ccmaxNormalRequestExpansionPrompt = "You are an interactive assistant. Follow the user's instructions and provide a direct, helpful response."
 
 // CCMaxCompatibilityPrepared is the exact wire request produced by the
 // original Sub2API Anthropic OAuth defaults.
@@ -156,7 +162,11 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 			if raw := gjson.GetBytes(body, "system"); raw.Exists() {
 				_ = json.Unmarshal([]byte(raw.Raw), &system)
 			}
-			body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
+			expansionPrompt := ""
+			if input.NormalRequestMode {
+				expansionPrompt = ccmaxNormalRequestExpansionPrompt
+			}
+			body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, expansionPrompt, "")
 			opts := claudeOAuthNormalizeOptions{}
 			if metadataUserID == "" && input.Fingerprint != nil {
 				userID := strings.TrimSpace(input.ClaudeUserID)

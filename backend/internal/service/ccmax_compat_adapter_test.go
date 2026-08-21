@@ -158,6 +158,20 @@ func TestPrepareCCMaxCompatibilityRequestCanForceChatMimicry(t *testing.T) {
 	require.False(t, prepared.ClaudeCode)
 }
 
+func TestPrepareCCMaxCompatibilityRequestNormalModeKeepsMimicryWithNeutralExpansion(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", Stream: true, OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.True(t, prepared.Mimic)
+	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
+	require.Equal(t, ccmaxNormalRequestExpansionPrompt, gjson.GetBytes(prepared.Body, "system.2.text").String())
+	require.NotContains(t, string(prepared.Body), "authorized security testing")
+	require.Contains(t, getHeaderRaw(prepared.Headers, "anthropic-beta"), "claude-code-20250219")
+}
+
 func TestPrepareCCMaxCompatibilityCountTokensUsesOriginalSanitizer(t *testing.T) {
 	body := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"metadata":{"trace":"keep"},"max_tokens":12,"stream":true,"temperature":0.2}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{

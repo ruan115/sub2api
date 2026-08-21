@@ -625,7 +625,7 @@ function renderDashboard() {
       const ratio = item.total_accounts
         ? Math.round((item.active_accounts / item.total_accounts) * 100)
         : 0;
-      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div></article>`;
+      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -1260,6 +1260,7 @@ function openGroup(item) {
   $("#group-status").value = item.status;
   $("#group-daily").value = item.daily_limit_usd ?? "";
   $("#group-monthly").value = item.monthly_limit_usd ?? "";
+  $("#group-normal-request-mode").checked = Boolean(item.normal_request_mode);
   showInitializedDialog("#group-dialog");
 }
 function openPool(item = null) {
@@ -2032,6 +2033,7 @@ $("#group-form").addEventListener("submit", async (event) => {
         status: $("#group-status").value,
         daily_limit_usd: optional("#group-daily"),
         monthly_limit_usd: optional("#group-monthly"),
+        normal_request_mode: $("#group-normal-request-mode").checked,
       }),
     });
     $("#group-dialog").close();

@@ -75,6 +75,7 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		ClientUserAgent: r.UserAgent(), APIKeyID: gatewayAPIKeyID(r.Context()),
 		MappedModel: mappedModel, Fingerprint: fingerprint,
 		ForceNonClaudeCode: gatewayOpenAIChatRequest(r.Context()),
+		NormalRequestMode:  gatewayNormalRequestMode(r.Context()),
 	})
 	if err != nil {
 		return claudePreparedRequest{}, err
