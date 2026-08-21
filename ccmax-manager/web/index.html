@@ -1411,25 +1411,37 @@
         </div>
         <div class="auth-divider"><span>或使用浏览器 OAuth</span></div>
         <div class="auth-method">
-          <button class="button secondary" id="oauth-start">
-            <i data-lucide="external-link"></i><span>获取 OAuth 链接</span>
+          <button class="button secondary" id="oauth-start" type="button">
+            <i data-lucide="link"></i><span>获取 OAuth 链接</span>
           </button>
           <div id="oauth-exchange-fields" hidden>
-            <a
-              class="oauth-link"
-              id="oauth-link"
-              href="#"
-              target="_blank"
-              rel="noopener"
-              >在新窗口完成授权</a
-            ><label
+            <div class="oauth-link-output">
+              <span>OAuth 链接</span>
+              <div class="oauth-link-copy-row">
+                <textarea
+                  id="oauth-link"
+                  rows="3"
+                  readonly
+                  spellcheck="false"
+                  aria-label="OAuth 链接"></textarea>
+                <button
+                  class="icon-button"
+                  id="copy-oauth-link"
+                  type="button"
+                  title="复制 OAuth 链接"
+                  aria-label="复制 OAuth 链接">
+                  <i data-lucide="copy"></i>
+                </button>
+              </div>
+            </div>
+            <label
               ><span>回调授权码</span
               ><input
                 id="oauth-code"
                 autocomplete="off"
                 spellcheck="false"
                 placeholder="粘贴授权页返回的 code#state" /></label
-            ><button class="button primary" id="oauth-exchange">
+            ><button class="button primary" id="oauth-exchange" type="button">
               <i data-lucide="key-round"></i><span>保存 OAuth 授权</span>
             </button>
           </div>

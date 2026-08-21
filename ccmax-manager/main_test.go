@@ -399,6 +399,36 @@ func TestIndexUsesContentVersionedAssets(t *testing.T) {
 	}
 }
 
+func TestOAuthLinkIsDisplayedAndCopiedWithoutOpeningTab(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	indexResponse := httptest.NewRecorder()
+	handler.ServeHTTP(indexResponse, httptest.NewRequest(http.MethodGet, "/", nil))
+	index := indexResponse.Body.String()
+	if !strings.Contains(index, `id="oauth-link"`) || !strings.Contains(index, `id="copy-oauth-link"`) {
+		t.Fatalf("OAuth link display or copy control is missing")
+	}
+	if strings.Contains(index, `class="oauth-link"`) || strings.Contains(index, `>在新窗口完成授权</a`) {
+		t.Fatalf("OAuth link must be displayed as read-only content instead of a navigation link")
+	}
+
+	appResponse := httptest.NewRecorder()
+	handler.ServeHTTP(appResponse, httptest.NewRequest(http.MethodGet, "/app.js", nil))
+	app := appResponse.Body.String()
+	if strings.Contains(app, `window.open(result.auth_url`) {
+		t.Fatalf("OAuth generation still opens a browser tab")
+	}
+	if !strings.Contains(app, `copyToClipboard(result.auth_url)`) {
+		t.Fatalf("OAuth generation does not copy the generated URL")
+	}
+}
+
 func TestReadOnlyAdministratorCannotWrite(t *testing.T) {
 	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

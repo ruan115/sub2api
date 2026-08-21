@@ -305,6 +305,29 @@ function toast(message, type = "success") {
   $("#toast-region").append(node);
   setTimeout(() => node.remove(), 3200);
 }
+async function copyToClipboard(value) {
+  const text = String(value || "");
+  if (!text) throw new Error("没有可复制的内容");
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Continue with the selection-based fallback for restricted browsers.
+    }
+  }
+  const fallback = document.createElement("textarea");
+  fallback.value = text;
+  fallback.setAttribute("readonly", "");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  fallback.style.pointerEvents = "none";
+  document.body.append(fallback);
+  fallback.select();
+  const copied = document.execCommand("copy");
+  fallback.remove();
+  if (!copied) throw new Error("浏览器拒绝访问剪切板");
+}
 function confirmAction(title, message, confirmLabel = "确认") {
   const dialog = $("#confirm-dialog");
   dialog.returnValue = "";
@@ -1350,6 +1373,7 @@ function openAccountAuth(account) {
   $("#account-auth-title").textContent = `更新授权 · ${account.name}`;
   $("#auth-session-key").value = "";
   $("#oauth-code").value = "";
+  $("#oauth-link").value = "";
   $("#oauth-exchange-fields").hidden = true;
   setChoiceValue(
     "#auth-mode",
@@ -1814,13 +1838,26 @@ $("#oauth-start").addEventListener("click", async () => {
       { method: "POST", body: JSON.stringify({ mode: $("#auth-mode").value }) },
     );
     state.oauthSessionID = result.session_id;
-    $("#oauth-link").href = result.auth_url;
+    $("#oauth-link").value = result.auth_url;
     $("#oauth-exchange-fields").hidden = false;
-    window.open(result.auth_url, "_blank", "noopener");
+    try {
+      await copyToClipboard(result.auth_url);
+      toast("OAuth 链接已复制");
+    } catch {
+      toast("OAuth 链接已生成，请点击复制");
+    }
   } catch (error) {
     toast(error.message, "error");
   } finally {
     button.disabled = false;
+  }
+});
+$("#copy-oauth-link").addEventListener("click", async () => {
+  try {
+    await copyToClipboard($("#oauth-link").value);
+    toast("OAuth 链接已复制");
+  } catch (error) {
+    toast(error.message, "error");
   }
 });
 $("#oauth-exchange").addEventListener("click", async () => {
@@ -2104,8 +2141,12 @@ $("#key-form").addEventListener("submit", async (event) => {
   }
 });
 $("#copy-secret").addEventListener("click", async () => {
-  await navigator.clipboard.writeText($("#created-secret").textContent);
-  toast("SK 已复制");
+  try {
+    await copyToClipboard($("#created-secret").textContent);
+    toast("SK 已复制");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 });
 $("#price-form").addEventListener("submit", async (event) => {
   event.preventDefault();

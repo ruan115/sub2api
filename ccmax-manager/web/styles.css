@@ -2026,15 +2026,28 @@ label small {
   display: grid;
   gap: 12px;
 }
-.oauth-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 38px;
-  color: var(--a);
-  font-size: 11px;
-  font-weight: 650;
-  text-decoration: none;
+.oauth-link-output {
+  display: grid;
+  gap: 6px;
+}
+.oauth-link-output > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+.oauth-link-copy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: start;
+  gap: 8px;
+}
+.oauth-link-copy-row textarea {
+  min-height: 68px;
+  resize: none;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
 }
 
 .choices {
