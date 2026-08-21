@@ -506,6 +506,36 @@ func TestGatewayModelsAliasFiltersWildcardModels(t *testing.T) {
 	requestJSON(t, handler, http.MethodGet, "/models/claude-opus-4-6", nil, nil, key.Key, http.StatusNotFound, nil)
 }
 
+func TestGatewayNoAccountClassificationMatchesSub2(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	extra := map[string]any{"supported_models": []string{"claude-known"}}
+	created := createGatewayTestAccount(t, a, handler, "temporarily-unavailable", "https://unused.example.test", 0, extra, map[string]any{"access_token": "token"})
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ? WHERE id = ?`, future, created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(model string) *httptest.ResponseRecorder {
+		body := `{"model":"` + model + `","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`
+		r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+key.Key)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	unsupported := request("claude-unknown")
+	if unsupported.Code != http.StatusNotFound || !strings.Contains(unsupported.Body.String(), "model_not_found") {
+		t.Fatalf("unsupported status=%d body=%s", unsupported.Code, unsupported.Body.String())
+	}
+	unavailable := request("claude-known")
+	if unavailable.Code != http.StatusServiceUnavailable || !strings.Contains(unavailable.Body.String(), "api_error") {
+		t.Fatalf("unavailable status=%d body=%s", unavailable.Code, unavailable.Body.String())
+	}
+}
+
 func TestGatewayNeverDispatchesWithoutAnActiveProxy(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var upstreamCalls atomic.Int32
@@ -527,7 +557,7 @@ func TestGatewayNeverDispatchesWithoutAnActiveProxy(t *testing.T) {
 
 	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
 		"model": "claude-test", "max_tokens": 8, "messages": []any{map[string]any{"role": "user", "content": "hello"}},
-	}, nil, key.Key, http.StatusTooManyRequests, nil)
+	}, nil, key.Key, http.StatusServiceUnavailable, nil)
 	if calls := upstreamCalls.Load(); calls != 0 {
 		t.Fatalf("unproxied upstream calls=%d, want 0", calls)
 	}

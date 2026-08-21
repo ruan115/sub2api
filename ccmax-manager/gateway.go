@@ -329,15 +329,38 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		_, _ = w.Write(lastFailure.body)
 		return
 	}
-	status := http.StatusServiceUnavailable
-	message := "no account is available for this request"
-	if lastDispatchError != nil {
-		message = lastDispatchError.Error()
-		if strings.Contains(message, "RPM") || strings.Contains(message, "capacity") {
-			status = http.StatusTooManyRequests
+	status, errorType, message := a.classifyGatewayNoAccount(key.GroupID, envelope.Model, lastDispatchError)
+	writeAnthropicGatewayError(w, status, errorType, message)
+}
+
+func (a *app) classifyGatewayNoAccount(groupID, model string, cause error) (int, string, string) {
+	message := "Service temporarily unavailable"
+	if cause != nil {
+		message = "No available accounts: " + cause.Error()
+	}
+	rows, err := a.db.Query(`SELECT a.extra_json
+		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.status = 'active' AND a.schedulable = 1`, groupID)
+	if err != nil {
+		return http.StatusServiceUnavailable, "api_error", message
+	}
+	defer rows.Close()
+	hasAccounts := false
+	hasModelSupport := false
+	for rows.Next() {
+		var extraJSON string
+		if rows.Scan(&extraJSON) != nil {
+			return http.StatusServiceUnavailable, "api_error", message
+		}
+		hasAccounts = true
+		if accountSupportsModel(gatewayAccount{ExtraJSON: extraJSON}, model) {
+			hasModelSupport = true
 		}
 	}
-	writeError(w, status, message)
+	if hasAccounts && !hasModelSupport {
+		return http.StatusNotFound, "model_not_found", fmt.Sprintf("Model %q is not supported by any configured account in this group", model)
+	}
+	return http.StatusServiceUnavailable, "api_error", message
 }
 
 func validateGatewayAccountCredential(account gatewayAccount) error {
