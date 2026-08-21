@@ -418,12 +418,11 @@ func (a *app) importProxyText(poolID int64, defaultProtocol, text string) (creat
 			invalid++
 			continue
 		}
-		name := item.Host + ":" + strconv.Itoa(item.Port)
-		result, execErr := tx.Exec(`INSERT OR IGNORE INTO proxies (pool_id, name, protocol, host, port, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)`, poolID, name, item.Protocol, item.Host, item.Port, item.Username, item.Password)
+		_, inserted, execErr := storeProxy(tx, poolID, item)
 		if execErr != nil {
 			return 0, 0, 0, execErr
 		}
-		if count, _ := result.RowsAffected(); count == 0 {
+		if !inserted {
 			skipped++
 		} else {
 			created++
@@ -434,6 +433,52 @@ func (a *app) importProxyText(poolID int64, defaultProtocol, text string) (creat
 	}
 	err = tx.Commit()
 	return
+}
+
+func storeProxy(tx *sql.Tx, poolID int64, item parsedProxy) (int64, bool, error) {
+	name := item.Host + ":" + strconv.Itoa(item.Port)
+	result, err := tx.Exec(`INSERT OR IGNORE INTO proxies (pool_id, name, protocol, host, port, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)`, poolID, name, item.Protocol, item.Host, item.Port, item.Username, item.Password)
+	if err != nil {
+		return 0, false, err
+	}
+	count, _ := result.RowsAffected()
+	var id int64
+	err = tx.QueryRow(`SELECT id FROM proxies WHERE pool_id = ? AND protocol = ? AND host = ? AND port = ? AND username = ? AND password = ? AND deleted_at IS NULL`, poolID, item.Protocol, item.Host, item.Port, item.Username, item.Password).Scan(&id)
+	return id, count > 0, err
+}
+
+func (a *app) ensureProxyInPool(poolID *int64, value string) (*int64, error) {
+	if poolID == nil || *poolID <= 0 {
+		return nil, errors.New("select a proxy pool before entering a manual proxy")
+	}
+	var defaultProtocol string
+	if err := a.db.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ? AND status = 'active' AND deleted_at IS NULL`, *poolID).Scan(&defaultProtocol); err != nil {
+		return nil, errors.New("selected proxy pool is unavailable")
+	}
+	item, err := parseProxyLine(value, defaultProtocol)
+	if err != nil {
+		return nil, errors.New("invalid proxy format")
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	id, _, err := storeProxy(tx, *poolID, item)
+	if err != nil {
+		return nil, err
+	}
+	var status string
+	if err := tx.QueryRow(`SELECT status FROM proxies WHERE id = ?`, id).Scan(&status); err != nil {
+		return nil, err
+	}
+	if status != "active" {
+		return nil, errors.New("manual proxy already exists but is not active")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &id, nil
 }
 
 func parseProxyLine(line, defaultProtocol string) (parsedProxy, error) {

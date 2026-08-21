@@ -452,6 +452,155 @@ func TestReadOnlyAdministratorCannotWrite(t *testing.T) {
 	requestJSON(t, handler, http.MethodPost, "/api/pool/resolve", map[string]any{"purpose_key": "default"}, readonlyCookie, "", http.StatusForbidden, nil)
 }
 
+func TestOrdinaryUserSeesAccountPoolButCannotMutateAccounts(t *testing.T) {
+	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	adminCookie := loginCookie(t, handler, "admin", "admin-password")
+	var user panelUser
+	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "pool-viewer", "name": "Pool Viewer", "password": "viewer-password",
+		"role": "user", "status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 0,
+	}, adminCookie, "", http.StatusCreated, &user)
+	if strings.Join(user.VisiblePages, ",") != "accounts,access" {
+		t.Fatalf("ordinary user visible pages = %v", user.VisiblePages)
+	}
+
+	userCookie := loginCookie(t, handler, "pool-viewer", "viewer-password")
+	requestJSON(t, handler, http.MethodGet, "/api/accounts", nil, userCookie, "", http.StatusOK, nil)
+	mutations := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPost, "/api/accounts", map[string]any{}},
+		{http.MethodPut, "/api/accounts/1", map[string]any{}},
+		{http.MethodDelete, "/api/accounts/1", nil},
+		{http.MethodPost, "/api/accounts/batch-delete", map[string]any{"ids": []int64{1}}},
+		{http.MethodPost, "/api/accounts/health/refresh", map[string]any{"ids": []int64{1}}},
+		{http.MethodPost, "/api/accounts/1/quota/refresh", map[string]any{}},
+		{http.MethodPost, "/api/accounts/1/auth-url", map[string]any{}},
+		{http.MethodPost, "/api/accounts/1/oauth-exchange", map[string]any{}},
+		{http.MethodPost, "/api/accounts/1/session-auth", map[string]any{}},
+	}
+	for _, mutation := range mutations {
+		requestJSON(t, handler, mutation.method, mutation.path, mutation.body, userCookie, "", http.StatusForbidden, nil)
+	}
+	requestJSON(t, handler, http.MethodPost, "/api/auth/logout", nil, userCookie, "", http.StatusNoContent, nil)
+	requestJSON(t, handler, http.MethodGet, "/api/accounts", nil, userCookie, "", http.StatusUnauthorized, nil)
+}
+
+func TestOrdinaryUserAccountPageMigrationRunsOnlyOnce(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "test.db")
+	a, err := newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO users (username, password_hash, role, status, allowed_group_ids_json, visible_pages_json) VALUES ('legacy-user', 'unused', 'user', 'active', '["a"]', '["access"]')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`DELETE FROM feature_migrations WHERE name = 'ordinary-user-account-page-v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err = newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var visible string
+	if err := a.db.QueryRow(`SELECT visible_pages_json FROM users WHERE username = 'legacy-user'`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != `["accounts","access"]` {
+		t.Fatalf("migrated visible pages = %s", visible)
+	}
+	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = '["access"]' WHERE username = 'legacy-user'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err = newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	if err := a.db.QueryRow(`SELECT visible_pages_json FROM users WHERE username = 'legacy-user'`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != `["access"]` {
+		t.Fatalf("custom visible pages were overwritten after restart: %s", visible)
+	}
+}
+
+func TestManualProxyIsImportedAndExclusivelyBoundOnAccountCreate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	payload := map[string]any{
+		"name": "manual-proxy-account", "platform": "anthropic", "auth_type": "oauth",
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+		"proxy_text": "http://proxy-user:proxy-password@127.0.0.1:18080",
+	}
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusCreated, &created)
+	if created.ProxyID == nil || created.ProxyPoolID == nil || *created.ProxyPoolID != 1 {
+		t.Fatalf("created account proxy binding = pool %v proxy %v", created.ProxyPoolID, created.ProxyID)
+	}
+	var protocol, host, username, password string
+	var port int
+	if err := a.db.QueryRow(`SELECT protocol, host, port, username, password FROM proxies WHERE id = ?`, *created.ProxyID).Scan(&protocol, &host, &port, &username, &password); err != nil {
+		t.Fatal(err)
+	}
+	if protocol != "http" || host != "127.0.0.1" || port != 18080 || username != "proxy-user" || password != "proxy-password" {
+		t.Fatalf("stored proxy = %s://%s:%s@%s:%d", protocol, username, password, host, port)
+	}
+
+	payload["name"] = "duplicate-proxy-account"
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusConflict, nil)
+	var accountCount, proxyCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL`).Scan(&accountCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM proxies WHERE deleted_at IS NULL`).Scan(&proxyCount); err != nil {
+		t.Fatal(err)
+	}
+	if accountCount != 1 || proxyCount != 1 {
+		t.Fatalf("exclusive binding left accounts=%d proxies=%d", accountCount, proxyCount)
+	}
+}
+
+func TestAuditRedactsManualProxyCredentials(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/accounts", strings.NewReader(`{"proxy_text":"socks5://proxy-user:proxy-password@127.0.0.1:1080"}`))
+	body := readAuditBody(request)
+	if strings.Contains(body, "proxy-user") || strings.Contains(body, "proxy-password") || !strings.Contains(body, "[REDACTED]") {
+		t.Fatalf("manual proxy was not redacted from audit body: %s", body)
+	}
+	batchRequest := httptest.NewRequest(http.MethodPost, "/api/proxies/batch", strings.NewReader(`{"pool_id":1,"text":"proxy-user:proxy-password@127.0.0.1:1080"}`))
+	batchBody := readAuditBody(batchRequest)
+	if strings.Contains(batchBody, "proxy-user") || strings.Contains(batchBody, "proxy-password") || !strings.Contains(batchBody, "[REDACTED]") {
+		t.Fatalf("proxy batch was not redacted from audit body: %s", batchBody)
+	}
+	poolRequest := httptest.NewRequest(http.MethodPost, "/api/proxy-pools", strings.NewReader(`{"api_url":"https://proxy.example.test?token=private","api_headers":"{\"Authorization\":\"Bearer private\"}"}`))
+	poolBody := readAuditBody(poolRequest)
+	if strings.Contains(poolBody, "private") || !strings.Contains(poolBody, "[REDACTED]") {
+		t.Fatalf("proxy API credentials were not redacted from audit body: %s", poolBody)
+	}
+}
+
 func TestAPIKeyGatewayDispatchAndBilling(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

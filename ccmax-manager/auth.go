@@ -78,6 +78,10 @@ type apiKeyInput struct {
 
 func (a *app) migrateFeatures() error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS feature_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL DEFAULT (` + nowSQL + `)
+		)`,
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -133,8 +137,25 @@ func (a *app) migrateFeatures() error {
 	if err := addColumnIfMissing(a.db, "users", "balance", "REAL"); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = CASE role WHEN 'admin' THEN '["overview","accounts","dead","onboarding","daily","authorization","proxies","access","pricing","billing","audit"]' WHEN 'readonly_admin' THEN '["overview","accounts","dead","daily","authorization","proxies","pricing","billing","audit"]' ELSE '["access"]' END WHERE visible_pages_json = '[]'`); err != nil {
+	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = CASE role WHEN 'admin' THEN '["overview","accounts","dead","onboarding","daily","authorization","proxies","access","pricing","billing","audit"]' WHEN 'readonly_admin' THEN '["overview","accounts","dead","daily","authorization","proxies","pricing","billing","audit"]' ELSE '["accounts","access"]' END WHERE visible_pages_json = '[]'`); err != nil {
 		return fmt.Errorf("initialize visible pages: %w", err)
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT OR IGNORE INTO feature_migrations (name) VALUES ('ordinary-user-account-page-v1')`)
+	if err != nil {
+		return fmt.Errorf("record ordinary user account page migration: %w", err)
+	}
+	if inserted, _ := result.RowsAffected(); inserted > 0 {
+		if _, err := tx.Exec(`UPDATE users SET visible_pages_json = '["accounts","access"]' WHERE role = 'user' AND visible_pages_json = '["access"]'`); err != nil {
+			return fmt.Errorf("add account pool to ordinary user pages: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit ordinary user account page migration: %w", err)
 	}
 	if err := a.migrateProxyFeatures(); err != nil {
 		return err
@@ -164,7 +185,7 @@ func defaultVisiblePages(role string) []string {
 	case "readonly_admin":
 		return []string{"overview", "accounts", "dead", "daily", "authorization", "proxies", "pricing", "billing", "audit"}
 	default:
-		return []string{"access"}
+		return []string{"accounts", "access"}
 	}
 }
 
@@ -269,6 +290,10 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if user.Role != "admin" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if path == "/api/auth/logout" {
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
+				return
+			}
 			if user.Role == "user" && strings.HasPrefix(path, "/api/api-keys") && userCanSeePage(user, "access") {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 				return

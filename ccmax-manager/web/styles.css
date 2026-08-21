@@ -1537,6 +1537,9 @@ textarea:focus {
 .ordinary-user .internal-cost-column {
   display: none;
 }
+.app-shell:not([data-role="admin"]) .admin-only-column {
+  display: none;
+}
 .empty-state {
   display: grid;
   min-height: 180px;

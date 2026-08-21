@@ -58,7 +58,7 @@ const rolePageDefaults = {
     "billing",
     "audit",
   ],
-  user: ["access"],
+  user: ["accounts", "access"],
 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -391,6 +391,11 @@ function configureRole() {
   $$(".write-action").forEach((node) => {
     node.hidden = !isAdmin();
   });
+  const accountRefreshLabel = isAdmin()
+    ? "检测当前页账号存活状态并刷新列表"
+    : "刷新账号列表";
+  $("#refresh-accounts").title = accountRefreshLabel;
+  $("#refresh-accounts").setAttribute("aria-label", accountRefreshLabel);
   $("#add-api-key").hidden =
     state.me.role === "readonly_admin" || !canView("access");
   const initial =
@@ -792,7 +797,7 @@ function renderAccounts() {
       const checked = item.auth_checked_at
         ? ` · 检测 ${dateTime(item.auth_checked_at)}`
         : " · 尚未检测";
-      return `<tr><td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono">${escapeHTML(item.proxy_hint || "未绑定代理")}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle">${escapeHTML(authDetail)}${escapeHTML(checked)}</span></td><td><span class="subscription-badge">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono">${dateTime(item.onboarded_at)}</td><td>${survivalCell(item)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td class="actions">${actions}</td></tr>`;
+      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono">${escapeHTML(item.proxy_hint || "未绑定代理")}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle">${escapeHTML(authDetail)}${escapeHTML(checked)}</span></td><td><span class="subscription-badge">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono">${dateTime(item.onboarded_at)}</td><td>${survivalCell(item)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td class="actions admin-only-column">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -1188,6 +1193,7 @@ function openAccount(account = null) {
   $("#account-price").value = account?.account_price ?? 0;
   $("#account-proxy-pool").value = account?.proxy_pool_id || "";
   $("#account-auto-proxy").checked = account?.auto_proxy || false;
+  $("#account-proxy-text").value = "";
   fillProxyOptions(account?.proxy_pool_id || "", account?.proxy_id || "");
   $("#account-base-rpm").value = account?.base_rpm || 15;
   $("#account-rpm-enabled").checked = (account?.base_rpm || 0) > 0;
@@ -1217,11 +1223,13 @@ function openAccount(account = null) {
 }
 function syncAccountControls() {
   const hasPool = Boolean($("#account-proxy-pool").value);
+  const hasManualProxy = Boolean($("#account-proxy-text").value.trim());
   const schedulable = $("#account-schedulable");
   schedulable.disabled = !hasPool;
   if (!hasPool) schedulable.checked = false;
-  $("#account-auto-proxy").disabled = !hasPool;
-  $("#account-proxy").disabled = !hasPool || $("#account-auto-proxy").checked;
+  $("#account-auto-proxy").disabled = !hasPool || hasManualProxy;
+  $("#account-proxy").disabled =
+    !hasPool || hasManualProxy || $("#account-auto-proxy").checked;
   $("#account-base-rpm").disabled = !$("#account-rpm-enabled").checked;
   $("#account-rpm-strategy").disabled = !$("#account-rpm-enabled").checked;
   $("#account-rpm-buffer").disabled = !$("#account-rpm-enabled").checked;
@@ -1846,6 +1854,14 @@ $("#account-proxy-pool").addEventListener("change", (event) => {
   syncAccountControls();
 });
 $("#account-auto-proxy").addEventListener("change", syncAccountControls);
+$("#account-proxy-text").addEventListener("input", () => {
+  const hasPool = Boolean($("#account-proxy-pool").value);
+  const hasManualProxy = Boolean($("#account-proxy-text").value.trim());
+  if (hasManualProxy) $("#account-auto-proxy").checked = false;
+  $("#account-auto-proxy").disabled = !hasPool || hasManualProxy;
+  $("#account-proxy").disabled =
+    !hasPool || hasManualProxy || $("#account-auto-proxy").checked;
+});
 $("#account-rpm-enabled").addEventListener("change", syncAccountControls);
 $("#account-auth-type").addEventListener("change", syncAccountAuthFields);
 $("#account-session-key").addEventListener("input", syncAccountAuthFields);
@@ -1993,6 +2009,7 @@ $("#account-form").addEventListener("submit", async (event) => {
     if (!groupIDs.length) throw new Error("至少选择一个分组");
     const poolID = Number($("#account-proxy-pool").value || 0);
     const proxyID = Number($("#account-proxy").value || 0);
+    const proxyText = $("#account-proxy-text").value.trim();
     const extra = JSON.parse($("#account-extra").value.trim() || "{}");
     extra.request_passthrough = $("#account-request-passthrough").checked;
     const payload = {
@@ -2012,8 +2029,10 @@ $("#account-form").addEventListener("submit", async (event) => {
       rate_limit_reset_at: isoFromInput($("#account-rate-reset").value),
       group_ids: groupIDs,
       proxy_pool_id: poolID || null,
-      proxy_id: proxyID || null,
-      auto_proxy: poolID ? $("#account-auto-proxy").checked : false,
+      proxy_id: proxyText ? null : proxyID || null,
+      proxy_text: proxyText,
+      auto_proxy:
+        poolID && !proxyText ? $("#account-auto-proxy").checked : false,
       base_rpm: $("#account-rpm-enabled").checked
         ? Number($("#account-base-rpm").value)
         : 0,

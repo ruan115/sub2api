@@ -156,6 +156,7 @@ type accountInput struct {
 	GroupIDs         []string        `json:"group_ids"`
 	ProxyPoolID      *int64          `json:"proxy_pool_id"`
 	ProxyID          *int64          `json:"proxy_id"`
+	ProxyText        string          `json:"proxy_text"`
 	AutoProxy        bool            `json:"auto_proxy"`
 	BaseRPM          int             `json:"base_rpm"`
 	RPMStrategy      string          `json:"rpm_strategy"`
@@ -1035,6 +1036,14 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if strings.TrimSpace(input.ProxyText) != "" {
+		input.ProxyID, err = a.ensureProxyInPool(input.ProxyPoolID, input.ProxyText)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		input.AutoProxy = false
+	}
 	var authorizedProxyID *int64
 	var tokenExpiresAt string
 	var authorizedSubscription string
@@ -1161,6 +1170,14 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if strings.TrimSpace(input.ProxyText) != "" {
+		input.ProxyID, err = a.ensureProxyInPool(input.ProxyPoolID, input.ProxyText)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		input.AutoProxy = false
 	}
 	tx, err := a.db.Begin()
 	if err != nil {

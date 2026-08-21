@@ -83,6 +83,11 @@ func readAuditBody(r *http.Request) string {
 	if json.Unmarshal(body, &value) != nil {
 		return `{"redacted":"non-json body"}`
 	}
+	if object, ok := value.(map[string]any); ok && r.URL.Path == "/api/proxies/batch" {
+		if _, exists := object["text"]; exists {
+			object["text"] = "[REDACTED]"
+		}
+	}
 	redacted, _ := json.Marshal(redactAuditValue(value))
 	return string(redacted)
 }
@@ -112,7 +117,7 @@ func redactAuditValue(value any) any {
 
 func sensitiveAuditKey(key string) bool {
 	key = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
-	for _, fragment := range []string{"password", "secret", "token", "apikey", "sessionkey", "cookie", "credential", "authorization", "code"} {
+	for _, fragment := range []string{"password", "secret", "token", "apikey", "apiheaders", "apiurl", "sessionkey", "cookie", "credential", "authorization", "proxytext", "code"} {
 		if strings.Contains(key, fragment) {
 			return true
 		}
