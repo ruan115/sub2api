@@ -722,10 +722,13 @@ svg {
   font-weight: 750;
   line-height: 1;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 .group-mark svg {
   width: 13px;
   height: 13px;
+  flex: 0 0 auto;
+  overflow: visible;
   fill: currentColor;
 }
 .group-mark.b {
@@ -1128,7 +1131,7 @@ textarea:focus {
   width: 36px;
 }
 .accounts-table th:nth-child(2) {
-  width: 110px;
+  width: 140px;
 }
 .accounts-table th:nth-child(3) {
   width: 88px;
@@ -1148,13 +1151,13 @@ textarea:focus {
 }
 .accounts-table th:nth-child(9),
 .accounts-table th:nth-child(11) {
-  width: 65px;
+  width: 72px;
 }
 .accounts-table th:nth-child(10) {
-  width: 64px;
+  width: 70px;
 }
 .accounts-table th:nth-child(12) {
-  width: 145px;
+  width: 84px;
 }
 .accounts-table .row-title,
 .accounts-table .row-subtitle,
@@ -1199,6 +1202,8 @@ textarea:focus {
 .accounts-table .row-actions button svg {
   width: 12px;
   height: 12px;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 .accounts-table th.actions,
 .accounts-table td.actions {
@@ -1290,6 +1295,8 @@ textarea:focus {
   max-width: 100%;
 }
 .account-meta .mono {
+  display: block;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1318,6 +1325,68 @@ textarea:focus {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.accounts-table .time-cell,
+.accounts-table .live-duration {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+.account-action-popover {
+  position: fixed;
+  z-index: 120;
+  display: grid;
+  width: 154px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 38px rgba(18, 26, 22, 0.18);
+  animation: popover-in 140ms ease-out;
+}
+.account-action-popover[hidden] {
+  display: none;
+}
+.account-action-popover button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  text-align: left;
+}
+.account-action-popover button:hover {
+  background: var(--panel-muted);
+}
+.account-action-popover button.danger {
+  color: var(--danger);
+}
+.account-action-popover button.danger:hover {
+  background: var(--danger-soft);
+}
+.account-action-popover svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .money-cell.emphasis {
   color: #8a5a06;

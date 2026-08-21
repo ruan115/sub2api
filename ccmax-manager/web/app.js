@@ -204,7 +204,22 @@ function initializeResizableTable() {
   const table = $(".accounts-table");
   if (!table || table.dataset.resizableReady === "true") return;
   table.dataset.resizableReady = "true";
+  const minimumWidths = {
+    select: 36,
+    account: 140,
+    status: 88,
+    subscription: 64,
+    price: 57,
+    billing: 57,
+    quota: 130,
+    requests: 48,
+    onboarded: 72,
+    survival: 70,
+    "last-used": 72,
+    actions: 84,
+  };
   let saved = {};
+  let savedChanged = false;
   try {
     saved = JSON.parse(localStorage.getItem(accountColumnWidthsStorageKey) || "{}");
   } catch {
@@ -212,7 +227,15 @@ function initializeResizableTable() {
   }
   $$("th[data-column]", table).forEach((header) => {
     const key = header.dataset.column;
-    if (Number(saved[key]) > 0) header.style.width = `${Number(saved[key])}px`;
+    const minimum = minimumWidths[key] || 64;
+    if (Number(saved[key]) > 0) {
+      const width = Math.max(minimum, Number(saved[key]));
+      header.style.width = `${width}px`;
+      if (width !== Number(saved[key])) {
+        saved[key] = width;
+        savedChanged = true;
+      }
+    }
     if (key === "select") return;
     const handle = document.createElement("span");
     handle.className = "column-resizer";
@@ -223,7 +246,6 @@ function initializeResizableTable() {
       const startX = event.clientX;
       const startWidth = header.getBoundingClientRect().width;
       const startTableWidth = table.getBoundingClientRect().width;
-      const minimum = key === "actions" ? 124 : 64;
       handle.setPointerCapture(event.pointerId);
       table.classList.add("is-resizing");
       const move = (moveEvent) => {
@@ -244,6 +266,8 @@ function initializeResizableTable() {
       handle.addEventListener("pointercancel", finish);
     });
   });
+  if (savedChanged)
+    localStorage.setItem(accountColumnWidthsStorageKey, JSON.stringify(saved));
 }
 function resetDialogViewport(dialog) {
   dialog.scrollTop = 0;
@@ -760,7 +784,8 @@ function liveSurvivalMinutes(item) {
 function survivalCell(item) {
   const minutes = liveSurvivalMinutes(item);
   const status = item.invalidated_at ? "已停止计时" : "每分钟更新";
-  return `<time class="live-duration mono" data-account-survival="${item.id}" title="${status}">${durationClockText(minutes, minutes !== null)}</time>`;
+  const duration = durationClockText(minutes, minutes !== null);
+  return `<time class="live-duration mono" data-account-survival="${item.id}" title="${duration} · ${status}">${duration}</time>`;
 }
 function updateSurvivalClocks() {
   $$('[data-account-survival]').forEach((node) => {
@@ -775,9 +800,46 @@ function updateSurvivalClocks() {
 function accountUsageCell(item) {
   const row = (label, value, resetAt) => {
     const used = Math.max(0, Math.min(Number(value || 0), 100));
-    return `<div class="usage-window-row"><b>${label}</b><span><i style="width:${used}%"></i></span><strong>${used.toFixed(0)}%</strong><small>${resetAt ? dateTime(resetAt) : "等待刷新"}</small></div>`;
+    const resetText = resetAt ? dateTime(resetAt) : "等待刷新";
+    return `<div class="usage-window-row"><b>${label}</b><span><i style="width:${used}%"></i></span><strong>${used.toFixed(0)}%</strong><small title="${escapeHTML(resetText)}">${resetText}</small></div>`;
   };
   return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}<small>${item.request_count.toLocaleString("zh-CN")} 请求 · ${compact(item.input_tokens + item.output_tokens)} Token</small></div>`;
+}
+function closeAccountActionMenu() {
+  const menu = $("#account-action-menu");
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  menu.innerHTML = "";
+  const trigger = $('[data-account-menu][aria-expanded="true"]');
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+}
+function openAccountActionMenu(trigger, item) {
+  const menu = $("#account-action-menu");
+  const alreadyOpen =
+    !menu.hidden && menu.dataset.accountId === String(item.id);
+  closeAccountActionMenu();
+  if (alreadyOpen) return;
+  menu.dataset.accountId = String(item.id);
+  menu.innerHTML = `
+    <button type="button" role="menuitem" data-toggle-account="${item.id}"><i data-lucide="${item.schedulable ? "pause" : "play"}"></i><span>${item.schedulable ? "暂停调度" : "恢复调度"}</span></button>
+    <button type="button" role="menuitem" data-edit-account="${item.id}"><i data-lucide="square-pen"></i><span>编辑账号</span></button>
+    <button type="button" role="menuitem" class="danger" data-delete-account="${item.id}"><i data-lucide="trash-2"></i><span>删除账号</span></button>`;
+  menu.hidden = false;
+  trigger.setAttribute("aria-expanded", "true");
+  refreshIcons();
+  const rect = trigger.getBoundingClientRect();
+  const margin = 8;
+  const menuRect = menu.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(margin, rect.right - menuRect.width),
+    window.innerWidth - menuRect.width - margin,
+  );
+  const top =
+    rect.bottom + margin + menuRect.height <= window.innerHeight
+      ? rect.bottom + 5
+      : Math.max(margin, rect.top - menuRect.height - 5);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
 }
 function renderAccountSummary() {
   const item = state.accountSummary;
@@ -799,6 +861,7 @@ function renderAccountSummary() {
   ].join("");
 }
 function renderAccounts() {
+  closeAccountActionMenu();
   const search = state.accountSearch.toLowerCase();
   const scoped = state.accounts.filter(
     (item) =>
@@ -839,13 +902,17 @@ function renderAccounts() {
       const [authText] = accountAuthStatus(item);
       const groups = item.group_ids.map((id) => groupMark(id, "pill")).join("");
       const actions = isAdmin()
-        ? `<span class="row-actions"><button data-refresh-quota="${item.id}" title="刷新配额"><i data-lucide="gauge"></i></button><button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权"><i data-lucide="key-round"></i></button><button data-toggle-account="${item.id}" title="${item.schedulable ? "暂停调度" : "恢复调度"}"><i data-lucide="${item.schedulable ? "pause" : "play"}"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button class="danger" data-delete-account="${item.id}" title="删除账号"><i data-lucide="trash-2"></i></button></span>`
+        ? `<span class="row-actions account-primary-actions"><button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权" aria-label="更新授权"><i data-lucide="key-round"></i></button><button data-refresh-quota="${item.id}" title="测试并刷新账号配额" aria-label="测试并刷新账号配额"><i data-lucide="activity"></i></button><button data-account-menu="${item.id}" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false"><i data-lucide="ellipsis"></i></button></span>`
         : '<span class="muted">只读</span>';
       const authDetail = item.auth_error || authText;
       const checked = item.auth_checked_at
         ? ` · 检测 ${dateTime(item.auth_checked_at)}`
         : " · 尚未检测";
-      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono">${escapeHTML(item.proxy_hint || "未绑定代理")}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle">${escapeHTML(authDetail)}${escapeHTML(checked)}</span></td><td><span class="subscription-badge">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono">${dateTime(item.onboarded_at)}</td><td>${survivalCell(item)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td class="actions admin-only-column">${actions}</td></tr>`;
+      const proxyHint = item.proxy_hint || "未绑定代理";
+      const statusDetail = `${authDetail}${checked}`;
+      const onboardedAt = dateTime(item.onboarded_at);
+      const lastUsedAt = dateTime(item.last_used_at);
+      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionName(item.subscription_type))}">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -1497,7 +1564,18 @@ function openAccountAuth(account) {
 
 document.addEventListener("click", async (event) => {
   const target = event.target.closest("button, [data-select-pool]");
-  if (!target) return;
+  if (!target) {
+    if (!event.target.closest("#account-action-menu")) closeAccountActionMenu();
+    return;
+  }
+  if (target.dataset.accountMenu) {
+    const item = state.accounts.find(
+      (account) => account.id === Number(target.dataset.accountMenu),
+    );
+    if (item) openAccountActionMenu(target, item);
+    return;
+  }
+  closeAccountActionMenu();
   if (target.dataset.paginationKey) {
     const key = target.dataset.paginationKey;
     state.paginationPages[key] =
@@ -2427,5 +2505,10 @@ function initializeDates() {
   $("#authorization-to").value = to;
 }
 initializeAccountAutoRefresh();
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeAccountActionMenu();
+});
+window.addEventListener("resize", closeAccountActionMenu);
+window.addEventListener("scroll", closeAccountActionMenu, true);
 window.setInterval(updateSurvivalClocks, 60000);
 boot();

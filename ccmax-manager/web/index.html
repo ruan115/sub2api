@@ -353,17 +353,17 @@
                 <thead>
                   <tr>
                     <th class="select-column admin-only-column" data-column="select"><input type="checkbox" id="select-all-accounts" aria-label="选择全部账号" /></th>
-                    <th data-column="account">账号</th>
-                    <th data-column="status">状态</th>
-                    <th data-column="subscription">订阅类型</th>
-                    <th class="num" data-column="price">账号价格</th>
-                    <th class="num" data-column="billing">账号总计费</th>
-                    <th data-column="quota">用量窗口</th>
-                    <th class="num" data-column="requests">请求数</th>
-                    <th data-column="onboarded">上号时间</th>
-                    <th data-column="survival">存活时间</th>
-                    <th data-column="last-used">最近使用</th>
-                    <th class="actions admin-only-column" data-column="actions">操作</th>
+                    <th data-column="account" title="账号">账号</th>
+                    <th data-column="status" title="状态">状态</th>
+                    <th data-column="subscription" title="订阅类型">订阅类型</th>
+                    <th class="num" data-column="price" title="账号价格">账号价格</th>
+                    <th class="num" data-column="billing" title="账号总计费">账号总计费</th>
+                    <th data-column="quota" title="用量窗口">用量窗口</th>
+                    <th class="num" data-column="requests" title="请求数">请求数</th>
+                    <th data-column="onboarded" title="上号时间">上号时间</th>
+                    <th data-column="survival" title="存活时间">存活时间</th>
+                    <th data-column="last-used" title="最近使用">最近使用</th>
+                    <th class="actions admin-only-column" data-column="actions" title="操作">操作</th>
                   </tr>
                 </thead>
                 <tbody id="accounts-body"></tbody>
@@ -1574,6 +1574,7 @@
       </form>
     </dialog>
 
+    <div id="account-action-menu" class="account-action-popover" role="menu" hidden></div>
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
     <script src="/lib/choices.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/lib/lucide.min.js?v=__ASSET_VERSION__" defer></script>
