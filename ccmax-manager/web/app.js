@@ -1135,7 +1135,8 @@ function populateSelects() {
     `<option value="">未绑定（不可授权/调度）</option>${poolOptions}`;
   $("#batch-proxy-pool").innerHTML =
     `<option value="">选择代理池</option>${poolOptions}`;
-  $("#proxy-import-pool").innerHTML = poolOptions;
+  $("#proxy-import-pool").innerHTML =
+    `<option value="">选择目标代理池</option>${poolOptions}`;
   $("#key-user").innerHTML = state.users
     .map(
       (user) =>
@@ -1420,6 +1421,10 @@ function openUsage() {
 }
 function openProxyImport() {
   $("#proxy-import-form").reset();
+  const selectedPool = state.proxyPools.find(
+    (pool) => String(pool.id) === String(state.proxyPoolFilter),
+  );
+  $("#proxy-import-pool").value = selectedPool ? String(selectedPool.id) : "";
   showInitializedDialog("#proxy-import-dialog");
 }
 function openAccountAuth(account) {
@@ -2142,19 +2147,23 @@ $("#proxy-pool-form").addEventListener("submit", async (event) => {
 $("#proxy-import-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
+    const poolID = Number($("#proxy-import-pool").value);
+    const pool = state.proxyPools.find((item) => item.id === poolID);
     const result = await api("/api/proxies/batch", {
       method: "POST",
       body: JSON.stringify({
-        pool_id: Number($("#proxy-import-pool").value),
+        pool_id: poolID,
         text: $("#proxy-import-text").value,
       }),
     });
     $("#proxy-import-dialog").close();
     $("#proxy-import-text").value = "";
-    toast(
-      `导入完成：新增 ${result.created}，重复 ${result.skipped}，无效 ${result.invalid}`,
-    );
+    state.proxyPoolFilter = String(poolID);
+    resetPagination("proxies");
     await loadCore();
+    toast(
+      `导入完成：新增 ${result.created}，已存在/重复 ${result.skipped}，无效 ${result.invalid}；已显示 ${pool?.name || "目标代理池"}`,
+    );
   } catch (error) {
     toast(error.message, "error");
   }
