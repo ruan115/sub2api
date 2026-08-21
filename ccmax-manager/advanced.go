@@ -20,6 +20,12 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "normal_request_mode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "groups", "stream_hedge_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "adaptive_hedge_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

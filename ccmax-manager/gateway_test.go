@@ -468,6 +468,331 @@ func TestGatewayFailsOverOnSub2PreOutputSSEOverload(t *testing.T) {
 	}
 }
 
+func TestStreamHedgeDisabledPreservesSerialSelection(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var primaryCalls, backupCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		time.Sleep(80 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backupCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer backup.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "serial-primary", primary.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	createGatewayTestAccount(t, a, handler, "serial-backup", backup.URL, 1, nil, map[string]any{"access_token": "token-b"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"serial-only"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != first.Name {
+		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+	}
+	if primaryCalls.Load() != 1 || backupCalls.Load() != 0 {
+		t.Fatalf("serial calls primary=%d backup=%d", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestStreamHedgeSkipsBackupWhenPrimaryBootstrapsBeforeDelay(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	previousDelay := gatewayStreamHedgeDelay
+	gatewayStreamHedgeDelay = 100 * time.Millisecond
+	defer func() { gatewayStreamHedgeDelay = previousDelay }()
+	var primaryCalls, backupCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backupCalls.Add(1)
+		http.Error(w, "backup should not start", http.StatusInternalServerError)
+	}))
+	defer backup.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	enableGatewayGroupStreamHedge(t, handler)
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "fast-primary", primary.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	createGatewayTestAccount(t, a, handler, "unused-backup", backup.URL, 1, nil, map[string]any{"access_token": "token-b"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"fast-primary"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != first.Name {
+		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+	}
+	if primaryCalls.Load() != 1 || backupCalls.Load() != 0 {
+		t.Fatalf("hedge calls primary=%d backup=%d", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestStreamHedgeEnabledPreservesNonStreamSelection(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var primaryCalls, backupCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg-primary","type":"message","role":"assistant","content":[{"type":"text","text":"primary"}],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backupCalls.Add(1)
+		http.Error(w, "backup should not start", http.StatusInternalServerError)
+	}))
+	defer backup.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	enableGatewayGroupStreamHedge(t, handler)
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "non-stream-primary", primary.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	createGatewayTestAccount(t, a, handler, "non-stream-backup", backup.URL, 1, nil, map[string]any{"access_token": "token-b"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":false,"max_tokens":32,"messages":[{"role":"user","content":"non-stream"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != first.Name {
+		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+	}
+	if primaryCalls.Load() != 1 || backupCalls.Load() != 0 {
+		t.Fatalf("non-stream calls primary=%d backup=%d", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestStreamHedgePreservesExistingStickyAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	previousDelay := gatewayStreamHedgeDelay
+	gatewayStreamHedgeDelay = 20 * time.Millisecond
+	defer func() { gatewayStreamHedgeDelay = previousDelay }()
+	var primaryCalls, backupCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := primaryCalls.Add(1)
+		if call > 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backupCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer backup.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	enableGatewayGroupStreamHedge(t, handler)
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "sticky-primary", primary.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	createGatewayTestAccount(t, a, handler, "sticky-backup", backup.URL, 1, nil, map[string]any{"access_token": "token-b"})
+	payload := `{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"sticky-session"}]}`
+	for i := 0; i < 2; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload))
+		request.Header.Set("Authorization", "Bearer "+key.Key)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != first.Name {
+			t.Fatalf("request %d response=%d account=%q body=%s", i+1, response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+		}
+	}
+	if primaryCalls.Load() != 2 || backupCalls.Load() != 0 {
+		t.Fatalf("sticky calls primary=%d backup=%d", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestStreamHedgeChoosesFastestBootstrapAndCancelsLoser(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	previousDelay := gatewayStreamHedgeDelay
+	gatewayStreamHedgeDelay = 20 * time.Millisecond
+	defer func() { gatewayStreamHedgeDelay = previousDelay }()
+	var primaryCalls, backupCalls atomic.Int32
+	primaryCanceled := make(chan struct{}, 1)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			primaryCanceled <- struct{}{}
+			return
+		case <-time.After(500 * time.Millisecond):
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		}
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backupCalls.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("request-id", "req-hedge-winner")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"fast\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer backup.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	enableGatewayGroupStreamHedge(t, handler)
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "slow-primary", primary.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "fast-backup", backup.URL, 1, nil, map[string]any{"access_token": "token-b"})
+	payload := `{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hedge-winner"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	started := time.Now()
+	handler.ServeHTTP(response, request)
+	elapsed := time.Since(started)
+
+	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != second.Name || !strings.Contains(response.Body.String(), `"text":"fast"`) {
+		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+	}
+	if elapsed >= 250*time.Millisecond {
+		t.Fatalf("hedged response took %v", elapsed)
+	}
+	if primaryCalls.Load() != 1 || backupCalls.Load() != 1 {
+		t.Fatalf("hedge calls primary=%d backup=%d", primaryCalls.Load(), backupCalls.Load())
+	}
+	select {
+	case <-primaryCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("losing upstream request was not canceled")
+	}
+	var firstInflight, secondInflight, firstRPM, secondRPM int
+	if err := a.db.QueryRow(`SELECT requests FROM account_inflight WHERE account_id = ?`, first.ID).Scan(&firstInflight); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT requests FROM account_inflight WHERE account_id = ?`, second.ID).Scan(&secondInflight); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, first.ID).Scan(&firstRPM); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, second.ID).Scan(&secondRPM); err != nil {
+		t.Fatal(err)
+	}
+	if firstInflight != 0 || secondInflight != 0 || firstRPM != 1 || secondRPM != 1 {
+		t.Fatalf("inflight=(%d,%d) rpm=(%d,%d)", firstInflight, secondInflight, firstRPM, secondRPM)
+	}
+	var usageAccountID int64
+	if err := a.db.QueryRow(`SELECT account_id FROM usage_logs WHERE request_id = 'req-hedge-winner'`).Scan(&usageAccountID); err != nil || usageAccountID != second.ID {
+		t.Fatalf("usage account=%d err=%v", usageAccountID, err)
+	}
+	session := sub2service.GenerateCCMaxCompatibilitySessionHash([]byte(payload), "192.0.2.1", "", key.ID)
+	if sticky := a.gatewayStickyAccountID(key.ID, session); sticky != second.ID {
+		t.Fatalf("sticky account=%d, want winner %d", sticky, second.ID)
+	}
+}
+
+func enableGatewayGroupStreamHedge(t *testing.T, handler http.Handler) {
+	t.Helper()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "首包竞速", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": false, "stream_hedge_enabled": true,
+	}, http.StatusOK, nil)
+}
+
+func TestAdaptiveStreamHedgeUsesLoadAwarePrimary(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var busyCalls, idleCalls atomic.Int32
+	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		busyCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer busy.Close()
+	idle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		idleCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer idle.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	enableGatewayGroupAdaptiveHedge(t, handler)
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "busy-primary", busy.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "idle-primary", idle.URL, 0, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`INSERT INTO account_inflight (account_id, requests) VALUES (?, 8) ON CONFLICT(account_id) DO UPDATE SET requests = 8`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"load-aware"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != second.Name {
+		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+	}
+	if busyCalls.Load() != 0 || idleCalls.Load() != 1 {
+		t.Fatalf("adaptive calls busy=%d idle=%d", busyCalls.Load(), idleCalls.Load())
+	}
+}
+
+func TestAdaptiveStreamHedgeBudgetAndDelay(t *testing.T) {
+	controller := newGatewayHedgeController()
+	if delay := controller.begin("a"); delay != gatewayAdaptiveDefaultDelay {
+		t.Fatalf("initial delay=%v", delay)
+	}
+	if !controller.reserve("a") {
+		t.Fatal("initial adaptive hedge credit was not available")
+	}
+	for index := 0; index < 9; index++ {
+		controller.begin("a")
+	}
+	if controller.reserve("a") {
+		t.Fatal("adaptive hedge exceeded the 10 percent request budget")
+	}
+	controller.begin("a")
+	if !controller.reserve("a") {
+		t.Fatal("adaptive hedge budget did not replenish after ten requests")
+	}
+	for _, sample := range []time.Duration{100, 200, 300, 400, 500} {
+		controller.observe("b", sample*time.Millisecond)
+	}
+	if delay := controller.begin("b"); delay != 500*time.Millisecond {
+		t.Fatalf("adaptive P90 delay=%v", delay)
+	}
+}
+
+func TestGroupRejectsBothStreamHedgeAlgorithms(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "invalid dual mode", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": false,
+		"stream_hedge_enabled": true, "adaptive_hedge_enabled": true,
+	}, http.StatusBadRequest, nil)
+}
+
+func enableGatewayGroupAdaptiveHedge(t *testing.T, handler http.Handler) {
+	t.Helper()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "大 RPM 自适应", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": false,
+		"stream_hedge_enabled": false, "adaptive_hedge_enabled": true,
+	}, http.StatusOK, nil)
+}
+
 func TestCountTokensUsesSingleAccountAndSub2ModelRules(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var firstCalls, secondCalls atomic.Int32

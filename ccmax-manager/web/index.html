@@ -1023,6 +1023,32 @@
               <i></i>
             </label>
           </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>极速竞速</strong>
+              <small>20ms 后启动备用账号，优先降低首包延迟，会增加上游 RPM 与配额消耗</small>
+            </div>
+            <label class="compact-toggle" title="极速竞速">
+              <input
+                id="group-stream-hedge-enabled"
+                type="checkbox"
+                aria-label="极速竞速" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>大 RPM 自适应</strong>
+              <small>按负载和近期首包 P90 调度，额外请求限制为约 10%</small>
+            </div>
+            <label class="compact-toggle" title="大 RPM 自适应">
+              <input
+                id="group-adaptive-hedge-enabled"
+                type="checkbox"
+                aria-label="大 RPM 自适应" />
+              <i></i>
+            </label>
+          </div>
         </div>
         <div class="modal-actions">
           <button class="button ghost" type="button" data-close-dialog>

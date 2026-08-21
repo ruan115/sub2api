@@ -23,16 +23,18 @@ import (
 )
 
 type gatewayKey struct {
-	ID                int64
-	UserID            int64
-	GroupID           string
-	Quota             float64
-	QuotaUsed         float64
-	UserRPM           int
-	Allowed           string
-	UserRole          string
-	ExpiresAt         sql.NullString
-	NormalRequestMode bool
+	ID                   int64
+	UserID               int64
+	GroupID              string
+	Quota                float64
+	QuotaUsed            float64
+	UserRPM              int
+	Allowed              string
+	UserRole             string
+	ExpiresAt            sql.NullString
+	NormalRequestMode    bool
+	StreamHedgeEnabled   bool
+	AdaptiveHedgeEnabled bool
 }
 
 type gatewayAccount struct {
@@ -171,6 +173,14 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	excluded := map[int64]bool{}
 	var lastFailure *gatewayUpstreamFailure
 	var lastDispatchError error
+	if (key.StreamHedgeEnabled || key.AdaptiveHedgeEnabled) && envelope.Stream && !countTokens && a.gatewayStickyAccountID(key.ID, session) == 0 {
+		handled, hedgeFailure, hedgeErr := a.handleGatewayStreamHedge(w, r, key, body, envelope.Model, session, excluded, key.AdaptiveHedgeEnabled)
+		if handled {
+			return
+		}
+		lastFailure = hedgeFailure
+		lastDispatchError = hedgeErr
+	}
 	maxAccountAttempts := gatewayMaxAttempts()
 	if countTokens {
 		// Sub2API count_tokens selects one account and returns that upstream result.
@@ -908,12 +918,14 @@ func bearerOrAPIKey(r *http.Request) string {
 
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
-	var normalRequestMode int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode
+	var normalRequestMode, streamHedgeEnabled, adaptiveHedgeEnabled int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.stream_hedge_enabled, g.adaptive_hedge_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active'
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &streamHedgeEnabled, &adaptiveHedgeEnabled)
 	key.NormalRequestMode = normalRequestMode == 1
+	key.StreamHedgeEnabled = streamHedgeEnabled == 1
+	key.AdaptiveHedgeEnabled = adaptiveHedgeEnabled == 1
 	return key, err
 }
 
@@ -1050,6 +1062,10 @@ func gatewayClientIP(r *http.Request) string {
 }
 
 func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool) (gatewayAccount, error) {
+	return a.acquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, false)
+}
+
+func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool) (gatewayAccount, error) {
 	tx, err := a.db.Begin()
 	if err != nil {
 		return gatewayAccount{}, err
@@ -1061,7 +1077,7 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 	if sessionHash != "" {
 		_ = tx.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ? AND expires_at > `+nowSQL, sessionHash, key.ID).Scan(&stickyID)
 	}
-	rows, err := tx.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id,
+	rows, err := tx.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id, ag.priority, a.priority,
 		COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0),
 		COALESCE((SELECT requests FROM account_inflight f WHERE f.account_id = a.id), 0)
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
@@ -1071,22 +1087,24 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 		return gatewayAccount{}, err
 	}
 	type candidate struct {
-		account  gatewayAccount
-		rpm      int
-		inflight int
+		account         gatewayAccount
+		groupPriority   int
+		accountPriority int
+		rpm             int
+		inflight        int
 	}
 	candidates := []candidate{}
 	for rows.Next() {
 		var item candidate
-		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.rpm, &item.inflight); err != nil {
+		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.rpm, &item.inflight); err != nil {
 			rows.Close()
 			return gatewayAccount{}, err
 		}
 		candidates = append(candidates, item)
 	}
 	rows.Close()
-	var selected gatewayAccount
-	for _, candidate := range candidates {
+	selectedIndex := -1
+	for index, candidate := range candidates {
 		if excluded[candidate.account.ID] || !accountSupportsModel(candidate.account, requestedModel) {
 			continue
 		}
@@ -1097,12 +1115,26 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 		if !rpmSchedulable(candidate.account, candidate.rpm, sticky) {
 			continue
 		}
-		selected = candidate.account
-		break
+		if selectedIndex < 0 {
+			selectedIndex = index
+			if !loadAware {
+				break
+			}
+			continue
+		}
+		selected := candidates[selectedIndex]
+		if candidate.groupPriority != selected.groupPriority || candidate.accountPriority != selected.accountPriority {
+			break
+		}
+		if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
+			(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
+			selectedIndex = index
+		}
 	}
-	if selected.ID == 0 {
+	if selectedIndex < 0 {
 		return gatewayAccount{}, errors.New("no account capacity or model support available for group " + strings.ToUpper(key.GroupID) + " (model, concurrency, or RPM limit)")
 	}
+	selected := candidates[selectedIndex].account
 	if _, err := tx.Exec(`INSERT INTO account_inflight (account_id, requests) VALUES (?, 1) ON CONFLICT(account_id) DO UPDATE SET requests = requests + 1`, selected.ID); err != nil {
 		return gatewayAccount{}, err
 	}
@@ -1119,6 +1151,20 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 		return gatewayAccount{}, err
 	}
 	return selected, nil
+}
+
+func gatewayCandidateLoad(current, capacity int) float64 {
+	if capacity <= 0 {
+		return float64(current)
+	}
+	return float64(current) / float64(capacity)
+}
+
+func gatewayCandidateRPMLoad(current, limit int) float64 {
+	if limit <= 0 {
+		return 0
+	}
+	return float64(current) / float64(limit)
 }
 
 func (a *app) recordGatewayAccountRPM(accountID int64) {

@@ -625,7 +625,12 @@ function renderDashboard() {
       const ratio = item.total_accounts
         ? Math.round((item.active_accounts / item.total_accounts) * 100)
         : 0;
-      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div></article>`;
+      const streamDispatch = item.adaptive_hedge_enabled
+        ? "大 RPM 自适应"
+        : item.stream_hedge_enabled
+          ? "极速竞速"
+          : "串行";
+      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -1261,6 +1266,10 @@ function openGroup(item) {
   $("#group-daily").value = item.daily_limit_usd ?? "";
   $("#group-monthly").value = item.monthly_limit_usd ?? "";
   $("#group-normal-request-mode").checked = Boolean(item.normal_request_mode);
+  $("#group-stream-hedge-enabled").checked = Boolean(item.stream_hedge_enabled);
+  $("#group-adaptive-hedge-enabled").checked = Boolean(
+    item.adaptive_hedge_enabled,
+  );
   showInitializedDialog("#group-dialog");
 }
 function openPool(item = null) {
@@ -2018,6 +2027,12 @@ $("#purpose-form").addEventListener("submit", async (event) => {
     toast(error.message, "error");
   }
 });
+$("#group-stream-hedge-enabled").addEventListener("change", (event) => {
+  if (event.target.checked) $("#group-adaptive-hedge-enabled").checked = false;
+});
+$("#group-adaptive-hedge-enabled").addEventListener("change", (event) => {
+  if (event.target.checked) $("#group-stream-hedge-enabled").checked = false;
+});
 $("#group-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -2034,6 +2049,8 @@ $("#group-form").addEventListener("submit", async (event) => {
         daily_limit_usd: optional("#group-daily"),
         monthly_limit_usd: optional("#group-monthly"),
         normal_request_mode: $("#group-normal-request-mode").checked,
+        stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
+        adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
       }),
     });
     $("#group-dialog").close();
