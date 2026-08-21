@@ -169,6 +169,11 @@ type accountBatchDeleteInput struct {
 	IDs []int64 `json:"ids"`
 }
 
+type accountBatchScheduleInput struct {
+	IDs         []int64 `json:"ids"`
+	Schedulable bool    `json:"schedulable"`
+}
+
 type purpose struct {
 	ID            int64  `json:"id"`
 	Key           string `json:"key"`
@@ -511,6 +516,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/proxy-pools/{id}/sync", a.handleProxyPoolSync)
 	mux.HandleFunc("GET /api/proxies", a.handleProxies)
 	mux.HandleFunc("POST /api/proxies/batch", a.handleProxyBatch)
+	mux.HandleFunc("POST /api/proxies/batch-test", a.handleProxyBatchTest)
 	mux.HandleFunc("PUT /api/proxies/{id}", a.handleProxyUpdate)
 	mux.HandleFunc("DELETE /api/proxies/{id}", a.handleProxyDelete)
 	mux.HandleFunc("POST /api/proxies/{id}/test", a.handleProxyTest)
@@ -526,6 +532,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/accounts", a.handleAccountCreate)
 	mux.HandleFunc("POST /api/accounts/batch-authorize", a.handleBatchAuthorization)
 	mux.HandleFunc("POST /api/accounts/batch-delete", a.handleAccountBatchDelete)
+	mux.HandleFunc("POST /api/accounts/batch-schedule", a.handleAccountBatchSchedule)
 	mux.HandleFunc("POST /api/accounts/health/refresh", a.handleAccountHealthRefresh)
 	mux.HandleFunc("PUT /api/accounts/{id}", a.handleAccountUpdate)
 	mux.HandleFunc("DELETE /api/accounts/{id}", a.handleAccountDelete)
@@ -1080,6 +1087,8 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 			tokenExpiresAt = time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
 			authorizedSubscription = token.SubscriptionType
 			sessionAuthorized = true
+			input.Status = "active"
+			*input.Schedulable = true
 		case "api_key":
 			writeError(w, http.StatusBadRequest, "API Key credentials are required before creating the account")
 			return
@@ -1434,6 +1443,68 @@ func (a *app) handleAccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
+}
+
+func (a *app) handleAccountBatchSchedule(w http.ResponseWriter, r *http.Request) {
+	var input accountBatchScheduleInput
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	ids := uniquePositiveIDs(input.IDs, 501)
+	if len(ids) == 0 || len(ids) > 500 {
+		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
+		return
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		args[index] = id
+	}
+	var matched int64
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL AND id IN (`+placeholders+`)`, args...).Scan(&matched); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if matched == 0 {
+		writeError(w, http.StatusNotFound, "no selected accounts were found")
+		return
+	}
+	var result sql.Result
+	var err error
+	if input.Schedulable {
+		result, err = a.db.Exec(`UPDATE accounts SET status = 'active', schedulable = 1, error_message = '', updated_at = `+nowSQL+`
+			WHERE deleted_at IS NULL AND id IN (`+placeholders+`) AND auth_status = 'valid' AND proxy_id IS NOT NULL
+			AND EXISTS (SELECT 1 FROM proxies p WHERE p.id = accounts.proxy_id AND p.status = 'active' AND p.deleted_at IS NULL)`, args...)
+	} else {
+		result, err = a.db.Exec(`UPDATE accounts SET schedulable = 0, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND id IN (`+placeholders+`)`, args...)
+	}
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{
+		"matched": matched,
+		"updated": updated,
+		"skipped": matched - updated,
+	})
+}
+
+func uniquePositiveIDs(values []int64, limit int) []int64 {
+	result := make([]int64, 0, len(values))
+	seen := make(map[int64]bool, len(values))
+	for _, id := range values {
+		if id <= 0 || seen[id] || len(result) >= limit {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result
 }
 
 func (a *app) handlePoolResolve(w http.ResponseWriter, r *http.Request) {

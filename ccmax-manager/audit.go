@@ -171,6 +171,12 @@ func auditAction(r *http.Request) (string, string, string) {
 	if path == "accounts/batch-delete" {
 		action = "account.delete"
 	}
+	if path == "accounts/batch-schedule" {
+		action = "account.schedule"
+	}
+	if path == "proxies/batch-test" {
+		action = "proxy.test"
+	}
 	if path == "accounts/health/refresh" {
 		action = "account.health_refresh"
 	}

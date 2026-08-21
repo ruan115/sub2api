@@ -70,6 +70,7 @@ const canView = (page) =>
 const uiChoices = new Map();
 const sidebarStorageKey = "ccmax.sidebar.collapsed";
 const accountAutoRefreshStorageKey = "ccmax.accounts.auto-refresh";
+const accountColumnWidthsStorageKey = "ccmax.accounts.column-widths";
 const accountAutoRefreshInterval = 30000;
 const paginationTables = {
   accounts: { body: "accounts-body", size: 20, render: renderAccounts },
@@ -196,6 +197,53 @@ function initUIComponents() {
         );
     });
   refreshIcons();
+  initializeResizableTable();
+}
+
+function initializeResizableTable() {
+  const table = $(".accounts-table");
+  if (!table || table.dataset.resizableReady === "true") return;
+  table.dataset.resizableReady = "true";
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(accountColumnWidthsStorageKey) || "{}");
+  } catch {
+    saved = {};
+  }
+  $$("th[data-column]", table).forEach((header) => {
+    const key = header.dataset.column;
+    if (Number(saved[key]) > 0) header.style.width = `${Number(saved[key])}px`;
+    if (key === "select") return;
+    const handle = document.createElement("span");
+    handle.className = "column-resizer";
+    handle.setAttribute("aria-hidden", "true");
+    header.append(handle);
+    handle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = header.getBoundingClientRect().width;
+      const startTableWidth = table.getBoundingClientRect().width;
+      const minimum = key === "actions" ? 124 : 64;
+      handle.setPointerCapture(event.pointerId);
+      table.classList.add("is-resizing");
+      const move = (moveEvent) => {
+        const delta = moveEvent.clientX - startX;
+        header.style.width = `${Math.max(minimum, startWidth + delta)}px`;
+        table.style.width = `${Math.max(table.parentElement.clientWidth, startTableWidth + delta)}px`;
+      };
+      const finish = () => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", finish);
+        handle.removeEventListener("pointercancel", finish);
+        table.classList.remove("is-resizing");
+        saved[key] = Math.round(header.getBoundingClientRect().width);
+        localStorage.setItem(accountColumnWidthsStorageKey, JSON.stringify(saved));
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", finish);
+      handle.addEventListener("pointercancel", finish);
+    });
+  });
 }
 function resetDialogViewport(dialog) {
   dialog.scrollTop = 0;
@@ -828,6 +876,10 @@ function syncAccountSelection() {
   $("#selected-account-count").textContent = state.selectedAccountIDs.size;
   $("#delete-selected-accounts").disabled =
     !isAdmin() || state.selectedAccountIDs.size === 0;
+  $("#schedule-selected-accounts").disabled =
+    !isAdmin() || state.selectedAccountIDs.size === 0;
+  $("#pause-selected-accounts").disabled =
+    !isAdmin() || state.selectedAccountIDs.size === 0;
 }
 
 function renderDeadAccounts() {
@@ -1106,7 +1158,7 @@ function renderBatchResults() {
   )
     .map(
       (item) =>
-        `<tr><td class="mono">${item.index}</td><td><span class="row-title">${escapeHTML(item.name || "未创建")}</span>${item.account_id ? `<span class="row-subtitle mono">#${item.account_id}</span>` : ""}</td><td>${escapeHTML(subscriptionName(item.subscription_type))}</td><td class="mono">${escapeHTML(item.proxy_ip || "—")}</td><td><span class="pill ${item.success ? "ok" : "error"}">${item.success ? "成功" : "失败"}</span></td><td class="${item.success ? "" : "error-copy"}">${escapeHTML(item.error || "授权完成")}</td></tr>`,
+        `<tr><td class="mono">${item.index}</td><td><span class="row-title">${escapeHTML(item.name || "未创建")}</span>${item.account_id ? `<span class="row-subtitle mono">#${item.account_id}</span>` : ""}</td><td>${escapeHTML(subscriptionName(item.subscription_type))}</td><td class="mono">${escapeHTML(item.proxy_ip || "—")}</td><td><span class="pill ${item.skipped ? "off" : item.success ? "ok" : "error"}">${item.skipped ? "已存在" : item.success ? "成功" : "失败"}</span></td><td class="${item.success || item.skipped ? "" : "error-copy"}">${escapeHTML(item.error || "授权完成")}</td></tr>`,
     )
     .join("");
   refreshIcons();
@@ -1773,8 +1825,82 @@ $("#delete-selected-accounts").addEventListener("click", async (event) => {
     syncAccountSelection();
   }
 });
+
+async function updateSelectedAccountSchedule(schedulable) {
+  const ids = selectedAccountIDs();
+  if (!ids.length) return;
+  if (!schedulable) {
+    const confirmed = await confirmAction(
+      `暂停 ${ids.length} 个账号`,
+      "已选账号将立即停止接收新请求，账号数据和授权信息会继续保留。",
+      `确认暂停 ${ids.length} 个`,
+    );
+    if (!confirmed) return;
+  }
+  const buttons = [
+    $("#schedule-selected-accounts"),
+    $("#pause-selected-accounts"),
+  ];
+  try {
+    buttons.forEach((button) => (button.disabled = true));
+    const result = await api("/api/accounts/batch-schedule", {
+      method: "POST",
+      body: JSON.stringify({ ids, schedulable }),
+    });
+    state.selectedAccountIDs.clear();
+    await loadCore();
+    const skipped = Number(result.skipped || 0);
+    toast(
+      `${schedulable ? "已开启" : "已暂停"} ${result.updated} 个账号${skipped ? `，${skipped} 个因授权或代理状态未处理` : ""}`,
+      skipped && schedulable ? "error" : "success",
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    syncAccountSelection();
+  }
+}
+
+$("#schedule-selected-accounts").addEventListener("click", () =>
+  updateSelectedAccountSchedule(true),
+);
+$("#pause-selected-accounts").addEventListener("click", () =>
+  updateSelectedAccountSchedule(false),
+);
 $("#add-proxy-pool").addEventListener("click", () => openPool());
 $("#import-proxies").addEventListener("click", openProxyImport);
+$("#test-proxies-batch").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const poolID = Number(state.proxyPoolFilter || 0);
+  const candidates = state.proxies.filter(
+    (item) =>
+      item.status !== "disabled" &&
+      (!poolID || Number(item.pool_id) === poolID),
+  );
+  if (!candidates.length) {
+    toast("当前范围没有可检测代理", "error");
+    return;
+  }
+  const label = button.querySelector("span");
+  try {
+    button.disabled = true;
+    label.textContent = `检测中 0/${candidates.length}`;
+    const result = await api("/api/proxies/batch-test", {
+      method: "POST",
+      body: JSON.stringify({ pool_id: poolID, concurrency: 8 }),
+    });
+    await loadCore();
+    toast(
+      `代理检测完成：正常 ${result.success}，异常 ${result.failed}，共 ${result.total}`,
+      result.failed ? "error" : "success",
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    label.textContent = "批量检测";
+  }
+});
 $("#add-user").addEventListener("click", () => openUser());
 $("#add-api-key").addEventListener("click", () => openKey());
 $("#add-price").addEventListener("click", () => openPrice());
@@ -1980,11 +2106,13 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
     });
     $("#batch-result-panel").hidden = false;
     $("#batch-result-summary").textContent =
-      `${result.success} 成功 · ${result.failed} 失败 · 共 ${result.total}`;
+      `${result.success} 成功 · ${result.skipped || 0} 已存在 · ${result.failed} 失败 · 共 ${result.total}`;
     state.batchResults = result.items;
     resetPagination("batch");
     renderBatchResults();
-    toast(`批量授权完成：成功 ${result.success}，失败 ${result.failed}`);
+    toast(
+      `批量授权完成：成功 ${result.success}，已存在 ${result.skipped || 0}，失败 ${result.failed}`,
+    );
     await loadCore();
   } catch (error) {
     toast(error.message, "error");

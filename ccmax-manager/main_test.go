@@ -171,6 +171,63 @@ func TestAccountBatchDelete(t *testing.T) {
 	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-delete", map[string]any{"ids": []int64{}}, http.StatusBadRequest, nil)
 }
 
+func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	var ready, pending account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "ready@example.com", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "ready-token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+		"proxy_id": proxyID, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}, http.StatusCreated, &ready)
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "pending@example.com", "platform": "anthropic", "auth_type": "oauth",
+		"status": "active", "schedulable": false, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}, http.StatusCreated, &pending)
+
+	var paused struct {
+		Matched int64 `json:"matched"`
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-schedule", map[string]any{
+		"ids": []int64{ready.ID}, "schedulable": false,
+	}, http.StatusOK, &paused)
+	if paused.Matched != 1 || paused.Updated != 1 || paused.Skipped != 0 {
+		t.Fatalf("pause result = %+v", paused)
+	}
+	var enabled struct {
+		Matched int64 `json:"matched"`
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-schedule", map[string]any{
+		"ids": []int64{ready.ID, pending.ID}, "schedulable": true,
+	}, http.StatusOK, &enabled)
+	if enabled.Matched != 2 || enabled.Updated != 1 || enabled.Skipped != 1 {
+		t.Fatalf("enable result = %+v", enabled)
+	}
+	var readyScheduled, pendingScheduled int
+	if err := a.db.QueryRow(`SELECT schedulable FROM accounts WHERE id = ?`, ready.ID).Scan(&readyScheduled); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT schedulable FROM accounts WHERE id = ?`, pending.ID).Scan(&pendingScheduled); err != nil {
+		t.Fatal(err)
+	}
+	if readyScheduled != 1 || pendingScheduled != 0 {
+		t.Fatalf("scheduled states = %d/%d", readyScheduled, pendingScheduled)
+	}
+}
+
 func TestAutomaticProxyAssignmentIsExclusive(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
@@ -481,11 +538,13 @@ func TestOrdinaryUserSeesAccountPoolButCannotMutateAccounts(t *testing.T) {
 		{http.MethodPut, "/api/accounts/1", map[string]any{}},
 		{http.MethodDelete, "/api/accounts/1", nil},
 		{http.MethodPost, "/api/accounts/batch-delete", map[string]any{"ids": []int64{1}}},
+		{http.MethodPost, "/api/accounts/batch-schedule", map[string]any{"ids": []int64{1}, "schedulable": true}},
 		{http.MethodPost, "/api/accounts/health/refresh", map[string]any{"ids": []int64{1}}},
 		{http.MethodPost, "/api/accounts/1/quota/refresh", map[string]any{}},
 		{http.MethodPost, "/api/accounts/1/auth-url", map[string]any{}},
 		{http.MethodPost, "/api/accounts/1/oauth-exchange", map[string]any{}},
 		{http.MethodPost, "/api/accounts/1/session-auth", map[string]any{}},
+		{http.MethodPost, "/api/proxies/batch-test", map[string]any{"pool_id": 1}},
 	}
 	for _, mutation := range mutations {
 		requestJSON(t, handler, mutation.method, mutation.path, mutation.body, userCookie, "", http.StatusForbidden, nil)

@@ -455,7 +455,11 @@ func (a *app) saveClaudeToken(accountID int64, authType string, token *claudeTok
 	if subscription == "" {
 		subscription = subscriptionTypeFromCredentials(credentials)
 	}
-	_, err := a.db.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', status = CASE WHEN status = 'error' THEN 'active' ELSE status END, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, authType, string(credentialsJSON), credentialHint(string(credentialsJSON)), expiresAt, subscription, accountID)
+	schedulingUpdate := `status = 'active', schedulable = 1,`
+	if preserveRefresh {
+		schedulingUpdate = `status = CASE WHEN status = 'error' THEN 'active' ELSE status END,`
+	}
+	_, err := a.db.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', `+schedulingUpdate+` updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, authType, string(credentialsJSON), credentialHint(string(credentialsJSON)), expiresAt, subscription, accountID)
 	if err == nil && (!previousOnboarded.Valid || previousInvalidated.Valid) {
 		a.recordAccountLifecycle(accountID, "onboarded")
 	}

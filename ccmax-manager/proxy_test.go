@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseProxyLineFormats(t *testing.T) {
 	tests := []struct {
@@ -52,5 +57,43 @@ func TestProxyTextFromAPIEncodesCredentials(t *testing.T) {
 	}
 	if item.Protocol != "http" || item.Username != "a@b" || item.Password != "p:a ss" {
 		t.Fatalf("API proxy = %+v", item)
+	}
+}
+
+func TestBatchProxyTestRecoversWorkingErrorProxy(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"ip": "198.51.100.7"})
+	}))
+	defer target.Close()
+	previousEndpoint := proxyTestEndpoint
+	proxyTestEndpoint = target.URL
+	defer func() { proxyTestEndpoint = previousEndpoint }()
+
+	workingID, _ := createCountingForwardProxy(t, a)
+	if _, err := a.db.Exec(`UPDATE proxies SET status = 'error' WHERE id = ?`, workingID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO proxies (pool_id, name, protocol, host, port, status) VALUES (1, 'unreachable', 'http', '127.0.0.1', 1, 'error')`); err != nil {
+		t.Fatal(err)
+	}
+	var result proxyBatchTestResponse
+	putJSON(t, a.routes(), http.MethodPost, "/api/proxies/batch-test", map[string]any{
+		"pool_id": 1, "concurrency": 2,
+	}, http.StatusOK, &result)
+	if result.Total != 2 || result.Success != 1 || result.Failed != 1 {
+		t.Fatalf("batch proxy result = %+v", result)
+	}
+	var status, exitIP string
+	if err := a.db.QueryRow(`SELECT status, exit_ip FROM proxies WHERE id = ?`, workingID).Scan(&status, &exitIP); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" || exitIP != "198.51.100.7" {
+		t.Fatalf("working proxy status/ip = %q/%q", status, exitIP)
 	}
 }

@@ -54,7 +54,7 @@ func TestSaveClaudeTokenClearsOnlyAuthRefreshCooldown(t *testing.T) {
 	future := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
 	token := &claudeTokenInfo{AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresAt: time.Now().Add(time.Hour).Unix()}
 
-	if _, err := a.db.Exec(`UPDATE accounts SET auth_error = 'OAuth 401: rejected', rate_limit_reset_at = ? WHERE id = ?`, future, created.ID); err != nil {
+	if _, err := a.db.Exec(`UPDATE accounts SET auth_error = 'OAuth 401: rejected', rate_limit_reset_at = ?, schedulable = 0 WHERE id = ?`, future, created.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.saveClaudeToken(created.ID, "oauth", token, true); err != nil {
@@ -66,6 +66,13 @@ func TestSaveClaudeTokenClearsOnlyAuthRefreshCooldown(t *testing.T) {
 	}
 	if reset.Valid {
 		t.Fatalf("OAuth refresh cooldown was not cleared: %s", reset.String)
+	}
+	var schedulable int
+	if err := a.db.QueryRow(`SELECT schedulable FROM accounts WHERE id = ?`, created.ID).Scan(&schedulable); err != nil {
+		t.Fatal(err)
+	}
+	if schedulable != 0 {
+		t.Fatal("background token refresh re-enabled a manually paused account")
 	}
 
 	if _, err := a.db.Exec(`UPDATE accounts SET auth_error = '', rate_limit_reset_at = ? WHERE id = ?`, future, created.ID); err != nil {

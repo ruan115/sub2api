@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -71,6 +72,24 @@ type parsedProxy struct {
 	Username string
 	Password string
 }
+
+type proxyTestResult struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Success   bool   `json:"success"`
+	IP        string `json:"ip,omitempty"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type proxyBatchTestResponse struct {
+	Total   int               `json:"total"`
+	Success int               `json:"success"`
+	Failed  int               `json:"failed"`
+	Items   []proxyTestResult `json:"items"`
+}
+
+var proxyTestEndpoint = "https://api.ipify.org?format=json"
 
 func (a *app) migrateProxyFeatures() error {
 	statements := []string{
@@ -866,37 +885,161 @@ func (a *app) handleProxyTest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	proxyURL, err := a.proxyURL(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "proxy not found")
+	result := a.testProxy(r.Context(), id, "")
+	if !result.Success {
+		status := http.StatusBadGateway
+		if result.Error == "proxy not found or disabled" {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, result.Error)
 		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		PoolID      int64   `json:"pool_id"`
+		IDs         []int64 `json:"ids"`
+		Concurrency int     `json:"concurrency"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Concurrency <= 0 {
+		input.Concurrency = 8
+	}
+	if input.Concurrency > 20 {
+		input.Concurrency = 20
+	}
+	query := `SELECT id, name FROM proxies WHERE deleted_at IS NULL AND status != 'disabled'`
+	args := []any{}
+	if input.PoolID > 0 {
+		query += ` AND pool_id = ?`
+		args = append(args, input.PoolID)
+	}
+	if len(input.IDs) > 0 {
+		ids := uniquePositiveIDs(input.IDs, 501)
+		if len(ids) == 0 || len(ids) > 500 {
+			writeError(w, http.StatusBadRequest, "select between 1 and 500 proxies")
+			return
+		}
+		query += ` AND id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	query += ` ORDER BY id`
+	rows, err := a.db.Query(query, args...)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	targets := []proxyTestResult{}
+	for rows.Next() {
+		var item proxyTestResult
+		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+			rows.Close()
+			writeDBError(w, err)
+			return
+		}
+		targets = append(targets, item)
+	}
+	if err := rows.Close(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if len(targets) == 0 {
+		writeError(w, http.StatusBadRequest, "no active or error proxies to test")
+		return
+	}
+	if len(targets) > 500 {
+		writeError(w, http.StatusBadRequest, "batch proxy testing is limited to 500 proxies")
+		return
+	}
+	items := make([]proxyTestResult, len(targets))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	workerCount := min(input.Concurrency, len(targets))
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				items[index] = a.testProxy(r.Context(), targets[index].ID, targets[index].Name)
+			}
+		}()
+	}
+	for index := range targets {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+	response := proxyBatchTestResponse{Total: len(items), Items: items}
+	for _, item := range items {
+		if item.Success {
+			response.Success++
+		} else {
+			response.Failed++
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *app) testProxy(parent context.Context, id int64, name string) proxyTestResult {
+	result := proxyTestResult{ID: id, Name: name}
+	proxyURL, err := a.proxyURLForTest(id)
+	if err != nil {
+		result.Error = "proxy not found or disabled"
+		return result
 	}
 	client, err := clientForProxy(proxyURL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		result.Error = err.Error()
+		a.markProxyTestFailed(id)
+		return result
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org?format=json", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, proxyTestEndpoint, nil)
 	started := time.Now()
 	resp, err := client.Do(req)
-	latency := time.Since(started).Milliseconds()
+	result.LatencyMS = time.Since(started).Milliseconds()
 	if err != nil {
-		_, _ = a.db.Exec(`UPDATE proxies SET status = 'error', last_test_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, id)
-		writeError(w, http.StatusBadGateway, "proxy test failed: "+err.Error())
-		return
+		result.Error = "proxy test failed: " + err.Error()
+		a.markProxyTestFailed(id)
+		return result
 	}
 	defer resp.Body.Close()
 	var payload struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || payload.IP == "" {
-		writeError(w, http.StatusBadGateway, "proxy test returned an invalid response")
-		return
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || strings.TrimSpace(payload.IP) == "" {
+		result.Error = "proxy test returned an invalid response"
+		a.markProxyTestFailed(id)
+		return result
 	}
-	_, _ = a.db.Exec(`UPDATE proxies SET status = 'active', exit_ip = ?, latency_ms = ?, last_test_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, payload.IP, latency, id)
-	writeJSON(w, http.StatusOK, map[string]any{"ip": payload.IP, "latency_ms": latency})
+	result.Success = true
+	result.IP = strings.TrimSpace(payload.IP)
+	_, _ = a.db.Exec(`UPDATE proxies SET status = 'active', exit_ip = ?, latency_ms = ?, last_test_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, result.IP, result.LatencyMS, id)
+	return result
+}
+
+func (a *app) markProxyTestFailed(id int64) {
+	_, _ = a.db.Exec(`UPDATE proxies SET status = 'error', last_test_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, id)
+}
+
+func (a *app) proxyURLForTest(id int64) (*url.URL, error) {
+	var protocol, host, username, password string
+	var port int
+	if err := a.db.QueryRow(`SELECT protocol, host, port, username, password FROM proxies WHERE id = ? AND status != 'disabled' AND deleted_at IS NULL`, id).Scan(&protocol, &host, &port, &username, &password); err != nil {
+		return nil, err
+	}
+	u := &url.URL{Scheme: protocol, Host: net.JoinHostPort(host, strconv.Itoa(port))}
+	if username != "" {
+		u.User = url.UserPassword(username, password)
+	}
+	return u, nil
 }
 
 func (a *app) proxyURL(id int64) (*url.URL, error) {

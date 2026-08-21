@@ -317,6 +317,26 @@
                   <i data-lucide="refresh-cw"></i>
                 </button>
                 <button
+                  class="icon-button compact write-action"
+                  id="schedule-selected-accounts"
+                  type="button"
+                  title="开启已选账号调度"
+                  aria-label="开启已选账号调度"
+                  disabled
+                >
+                  <i data-lucide="play"></i>
+                </button>
+                <button
+                  class="icon-button compact write-action"
+                  id="pause-selected-accounts"
+                  type="button"
+                  title="暂停已选账号调度"
+                  aria-label="暂停已选账号调度"
+                  disabled
+                >
+                  <i data-lucide="pause"></i>
+                </button>
+                <button
                   class="button danger small write-action"
                   id="delete-selected-accounts"
                   type="button"
@@ -329,21 +349,21 @@
               </div>
             </div>
             <div class="table-wrap">
-              <table class="accounts-table">
+              <table class="accounts-table resizable-table">
                 <thead>
                   <tr>
-                    <th class="select-column admin-only-column"><input type="checkbox" id="select-all-accounts" aria-label="选择全部账号" /></th>
-                    <th>账号</th>
-                    <th>状态</th>
-                    <th>订阅类型</th>
-                    <th class="num">账号价格</th>
-                    <th class="num">账号总计费</th>
-                    <th>用量窗口</th>
-                    <th class="num">请求数</th>
-                    <th>上号时间</th>
-                    <th>存活时间</th>
-                    <th>最近使用</th>
-                    <th class="actions admin-only-column">操作</th>
+                    <th class="select-column admin-only-column" data-column="select"><input type="checkbox" id="select-all-accounts" aria-label="选择全部账号" /></th>
+                    <th data-column="account">账号</th>
+                    <th data-column="status">状态</th>
+                    <th data-column="subscription">订阅类型</th>
+                    <th class="num" data-column="price">账号价格</th>
+                    <th class="num" data-column="billing">账号总计费</th>
+                    <th data-column="quota">用量窗口</th>
+                    <th class="num" data-column="requests">请求数</th>
+                    <th data-column="onboarded">上号时间</th>
+                    <th data-column="survival">存活时间</th>
+                    <th data-column="last-used">最近使用</th>
+                    <th class="actions admin-only-column" data-column="actions">操作</th>
                   </tr>
                 </thead>
                 <tbody id="accounts-body"></tbody>
@@ -441,6 +461,13 @@
                 </div>
                 <div class="heading-actions">
                   <select id="proxy-pool-filter"></select
+                  ><button
+                    class="button secondary small write-action"
+                    id="test-proxies-batch"
+                    type="button"
+                  >
+                    <i data-lucide="activity"></i><span>批量检测</span>
+                  </button
                   ><button
                     class="button secondary small write-action"
                     id="import-proxies"

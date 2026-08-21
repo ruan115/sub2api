@@ -72,12 +72,14 @@ type batchAuthorizationResult struct {
 	ProxyIP      string `json:"proxy_ip,omitempty"`
 	Subscription string `json:"subscription_type,omitempty"`
 	Success      bool   `json:"success"`
+	Skipped      bool   `json:"skipped,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
 
 type batchAuthorizationResponse struct {
 	Total   int                        `json:"total"`
 	Success int                        `json:"success"`
+	Skipped int                        `json:"skipped"`
 	Failed  int                        `json:"failed"`
 	Items   []batchAuthorizationResult `json:"items"`
 }
@@ -467,6 +469,25 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 			a.recordAuthorization(nil, proxyID, "", "batch_session_key", false, item.Error, token.SubscriptionType, requestIP(r))
 			continue
 		}
+		existingID, existingName, exists, lookupErr := a.findAccountByEmail(item.Name)
+		if lookupErr != nil {
+			item.Error = lookupErr.Error()
+			response.Failed++
+			response.Items = append(response.Items, item)
+			a.recordAuthorization(nil, proxyID, item.Name, "batch_session_key", false, item.Error, token.SubscriptionType, requestIP(r))
+			continue
+		}
+		if exists {
+			item.AccountID = existingID
+			item.Name = existingName
+			item.Subscription = token.SubscriptionType
+			item.Skipped = true
+			item.Error = "同邮箱账号已存在，未重复创建"
+			response.Skipped++
+			response.Items = append(response.Items, item)
+			a.recordAuthorization(&existingID, proxyID, item.Name, "batch_session_key", true, item.Error, token.SubscriptionType, requestIP(r))
+			continue
+		}
 		accountID, createErr := a.createBatchAuthorizedAccount(input, authType, item.Name, token, *proxyID)
 		if createErr != nil {
 			item.Error = createErr.Error()
@@ -484,6 +505,38 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		a.recordAuthorization(&accountID, proxyID, item.Name, "batch_session_key", true, "authorization succeeded", token.SubscriptionType, requestIP(r))
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func normalizeAccountEmail(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func (a *app) findAccountByEmail(email string) (int64, string, bool, error) {
+	target := normalizeAccountEmail(email)
+	if target == "" {
+		return 0, "", false, nil
+	}
+	rows, err := a.db.Query(`SELECT id, name, credentials_json FROM accounts WHERE platform = 'anthropic' AND deleted_at IS NULL ORDER BY id`)
+	if err != nil {
+		return 0, "", false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var name, credentialsJSON string
+		if err := rows.Scan(&id, &name, &credentialsJSON); err != nil {
+			return 0, "", false, err
+		}
+		credentials := decodeObject(credentialsJSON)
+		credentialEmail, _ := credentials["email_address"].(string)
+		if normalizeAccountEmail(name) == target || normalizeAccountEmail(credentialEmail) == target {
+			return id, name, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", false, err
+	}
+	return 0, "", false, nil
 }
 
 func uniqueSessionKeys(values []string) []string {

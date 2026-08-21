@@ -118,6 +118,14 @@ func TestAccountStatisticsSubscriptionAndDispatchState(t *testing.T) {
 	if err := a.saveClaudeToken(got.ID, "oauth", &claudeTokenInfo{AccessToken: accessToken, ExpiresAt: 4_102_444_800, SubscriptionType: "max"}, false); err != nil {
 		t.Fatal(err)
 	}
+	var status string
+	var schedulable int
+	if err := a.db.QueryRow(`SELECT status, schedulable FROM accounts WHERE id = ?`, got.ID).Scan(&status, &schedulable); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" || schedulable != 1 {
+		t.Fatalf("reauthorized account status/schedulable = %s/%d", status, schedulable)
+	}
 	var onboardedEvents, invalidatedEvents int
 	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_lifecycle_events WHERE account_id = ? AND event_type = 'onboarded'`, got.ID).Scan(&onboardedEvents); err != nil {
 		t.Fatal(err)
@@ -162,10 +170,14 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 				return
 			}
 			code := strings.TrimSpace(body["code"].(string))
+			identity := code
+			if code == "duplicate-first" {
+				identity = "first"
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"access_token": "access-" + code, "refresh_token": "refresh-" + code,
 				"expires_in": 3600, "organization": map[string]string{"uuid": "org-1", "raven_type": "team"},
-				"account": map[string]string{"uuid": "account-" + code, "email_address": code + "@example.com"},
+				"account": map[string]string{"uuid": "account-" + identity, "email_address": identity + "@example.com"},
 			})
 		default:
 			http.NotFound(w, r)
@@ -186,36 +198,40 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 
 	firstProxyID, firstCalls := createCountingForwardProxy(t, a)
 	secondProxyID, secondCalls := createCountingForwardProxy(t, a)
+	thirdProxyID, thirdCalls := createCountingForwardProxy(t, a)
 	var result batchAuthorizationResponse
 	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-authorize", map[string]any{
-		"session_keys": []string{"first", "second"}, "proxy_pool_id": 1,
+		"session_keys": []string{"first", "second", "duplicate-first"}, "proxy_pool_id": 1,
 		"group_ids": []string{"a"}, "auth_type": "oauth", "account_price": 25,
 		"concurrency": 2, "base_rpm": 15,
 	}, http.StatusOK, &result)
-	if result.Success != 2 || result.Failed != 0 || len(result.Items) != 2 {
+	if result.Success != 2 || result.Skipped != 1 || result.Failed != 0 || len(result.Items) != 3 {
 		t.Fatalf("batch result = %+v", result)
 	}
-	if firstCalls.Load() == 0 || secondCalls.Load() == 0 {
-		t.Fatalf("authorization bypassed proxy: calls=%d/%d", firstCalls.Load(), secondCalls.Load())
+	if firstCalls.Load() == 0 || secondCalls.Load() == 0 || thirdCalls.Load() == 0 {
+		t.Fatalf("authorization bypassed proxy: calls=%d/%d/%d", firstCalls.Load(), secondCalls.Load(), thirdCalls.Load())
 	}
 	if result.Items[0].Name != "first@example.com" || result.Items[1].Name != "second@example.com" {
 		t.Fatalf("account names were not derived from token emails: %+v", result.Items)
 	}
-	if result.Items[0].Subscription != "team" || result.Items[1].Subscription != "team" {
+	if result.Items[0].Subscription != "team" || result.Items[1].Subscription != "team" || !result.Items[2].Skipped || result.Items[2].AccountID != result.Items[0].AccountID {
 		t.Fatalf("subscription types = %+v", result.Items)
 	}
-	if firstProxyID == secondProxyID {
+	if firstProxyID == secondProxyID || firstProxyID == thirdProxyID || secondProxyID == thirdProxyID {
 		t.Fatal("test proxies are not unique")
 	}
-	var distinctProxyCount, authorizationCount int
+	var accountCount, distinctProxyCount, authorizationCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL`).Scan(&accountCount); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.db.QueryRow(`SELECT COUNT(DISTINCT proxy_id) FROM accounts WHERE deleted_at IS NULL`).Scan(&distinctProxyCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.db.QueryRow(`SELECT COUNT(*) FROM authorization_logs WHERE success = 1`).Scan(&authorizationCount); err != nil {
 		t.Fatal(err)
 	}
-	if distinctProxyCount != 2 || authorizationCount != 2 {
-		t.Fatalf("proxy/auth counts = %d/%d", distinctProxyCount, authorizationCount)
+	if accountCount != 2 || distinctProxyCount != 2 || authorizationCount != 3 {
+		t.Fatalf("account/proxy/auth counts = %d/%d/%d", accountCount, distinctProxyCount, authorizationCount)
 	}
 }
 
