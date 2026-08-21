@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	sub2claude "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/tidwall/gjson"
 )
@@ -877,29 +878,14 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	return key, err
 }
 
-type gatewayModel struct {
-	ID          string `json:"id"`
-	Type        string `json:"type"`
-	DisplayName string `json:"display_name"`
-	CreatedAt   string `json:"created_at"`
-	Object      string `json:"object"`
-	Created     int64  `json:"created"`
-	OwnedBy     string `json:"owned_by"`
-}
+type gatewayModel = sub2claude.Model
 
-func newGatewayModel(id, createdAt string) gatewayModel {
-	created := time.Now().UTC()
-	if parsed, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
-		created = parsed
-	}
+func newGatewayModel(id string) gatewayModel {
 	return gatewayModel{
 		ID:          id,
 		Type:        "model",
 		DisplayName: id,
-		CreatedAt:   createdAt,
-		Object:      "model",
-		Created:     created.Unix(),
-		OwnedBy:     "anthropic",
+		CreatedAt:   "2024-01-01T00:00:00Z",
 	}
 }
 
@@ -930,114 +916,44 @@ func (a *app) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model not found")
 		return
 	}
-	result := map[string]any{"object": "list", "data": models, "has_more": false, "first_id": nil, "last_id": nil}
-	if len(models) > 0 {
-		result["first_id"] = models[0].ID
-		result["last_id"] = models[len(models)-1].ID
-	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models})
 }
 
 func (a *app) gatewayModels(groupID string) ([]gatewayModel, error) {
-	models := map[string]gatewayModel{}
-	priceRows, err := a.db.Query(`SELECT model, created_at FROM model_prices WHERE model != '*' ORDER BY model`)
-	if err != nil {
-		return nil, err
-	}
-	for priceRows.Next() {
-		var id, createdAt string
-		if err := priceRows.Scan(&id, &createdAt); err != nil {
-			priceRows.Close()
-			return nil, err
-		}
-		models[id] = newGatewayModel(id, createdAt)
-	}
-	if err := priceRows.Err(); err != nil {
-		priceRows.Close()
-		return nil, err
-	}
-	priceRows.Close()
 	accountRows, err := a.db.Query(`SELECT a.extra_json FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
 		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.status = 'active' AND a.schedulable = 1 AND a.auth_status != 'reauth_required'
 		AND EXISTS (SELECT 1 FROM proxies p WHERE p.id = a.proxy_id AND p.status = 'active' AND p.deleted_at IS NULL)`, groupID)
 	if err != nil {
 		return nil, err
 	}
-	restricted := map[string]bool{}
-	patterns := []string{}
-	unrestricted := false
+	defer accountRows.Close()
+	modelIDs := map[string]struct{}{}
 	for accountRows.Next() {
 		var raw string
 		if err := accountRows.Scan(&raw); err != nil {
-			accountRows.Close()
 			return nil, err
 		}
 		extra := decodeObject(raw)
-		configured := configuredModelNames(extra)
-		if len(configured) == 0 || configured["*"] {
-			unrestricted = true
-		}
-		for model := range configured {
-			if strings.HasSuffix(model, "*") && model != "*" {
-				patterns = append(patterns, model)
-			} else if model != "*" {
-				restricted[model] = true
-			}
-		}
 		if mapping, ok := extra["model_mapping"].(map[string]any); ok {
-			for model := range mapping {
-				restricted[model] = true
+			for modelID := range mapping {
+				if modelID = strings.TrimSpace(modelID); modelID != "" {
+					modelIDs[modelID] = struct{}{}
+				}
 			}
 		}
 	}
 	if err := accountRows.Err(); err != nil {
-		accountRows.Close()
 		return nil, err
 	}
-	accountRows.Close()
-	if !unrestricted {
-		for model := range models {
-			allowed := restricted[model]
-			for _, pattern := range patterns {
-				allowed = allowed || modelPatternMatches(pattern, model)
-			}
-			if !allowed {
-				delete(models, model)
-			}
-		}
+	if len(modelIDs) == 0 {
+		return append([]gatewayModel(nil), sub2claude.DefaultModels...), nil
 	}
-	for model := range restricted {
-		if _, ok := models[model]; !ok {
-			models[model] = newGatewayModel(model, time.Now().UTC().Format(time.RFC3339))
-		}
-	}
-	result := make([]gatewayModel, 0, len(models))
-	for _, model := range models {
-		result = append(result, model)
+	result := make([]gatewayModel, 0, len(modelIDs))
+	for modelID := range modelIDs {
+		result = append(result, newGatewayModel(modelID))
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
-}
-
-func configuredModelNames(extra map[string]any) map[string]bool {
-	result := map[string]bool{}
-	for _, key := range []string{"supported_models", "available_models"} {
-		switch values := extra[key].(type) {
-		case []any:
-			for _, value := range values {
-				if model, ok := value.(string); ok && strings.TrimSpace(model) != "" {
-					result[strings.TrimSpace(model)] = true
-				}
-			}
-		case string:
-			for _, model := range strings.Split(values, ",") {
-				if strings.TrimSpace(model) != "" {
-					result[strings.TrimSpace(model)] = true
-				}
-			}
-		}
-	}
-	return result
 }
 
 func groupAllowedJSON(role, raw, groupID string) bool {

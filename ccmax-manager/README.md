@@ -78,14 +78,14 @@ curl http://127.0.0.1:8088/v1/messages \
 
 也支持 `x-api-key: sk-...`。`metadata.user_id`、`x-session-id` 或 `session-id` 会用于 15 分钟粘性调度。成功响应自动写入计费流水并累加 SK 配额。
 
-模型列表使用同一个用户 SK 鉴权，并只返回该 SK 所属分组当前可调度账号支持的模型：
+模型列表使用同一个用户 SK 鉴权，不请求 Anthropic 上游。它与 Sub2API 保持一致：优先汇总该 SK 所属分组当前可调度账号配置的 `model_mapping` 键；没有映射或暂时没有可调度账号时，返回 Sub2API 同源的 Claude 默认模型列表：
 
 ```bash
 curl http://127.0.0.1:8088/v1/models \
   -H 'Authorization: Bearer sk-...'
 ```
 
-`/v1/models/{id}` 可读取单个模型；`/models` 与 `/models/{id}` 是兼容别名。响应同时包含 Anthropic 的 `type/display_name/created_at` 和 OpenAI 客户端常用的 `object/created/owned_by` 字段。
+`/v1/models/{id}` 可读取单个模型；`/models` 与 `/models/{id}` 是兼容别名。列表响应和模型字段使用 Sub2API 的 Anthropic 格式。模型价格配置只用于计费，不控制 `/v1/models` 的可见模型。
 
 OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system prompt 和缓存结构；其他客户端会按 Sub2API 规则转换成 Claude Code 请求，补齐 billing attribution、稳定账号身份、CLI 字段和 beta。客户端 Cookie、下游鉴权头及非白名单头不会转发到上游。流式响应会在收到 SSE 事件后立即 flush，账号遇到授权失败、429 或可重试的 5xx 时会切换到同组的其他可用账号。
 

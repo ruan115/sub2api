@@ -467,7 +467,7 @@ func TestCountTokensUsesSingleAccountAndSub2ModelRules(t *testing.T) {
 	}
 }
 
-func TestGatewayModelsAliasFiltersWildcardModels(t *testing.T) {
+func TestGatewayModelsFallsBackToSub2DefaultsWithoutModelMapping(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
@@ -491,19 +491,32 @@ func TestGatewayModelsAliasFiltersWildcardModels(t *testing.T) {
 		Object string         `json:"object"`
 		Data   []gatewayModel `json:"data"`
 	}
-	requestJSON(t, handler, http.MethodGet, "/models", nil, nil, key.Key, http.StatusOK, &result)
-	if result.Object != "list" || len(result.Data) != 1 || result.Data[0].ID != "claude-sonnet-4-5" {
+	response := requestJSON(t, handler, http.MethodGet, "/models", nil, nil, key.Key, http.StatusOK, nil)
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Object != "list" || len(result.Data) != len(sub2claude.DefaultModels) {
 		t.Fatalf("models=%+v", result.Data)
 	}
-	if result.Data[0].Type != "model" || result.Data[0].Object != "model" || result.Data[0].OwnedBy != "anthropic" || result.Data[0].Created <= 0 {
-		t.Fatalf("compatibility fields=%+v", result.Data[0])
+	for index := range sub2claude.DefaultModels {
+		if result.Data[index] != sub2claude.DefaultModels[index] {
+			t.Fatalf("model[%d]=%+v, want %+v", index, result.Data[index], sub2claude.DefaultModels[index])
+		}
 	}
+	var raw map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 2 || raw["object"] != "list" {
+		t.Fatalf("response fields=%+v", raw)
+	}
+	detailID := sub2claude.DefaultModels[0].ID
 	var model gatewayModel
-	requestJSON(t, handler, http.MethodGet, "/models/claude-sonnet-4-5", nil, nil, key.Key, http.StatusOK, &model)
-	if model.ID != "claude-sonnet-4-5" {
+	requestJSON(t, handler, http.MethodGet, "/models/"+detailID, nil, nil, key.Key, http.StatusOK, &model)
+	if model != sub2claude.DefaultModels[0] {
 		t.Fatalf("model=%+v", model)
 	}
-	requestJSON(t, handler, http.MethodGet, "/models/claude-opus-4-6", nil, nil, key.Key, http.StatusNotFound, nil)
+	requestJSON(t, handler, http.MethodGet, "/models/not-configured", nil, nil, key.Key, http.StatusNotFound, nil)
 }
 
 func TestGatewayNoAccountClassificationMatchesSub2(t *testing.T) {
