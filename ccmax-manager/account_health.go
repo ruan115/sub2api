@@ -31,16 +31,25 @@ func newAccountHealthController() *accountHealthController {
 }
 
 func (a *app) startAccountHealthScheduler() func() {
-	if disabled := strings.TrimSpace(os.Getenv("CCMAX_ACCOUNT_HEALTH_ENABLED")); disabled == "0" || strings.EqualFold(disabled, "false") {
+	enabled := strings.TrimSpace(os.Getenv("CCMAX_ACCOUNT_HEALTH_ENABLED"))
+	// Sub2API does not actively probe every account on a timer. Keep this
+	// standalone extension opt-in so the compatibility lifecycle stays intact.
+	if enabled != "1" && !strings.EqualFold(enabled, "true") {
 		return func() {}
 	}
 	minutes := 5
 	if value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CCMAX_ACCOUNT_HEALTH_MINUTES"))); err == nil && value > 0 {
 		minutes = value
 	}
-	stop := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	var wait sync.WaitGroup
+	wait.Add(1)
 	go func() {
-		if result, err := a.refreshAccountHealth(context.Background(), nil, false); err != nil {
+		defer wait.Done()
+		if result, err := a.refreshAccountHealth(ctx, nil, false); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			log.Printf("account health initial check: %v", err)
 		} else {
 			log.Printf("account health initial check: checked=%d healthy=%d failed=%d skipped=%d", result.Checked, result.Healthy, result.Failed, result.Skipped)
@@ -50,19 +59,27 @@ func (a *app) startAccountHealthScheduler() func() {
 		for {
 			select {
 			case <-ticker.C:
-				result, err := a.refreshAccountHealth(context.Background(), nil, false)
+				result, err := a.refreshAccountHealth(ctx, nil, false)
 				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
 					log.Printf("account health scheduled check: %v", err)
 					continue
 				}
 				log.Printf("account health scheduled check: checked=%d healthy=%d failed=%d skipped=%d", result.Checked, result.Healthy, result.Failed, result.Skipped)
-			case <-stop:
+			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(stop) }) }
+	return func() {
+		once.Do(func() {
+			cancel()
+			wait.Wait()
+		})
+	}
 }
 
 func (a *app) handleAccountHealthRefresh(w http.ResponseWriter, r *http.Request) {

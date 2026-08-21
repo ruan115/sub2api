@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 type quotaWindow struct {
@@ -241,14 +243,8 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 	if quota, ok := quotaFromHeaders(response.Header); ok {
 		_ = a.persistAccountQuota(accountID, quota, false)
 	}
-	if response.StatusCode == http.StatusTooManyRequests {
-		reset := response.Header.Get("anthropic-ratelimit-unified-7d-reset")
-		if strings.TrimSpace(response.Header.Get("anthropic-ratelimit-unified-7d-utilization")) != "1" {
-			reset = response.Header.Get("anthropic-ratelimit-unified-5h-reset")
-		}
-		if value := resetHeaderTime(reset); value != "" {
-			_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, updated_at = `+nowSQL+` WHERE id = ?`, value, accountID)
-		}
+	if resetAt, ok := sub2service.ResolveCCMaxCompatibilityCooldown(response.StatusCode, response.Header); ok {
+		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), accountID)
 	}
 }
 
@@ -266,11 +262,11 @@ func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, 
 			a.markAccountReauth(account.ID, "upstream authentication failed: "+message)
 			return
 		}
-		until := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
-		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, "OAuth refresh temporarily failed: "+message, "OAuth refresh temporarily failed: "+message, account.ID)
-	case http.StatusForbidden:
 		until := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
-		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, "upstream access forbidden: "+message, "upstream access forbidden: "+message, account.ID)
+		reason := "OAuth 401: " + message
+		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, reason, reason, account.ID)
+	case http.StatusForbidden:
+		a.markAccountReauth(account.ID, "upstream access forbidden: "+message)
 	}
 }
 

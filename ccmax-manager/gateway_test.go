@@ -18,6 +18,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sub2claude "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/tidwall/gjson"
 )
 
 type capturedClaudeRequest struct {
@@ -43,7 +47,7 @@ func TestOAuthGatewayMimicsClaudeCodeAndFiltersHeaders(t *testing.T) {
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	key := createGatewayTestKey(t, handler)
-	createGatewayTestAccount(t, a, handler, "mimic", upstream.URL, 0, map[string]any{"account_uuid": "account-uuid"}, map[string]any{"access_token": "oauth-token", "account_uuid": "account-uuid"})
+	created := createGatewayTestAccount(t, a, handler, "mimic", upstream.URL, 0, map[string]any{"account_uuid": "account-uuid"}, map[string]any{"access_token": "oauth-token", "account_uuid": "account-uuid"})
 
 	payload := map[string]any{
 		"model": "claude-test", "system": "Only answer with facts.", "max_tokens": 32,
@@ -71,10 +75,10 @@ func TestOAuthGatewayMimicsClaudeCodeAndFiltersHeaders(t *testing.T) {
 	if got.Header.Get("Cookie") != "" || got.Header.Get("X-Untrusted-Header") != "" {
 		t.Fatalf("untrusted headers leaked: %#v", got.Header)
 	}
-	if got.Header.Get("User-Agent") != claudeDefaultHeaders["User-Agent"] || got.Header.Get("X-App") != "cli" {
+	if got.Header.Get("User-Agent") != sub2claude.DefaultHeaders["User-Agent"] || got.Header.Get("X-App") != "cli" {
 		t.Fatalf("Claude Code headers missing: %#v", got.Header)
 	}
-	for _, beta := range claudeFullMimicBetas {
+	for _, beta := range sub2claude.FullClaudeCodeMimicryBetas() {
 		if !strings.Contains(got.Header.Get("anthropic-beta"), beta) {
 			t.Fatalf("anthropic-beta missing %s: %s", beta, got.Header.Get("anthropic-beta"))
 		}
@@ -96,6 +100,13 @@ func TestOAuthGatewayMimicsClaudeCodeAndFiltersHeaders(t *testing.T) {
 	if err := json.Unmarshal([]byte(metadata["user_id"].(string)), &userID); err != nil || userID["account_uuid"] != "account-uuid" || userID["session_id"] == "" {
 		t.Fatalf("metadata.user_id=%#v err=%v", metadata["user_id"], err)
 	}
+	var fingerprintJSON, extraJSON string
+	if err := a.db.QueryRow(`SELECT f.fingerprint_json, a.extra_json FROM account_fingerprints f JOIN accounts a ON a.id = f.account_id WHERE f.account_id = ?`, created.ID).Scan(&fingerprintJSON, &extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fingerprintJSON, "ClientID") || strings.Contains(extraJSON, sub2FingerprintExtraKey) {
+		t.Fatalf("fingerprint storage=%s extra=%s", fingerprintJSON, extraJSON)
+	}
 }
 
 func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
@@ -106,6 +117,12 @@ func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
 		captured <- body
 		if r.Header.Get("Authorization") != "Bearer passthrough-token" {
 			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("X-Custom-Mode") != "raw" || r.Header.Get("anthropic-beta") != "client-beta" {
+			t.Errorf("passthrough headers changed: %#v", r.Header)
+		}
+		if r.Header.Get("Cookie") != "" {
+			t.Errorf("cookie leaked upstream: %q", r.Header.Get("Cookie"))
 		}
 		_, _ = w.Write([]byte(`{"id":"msg_passthrough","usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
@@ -122,6 +139,9 @@ func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(rawBody))
 	request.Header.Set("Authorization", "Bearer "+key.Key)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Custom-Mode", "raw")
+	request.Header.Set("anthropic-beta", "client-beta")
+	request.Header.Set("Cookie", "session=must-not-leak")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -129,6 +149,30 @@ func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
 	}
 	if got := <-captured; !bytes.Equal(got, rawBody) {
 		t.Fatalf("raw body changed\n got: %s\nwant: %s", got, rawBody)
+	}
+}
+
+func TestCompatibilityAuthLaneUsesAccountTypeWithMixedCredentials(t *testing.T) {
+	body := []byte(`{"model":"claude-alias","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	account := gatewayAccount{
+		AuthType:        "api_key",
+		CredentialsJSON: `{"access_token":"stale-oauth-token","api_key":"upstream-api-key"}`,
+		ExtraJSON:       `{"model_mapping":{"claude-alias":"claude-upstream"}}`,
+	}
+	prepared, err := prepareClaudeRequest(request, body, account, "claude-alias", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.OAuth || prepared.Model != "claude-upstream" {
+		t.Fatalf("OAuth=%v model=%q", prepared.OAuth, prepared.Model)
+	}
+	headers := http.Header{}
+	if err := buildClaudeHeaders(headers, request.Header, prepared, account.CredentialsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if headers.Get("x-api-key") != "upstream-api-key" || headers.Get("Authorization") != "" {
+		t.Fatalf("unexpected auth headers: %#v", headers)
 	}
 }
 
@@ -145,7 +189,7 @@ func TestRealClaudeCodeRequestPreservesSystem(t *testing.T) {
 	request.Header.Set("X-App", "cli")
 	request.Header.Set("anthropic-beta", "claude-code-20250219")
 	request.Header.Set("anthropic-version", claudeAPIVersion)
-	prepared, err := prepareClaudeRequest(request, body, gatewayAccount{ID: 7, CredentialsJSON: `{"access_token":"token","account_uuid":"account"}`}, "claude-test", false)
+	prepared, err := prepareClaudeRequest(request, body, gatewayAccount{ID: 7, AuthType: "oauth", CredentialsJSON: `{"access_token":"token","account_uuid":"account"}`}, "claude-test", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +201,98 @@ func TestRealClaudeCodeRequestPreservesSystem(t *testing.T) {
 	system := transformed["system"].([]any)
 	if len(system) != 2 || system[1].(map[string]any)["text"] != "client-owned-cache" {
 		t.Fatalf("real Claude Code system changed: %#v", system)
+	}
+}
+
+func TestClaudeCLIWithInvalidMetadataUsesSub2MimicLane(t *testing.T) {
+	body := []byte(`{"model":"claude-test","max_tokens":32,"system":"keep this instruction","messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":"not-a-claude-code-id"}}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	request.Header.Set("User-Agent", "claude-cli/2.1.220 (external, cli)")
+	prepared, err := prepareClaudeRequest(request, body, gatewayAccount{ID: 7, AuthType: "oauth", CredentialsJSON: `{"access_token":"token","account_uuid":"account"}`}, "claude-test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ClaudeCode || !prepared.Mimic {
+		t.Fatalf("classification ClaudeCode=%v Mimic=%v", prepared.ClaudeCode, prepared.Mimic)
+	}
+}
+
+func TestCompatibilitySignatureRetryReturnsStrongRetryResponse(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"thinking.signature is invalid"}}`)
+		case 2:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"tool_use signature is invalid"}}`)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"strong-final"}}`)
+		}
+	}))
+	defer upstream.Close()
+
+	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":2048,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"tool_use","id":"toolu_1","name":"search","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"result"}]}],"tools":[{"name":"search","description":"search","input_schema":{"type":"object"}}]}`)
+	clientRequest := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	prepared, err := prepareClaudeRequest(clientRequest, body, gatewayAccount{ID: 9, AuthType: "oauth", CredentialsJSON: `{"access_token":"token"}`}, "claude-sonnet-4-5", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sub2service.IsCCMaxCompatibilitySignatureError([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"thinking.signature is invalid"}}`), prepared.Model) {
+		t.Fatalf("signature error was not detected for model %q", prepared.Model)
+	}
+	request, err := http.NewRequest(http.MethodPost, upstream.URL, bytes.NewReader(prepared.Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header = prepared.Compat.Headers.Clone()
+	response, err := upstream.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = retryGatewayCompatibility400(upstream.Client(), request, response, prepared, time.Now())
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 || response.StatusCode != http.StatusBadRequest || !strings.Contains(string(responseBody), "strong-final") {
+		t.Fatalf("calls=%d status=%d body=%s", calls.Load(), response.StatusCode, responseBody)
+	}
+}
+
+func TestCompatibilityAPIKeyPoolModeRetriesSameAccountLikeSub2(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"pool busy"}}`)
+	}))
+	defer upstream.Close()
+
+	body := []byte(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`)
+	request, err := http.NewRequest(http.MethodPost, upstream.URL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := claudePreparedRequest{
+		AuthType: "api_key", Compat: &sub2service.CCMaxCompatibilityPrepared{},
+		Credentials: map[string]any{
+			"api_key": "upstream-key", "pool_mode": true, "pool_mode_retry_count": float64(2),
+		},
+	}
+	response, err := doGatewayUpstreamRequest(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), upstream.Client(), request, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests || calls.Load() != 3 {
+		t.Fatalf("status=%d calls=%d", response.StatusCode, calls.Load())
+	}
+	if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+		t.Fatal("default account state handling must be skipped in pool mode")
 	}
 }
 
@@ -224,23 +360,71 @@ func TestGatewayStreamsBeforeUpstreamCompletes(t *testing.T) {
 	response.Body.Close()
 }
 
-func TestGatewayFailsOverAndMapsCountTokensModel(t *testing.T) {
+func TestGatewayFailsOverOnSub2PreOutputSSEOverload(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var overloadedCalls, healthyCalls atomic.Int32
+	overloaded := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		overloadedCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+	}))
+	defer overloaded.Close()
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		healthyCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer healthy.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "overloaded-stream", overloaded.URL, 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "healthy-stream", healthy.URL, 1, nil, map[string]any{"access_token": "token-b"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != second.Name {
+		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "Overloaded") || !strings.Contains(response.Body.String(), "message_stop") {
+		t.Fatalf("unexpected streamed body: %s", response.Body.String())
+	}
+	if overloadedCalls.Load() != 1 || healthyCalls.Load() != 1 {
+		t.Fatalf("upstream calls overloaded=%d healthy=%d", overloadedCalls.Load(), healthyCalls.Load())
+	}
+	var resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, first.ID).Scan(&resetAt); err != nil || !resetAt.Valid {
+		t.Fatalf("overload cooldown=%q err=%v", resetAt.String, err)
+	}
+	var firstRPM, secondRPM int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, first.ID).Scan(&firstRPM); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, second.ID).Scan(&secondRPM); err != nil {
+		t.Fatal(err)
+	}
+	if firstRPM != 0 || secondRPM != 1 {
+		t.Fatalf("RPM events overloaded=%d healthy=%d", firstRPM, secondRPM)
+	}
+}
+
+func TestCountTokensUsesSingleAccountAndSub2ModelRules(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var firstCalls, secondCalls atomic.Int32
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		firstCalls.Add(1)
-		http.Error(w, "busy", http.StatusServiceUnavailable)
-	}))
-	defer first.Close()
 	mappedModel := make(chan string, 1)
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		secondCalls.Add(1)
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalls.Add(1)
 		if r.URL.Path != "/v1/messages/count_tokens" || r.URL.Query().Get("beta") != "true" {
 			t.Errorf("count_tokens target=%s?%s", r.URL.Path, r.URL.RawQuery)
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		for _, field := range []string{"temperature", "top_p", "top_k", "stream", "stop_sequences", "stop", "max_tokens", "metadata"} {
+		for _, field := range []string{"temperature", "top_p", "top_k", "stream", "stop_sequences", "stop", "max_tokens"} {
 			if _, exists := body[field]; exists {
 				t.Errorf("count_tokens forwarded generation field %q", field)
 			}
@@ -250,6 +434,11 @@ func TestGatewayFailsOverAndMapsCountTokensModel(t *testing.T) {
 			t.Errorf("count_tokens beta=%s", r.Header.Get("anthropic-beta"))
 		}
 		_, _ = w.Write([]byte(`{"input_tokens":9}`))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondCalls.Add(1)
+		http.Error(w, "unexpected failover", http.StatusInternalServerError)
 	}))
 	defer second.Close()
 	a, handler := newGatewayTestApp(t)
@@ -263,10 +452,10 @@ func TestGatewayFailsOverAndMapsCountTokensModel(t *testing.T) {
 		"temperature": 0.7, "top_p": 0.9, "top_k": 40, "stream": true,
 		"stop_sequences": []string{"END"}, "stop": []string{"DONE"}, "max_tokens": 1024,
 	}, nil, key.Key, http.StatusOK, nil)
-	if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
-		t.Fatalf("failover calls first=%d second=%d", firstCalls.Load(), secondCalls.Load())
+	if firstCalls.Load() != 1 || secondCalls.Load() != 0 {
+		t.Fatalf("count_tokens calls first=%d second=%d", firstCalls.Load(), secondCalls.Load())
 	}
-	if got := <-mappedModel; got != "claude-upstream" {
+	if got := <-mappedModel; got != "claude-alias" {
 		t.Fatalf("mapped model=%q", got)
 	}
 	var models struct {
@@ -344,12 +533,11 @@ func TestGatewayNeverDispatchesWithoutAnActiveProxy(t *testing.T) {
 	}
 }
 
-func TestPassthroughCountTokensStillRemovesGenerationFields(t *testing.T) {
+func TestPassthroughCountTokensPreservesRawBody(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
-	captured := make(chan map[string]any, 1)
+	captured := make(chan []byte, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, _ := io.ReadAll(r.Body)
 		captured <- body
 		_, _ = w.Write([]byte(`{"input_tokens":12}`))
 	}))
@@ -357,20 +545,22 @@ func TestPassthroughCountTokensStillRemovesGenerationFields(t *testing.T) {
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	key := createGatewayTestKey(t, handler)
-	createGatewayTestAccount(t, a, handler, "passthrough-count", upstream.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
+	created := createGatewayTestAccount(t, a, handler, "passthrough-count", upstream.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
 
-	requestJSON(t, handler, http.MethodPost, "/v1/messages/count_tokens", map[string]any{
-		"model": "claude-test", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
-		"max_tokens": 512, "stream": true, "temperature": 0.7, "custom_parameter": map[string]any{"keep": true},
-	}, nil, key.Key, http.StatusOK, nil)
-	body := <-captured
-	for _, field := range []string{"max_tokens", "stream", "temperature"} {
-		if _, ok := body[field]; ok {
-			t.Fatalf("passthrough count_tokens retained %s: %#v", field, body)
-		}
+	rawBody := []byte("{\n  \"model\": \"claude-test\",\n  \"messages\": [{\"role\":\"user\",\"content\":\"hello\"}],\n  \"max_tokens\": 512,\n  \"stream\": true,\n  \"temperature\": 0.7,\n  \"custom_parameter\": {\"keep\": true}\n}\n")
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewReader(rawBody))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway status=%d body=%s", response.Code, response.Body.String())
 	}
-	if custom, _ := body["custom_parameter"].(map[string]any); custom["keep"] != true {
-		t.Fatalf("custom passthrough field changed: %#v", body)
+	if got := <-captured; !bytes.Equal(got, rawBody) {
+		t.Fatalf("raw count_tokens body changed\n got: %s\nwant: %s", got, rawBody)
+	}
+	var rpmEvents int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, created.ID).Scan(&rpmEvents); err != nil || rpmEvents != 0 {
+		t.Fatalf("count_tokens RPM events=%d err=%v", rpmEvents, err)
 	}
 }
 
@@ -404,7 +594,7 @@ func TestGatewayTruncatedStreamEmitsErrorAndRecordsPartialUsage(t *testing.T) {
 	}
 }
 
-func TestGatewayUnauthorizedRefreshesAndRetriesSameAccount(t *testing.T) {
+func TestGatewayUnauthorizedTemporarilyUnschedulesAndFailsOver(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -421,19 +611,14 @@ func TestGatewayUnauthorizedRefreshesAndRetriesSameAccount(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"msg_refreshed","usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer upstream.Close()
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600,"token_type":"bearer"}`))
-	}))
-	defer tokenServer.Close()
-	previousEndpoint := claudeTokenEndpoint
-	claudeTokenEndpoint = tokenServer.URL
-	t.Cleanup(func() { claudeTokenEndpoint = previousEndpoint })
-
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	key := createGatewayTestKey(t, handler)
 	created := createGatewayTestAccount(t, a, handler, "refresh-on-401", upstream.URL, 0, nil, map[string]any{
 		"access_token": "stale-token", "refresh_token": "refresh-token", "expires_at": time.Now().Add(time.Hour).Unix(),
+	})
+	createGatewayTestAccount(t, a, handler, "fallback-after-401", upstream.URL, 1, nil, map[string]any{
+		"access_token": "fresh-token", "refresh_token": "fresh-refresh", "expires_at": time.Now().Add(time.Hour).Unix(),
 	})
 	var response map[string]any
 	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
@@ -443,11 +628,165 @@ func TestGatewayUnauthorizedRefreshesAndRetriesSameAccount(t *testing.T) {
 		t.Fatalf("response=%#v upstream calls=%d", response, upstreamCalls.Load())
 	}
 	var authStatus, credentials string
-	if err := a.db.QueryRow(`SELECT auth_status, credentials_json FROM accounts WHERE id = ?`, created.ID).Scan(&authStatus, &credentials); err != nil {
+	var resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT auth_status, credentials_json, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&authStatus, &credentials, &resetAt); err != nil {
 		t.Fatal(err)
 	}
-	if authStatus != "valid" || !strings.Contains(credentials, "fresh-token") {
-		t.Fatalf("account auth=%s credentials=%s", authStatus, credentials)
+	if authStatus != "valid" || !strings.Contains(credentials, "stale-token") || !resetAt.Valid {
+		t.Fatalf("account auth=%s credentials=%s reset=%v", authStatus, credentials, resetAt)
+	}
+}
+
+func TestGatewayOAuth403RetriesFiveTimesThenFailsOver(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var forbiddenCalls, fallbackCalls atomic.Int32
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forbiddenCalls.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"message":"account forbidden"}}`))
+	}))
+	defer forbidden.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		_, _ = w.Write([]byte(`{"id":"msg_fallback","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer fallback.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "forbidden", forbidden.URL, 0, nil, map[string]any{"access_token": "first-token"})
+	createGatewayTestAccount(t, a, handler, "fallback", fallback.URL, 1, nil, map[string]any{"access_token": "second-token"})
+	var response map[string]any
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-test", "max_tokens": 8, "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}, nil, key.Key, http.StatusOK, &response)
+	if response["id"] != "msg_fallback" || forbiddenCalls.Load() != 5 || fallbackCalls.Load() != 1 {
+		t.Fatalf("response=%#v forbidden=%d fallback=%d", response, forbiddenCalls.Load(), fallbackCalls.Load())
+	}
+	var status, authStatus string
+	if err := a.db.QueryRow(`SELECT status, auth_status FROM accounts WHERE id = ?`, first.ID).Scan(&status, &authStatus); err != nil {
+		t.Fatal(err)
+	}
+	if status != "error" || authStatus != "reauth_required" {
+		t.Fatalf("forbidden account status=%s auth=%s", status, authStatus)
+	}
+}
+
+func TestCompatibilityRetriesThinkingSignature400OnSameAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		if call == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"message":"Invalid signature in thinking block"}}`))
+			return
+		}
+		if gjson.GetBytes(body, "thinking").Exists() || gjson.GetBytes(body, "messages.0.content.0.type").String() != "text" {
+			t.Errorf("thinking retry body=%s", body)
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_rectified","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "rectifier", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-sonnet-4-5", "thinking": map[string]any{"type": "enabled", "budget_tokens": 2048}, "max_tokens": 4096,
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "reasoning", "signature": "valid"}, map[string]any{"type": "text", "text": "answer"}}},
+			map[string]any{"role": "user", "content": "continue"},
+		},
+	}, nil, key.Key, http.StatusOK, nil)
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls=%d, want 2", calls.Load())
+	}
+	var rpmEvents int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, created.ID).Scan(&rpmEvents); err != nil || rpmEvents != 1 {
+		t.Fatalf("successful request RPM events=%d err=%v", rpmEvents, err)
+	}
+}
+
+func TestCompatibilityTransportFailureDoesNotSwitchAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	var fallbackCalls atomic.Int32
+	unreachable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"should-not-arrive"}`))
+	}))
+	unreachable.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		_, _ = w.Write([]byte(`{"id":"msg_fallback","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer fallback.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	first := createGatewayTestAccount(t, a, handler, "transport-error", unreachable.URL, 0, nil, map[string]any{"access_token": "first-token"})
+	createGatewayTestAccount(t, a, handler, "fallback", fallback.URL, 1, nil, map[string]any{"access_token": "second-token"})
+	if first.ProxyID == nil {
+		t.Fatal("first account has no proxy")
+	}
+	if _, err := a.db.Exec(`UPDATE proxies SET port = 1 WHERE id = ?`, *first.ProxyID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "Upstream request failed") {
+		t.Fatalf("transport response=%d %s", response.Code, response.Body.String())
+	}
+	if fallbackCalls.Load() != 0 {
+		t.Fatalf("fallback calls=%d, want 0", fallbackCalls.Load())
+	}
+}
+
+func TestSub2CompatibilityErrorMapping(t *testing.T) {
+	tests := []struct {
+		name         string
+		upstream     int
+		countTokens  bool
+		wantStatus   int
+		wantType     string
+		wantMessage  string
+		upstreamBody string
+		wantRawBody  bool
+	}{
+		{name: "messages unauthorized", upstream: 401, wantStatus: 502, wantType: "upstream_error", wantMessage: "Upstream authentication failed, please contact administrator"},
+		{name: "messages rate limit", upstream: 429, wantStatus: 429, wantType: "rate_limit_error", wantMessage: "Upstream rate limit exceeded, please retry later"},
+		{name: "messages bad request", upstream: 400, wantStatus: 400, upstreamBody: `{"type":"error","error":{"message":"bad input"}}`, wantRawBody: true},
+		{name: "count tokens overloaded", upstream: 529, countTokens: true, wantStatus: 529, wantType: "upstream_error", wantMessage: "Service overloaded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			writeSub2CompatibilityError(response, tt.upstream, []byte(tt.upstreamBody), tt.countTokens)
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if tt.wantRawBody {
+				if response.Body.String() != tt.upstreamBody {
+					t.Fatalf("raw body=%s", response.Body.String())
+				}
+				return
+			}
+			var payload struct {
+				Error struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Error.Type != tt.wantType || payload.Error.Message != tt.wantMessage {
+				t.Fatalf("error response=%s", response.Body.String())
+			}
+		})
 	}
 }
 
@@ -458,7 +797,7 @@ func TestSerialQueueTimeoutIsReturned(t *testing.T) {
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	_ = handler
-	account := gatewayAccount{ID: 99, UserMsgQueueMode: "serial", BaseRPM: 15}
+	account := gatewayAccount{ID: 99, AuthType: "oauth", UserMsgQueueMode: "serial", BaseRPM: 15}
 	release, err := a.acquireUserMessageQueue(context.Background(), account, []byte(`{"messages":[{"role":"user","content":"one"}]}`), false)
 	if err != nil {
 		t.Fatal(err)
@@ -466,6 +805,40 @@ func TestSerialQueueTimeoutIsReturned(t *testing.T) {
 	defer release()
 	if _, err := a.acquireUserMessageQueue(context.Background(), account, []byte(`{"messages":[{"role":"user","content":"two"}]}`), false); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("queue timeout err=%v", err)
+	}
+}
+
+func TestGatewaySerialQueueTimeoutFailsOpenLikeSub2(t *testing.T) {
+	previous := gatewaySerialQueueTimeout
+	gatewaySerialQueueTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { gatewaySerialQueueTimeout = previous })
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"msg_queue","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	account := createGatewayTestAccount(t, a, handler, "queue-fail-open", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+	if _, err := a.db.Exec(`UPDATE accounts SET user_msg_queue_mode = 'serial' WHERE id = ?`, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`)
+	locked := gatewayAccount{ID: account.ID, AuthType: "oauth", BaseRPM: 15, UserMsgQueueMode: "serial"}
+	release, err := a.acquireUserMessageQueue(context.Background(), locked, body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -587,11 +960,138 @@ func TestGatewayRetryRecordsRateLimitReset(t *testing.T) {
 	}
 }
 
+func TestGatewayUsesSub2RateLimitFallbackAndOverloadCooldown(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		status   int
+		minDelay time.Duration
+		maxDelay time.Duration
+	}{
+		{name: "429 fallback", status: http.StatusTooManyRequests, minDelay: 4 * time.Second, maxDelay: 6 * time.Second},
+		{name: "529 overload", status: 529, minDelay: 9*time.Minute + 59*time.Second, maxDelay: 10*time.Minute + time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CCMAX_AUTH_DISABLED", "1")
+			a, handler := newGatewayTestApp(t)
+			defer a.db.Close()
+			created := createGatewayTestAccount(t, a, handler, test.name, "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+			before := time.Now()
+
+			a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: test.status, Header: make(http.Header)})
+
+			var raw sql.NullString
+			if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if !raw.Valid {
+				t.Fatal("expected account cooldown")
+			}
+			resetAt, err := time.Parse(time.RFC3339Nano, raw.String)
+			if err != nil {
+				t.Fatal(err)
+			}
+			delay := resetAt.Sub(before)
+			if delay < test.minDelay || delay > test.maxDelay {
+				t.Fatalf("cooldown %s outside [%s, %s]", delay, test.minDelay, test.maxDelay)
+			}
+		})
+	}
+}
+
+func TestGatewayChoosesSub2ExceededAnthropicWindow(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "seven-day-limited", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	now := time.Now().UTC()
+	fiveHourReset := now.Add(2 * time.Hour).Truncate(time.Second)
+	sevenDayReset := now.Add(2 * 24 * time.Hour).Truncate(time.Second)
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(fiveHourReset.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(sevenDayReset.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.2")
+	headers.Set("anthropic-ratelimit-unified-7d-surpassed-threshold", "true")
+
+	a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers})
+
+	var raw sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !raw.Valid {
+		t.Fatal("expected account cooldown")
+	}
+	resetAt, err := time.Parse(time.RFC3339Nano, raw.String)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resetAt.Equal(sevenDayReset) {
+		t.Fatalf("reset at %s, want exceeded 7d window %s", resetAt, sevenDayReset)
+	}
+}
+
+func TestGatewayStickyBindingMatchesSub2EagerSelection(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := createGatewayTestAccount(t, a, handler, "sticky-first", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "sticky-second", "https://second.example.test", 1, nil, map[string]any{"access_token": "token-b"})
+	const session = "stable-session"
+	a.bindGatewayStickySession(key.ID, session, first.ID)
+
+	selected, err := a.acquireGatewayAccount(key, session, "claude-test", map[int64]bool{first.ID: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	if selected.ID != second.ID {
+		t.Fatalf("selected account=%d, want fallback %d", selected.ID, second.ID)
+	}
+	if bound := a.gatewayStickyAccountID(key.ID, session); bound != second.ID {
+		t.Fatalf("sticky account=%d, want eagerly selected fallback %d", bound, second.ID)
+	}
+}
+
+func TestGatewayUsesSub2RPMThreeZoneDecision(t *testing.T) {
+	account := gatewayAccount{
+		AuthType: "oauth", BaseRPM: 10, Concurrency: 3, RPMStrategy: "tiered",
+		ExtraJSON: `{"max_sessions":10}`,
+	}
+	if !rpmSchedulable(account, 15, true) {
+		t.Fatal("sticky request should remain schedulable in concurrency + max_sessions buffer")
+	}
+	if rpmSchedulable(account, 10, false) {
+		t.Fatal("non-sticky request should not enter the RPM buffer")
+	}
+	if rpmSchedulable(account, 23, true) {
+		t.Fatal("request should be blocked at the end of the RPM buffer")
+	}
+	account.AuthType = "apikey"
+	if !rpmSchedulable(account, 999, false) {
+		t.Fatal("Sub2API does not apply account RPM to Anthropic API-key accounts")
+	}
+}
+
+func TestUserRPMStorageFailureFailsOpenLikeSub2(t *testing.T) {
+	a, _ := newGatewayTestApp(t)
+	if err := a.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.checkAndIncrementUserRPM(gatewayKey{UserID: 1, UserRPM: 1}); err != nil {
+		t.Fatalf("storage failure must fail open, got %v", err)
+	}
+}
+
 func TestSerialUserMessageQueueAndToolResultBypass(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, _ := newGatewayTestApp(t)
 	defer a.db.Close()
-	account := gatewayAccount{ID: 99, BaseRPM: 15, UserMsgQueueMode: "serial"}
+	account := gatewayAccount{ID: 99, AuthType: "oauth", BaseRPM: 15, UserMsgQueueMode: "serial"}
 	userBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	firstRelease, err := a.acquireUserMessageQueue(context.Background(), account, userBody, false)
 	if err != nil {

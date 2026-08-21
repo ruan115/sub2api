@@ -18,7 +18,7 @@ var gatewaySerialQueueTimeout = 2 * time.Minute
 
 func (a *app) acquireUserMessageQueue(ctx context.Context, account gatewayAccount, body []byte, countTokens bool) (func(), error) {
 	noop := func() {}
-	if countTokens || account.UserMsgQueueMode == "" || account.UserMsgQueueMode == "off" || !isRealUserMessage(body) {
+	if countTokens || (account.AuthType != "oauth" && account.AuthType != "setup_token") || account.UserMsgQueueMode == "" || account.UserMsgQueueMode == "off" || !isRealUserMessage(body) {
 		return noop, nil
 	}
 	stateValue, _ := a.queueStates.LoadOrStore(account.ID, &gatewayQueueState{serial: make(chan struct{}, 1)})

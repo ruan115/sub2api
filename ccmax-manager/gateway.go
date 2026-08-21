@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/tidwall/gjson"
 )
 
 type gatewayKey struct {
@@ -41,6 +45,7 @@ type gatewayAccount struct {
 	StickyBuffer     int
 	UserMsgQueueMode string
 	ProxyID          sql.NullInt64
+	Fingerprint      *sub2service.Fingerprint
 }
 
 type messageEnvelope struct {
@@ -48,6 +53,8 @@ type messageEnvelope struct {
 	Stream   bool           `json:"stream"`
 	Metadata map[string]any `json:"metadata"`
 }
+
+type gatewayAPIKeyContextKey struct{}
 
 type tokenUsage struct {
 	Input         int64
@@ -73,6 +80,15 @@ type gatewayUpstreamFailure struct {
 	header  http.Header
 	body    []byte
 	account gatewayAccount
+}
+
+type gatewayPreOutputStreamError struct {
+	status int
+	body   []byte
+}
+
+func (e *gatewayPreOutputStreamError) Error() string {
+	return "upstream stream returned an error before output"
 }
 
 func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countTokens bool) {
@@ -130,12 +146,17 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		writeError(w, http.StatusTooManyRequests, err.Error())
 		return
 	}
-	session := messageSession(r, envelope.Metadata)
+	r = r.WithContext(context.WithValue(r.Context(), gatewayAPIKeyContextKey{}, key.ID))
+	session := sub2service.GenerateCCMaxCompatibilitySessionHash(body, gatewayClientIP(r), r.UserAgent(), key.ID)
 	excluded := map[int64]bool{}
-	refreshedAfterUnauthorized := map[int64]bool{}
 	var lastFailure *gatewayUpstreamFailure
 	var lastDispatchError error
-	for attempt := 0; attempt < gatewayMaxAttempts(); attempt++ {
+	maxAccountAttempts := gatewayMaxAttempts()
+	if countTokens {
+		// Sub2API count_tokens selects one account and returns that upstream result.
+		maxAccountAttempts = 1
+	}
+	for attempt := 0; attempt < maxAccountAttempts; attempt++ {
 		account, acquireErr := a.acquireGatewayAccount(key, session, envelope.Model, excluded)
 		if acquireErr != nil {
 			lastDispatchError = acquireErr
@@ -145,8 +166,28 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		account, err = a.ensureGatewayAccountToken(r.Context(), account)
 		if err != nil {
 			a.releaseGatewayAccount(account.ID)
-			lastDispatchError = err
-			continue
+			message := "Upstream request failed"
+			if countTokens {
+				message = "Failed to get access token"
+			}
+			writeAnthropicGatewayError(w, http.StatusBadGateway, "upstream_error", message)
+			return
+		}
+		if err := validateGatewayAccountCredential(account); err != nil {
+			a.releaseGatewayAccount(account.ID)
+			message := "Upstream request failed"
+			if countTokens {
+				message = "Failed to get access token"
+			}
+			writeAnthropicGatewayError(w, http.StatusBadGateway, "upstream_error", message)
+			return
+		}
+		if !accountRequestPassthrough(account) {
+			// Sub2API treats identity persistence as best-effort. A repository
+			// failure degrades to a request without unified fingerprint metadata.
+			if resolved, fingerprintErr := a.ensureGatewayAccountFingerprint(account, r.Header); fingerprintErr == nil {
+				account = resolved
+			}
 		}
 		prepared, prepareErr := prepareClaudeRequest(r, body, account, envelope.Model, countTokens)
 		if prepareErr != nil {
@@ -161,6 +202,10 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		upstreamURL, urlErr := upstreamClaudeURL(account.ExtraJSON, path)
 		if urlErr != nil {
 			a.releaseGatewayAccount(account.ID)
+			if !prepared.Passthrough {
+				writeAnthropicGatewayError(w, http.StatusBadGateway, "upstream_error", "Upstream request failed")
+				return
+			}
 			lastDispatchError = urlErr
 			continue
 		}
@@ -194,39 +239,64 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		queueRelease, queueErr := a.acquireUserMessageQueue(r.Context(), account, body, countTokens)
 		if queueErr != nil {
-			a.releaseGatewayAccount(account.ID)
-			if r.Context().Err() == nil {
-				writeError(w, http.StatusTooManyRequests, "user message queue wait timed out")
-			}
-			return
+			// Sub2API's user-message queue is fail-open: timeout or throttle
+			// bookkeeping failure must not reject an otherwise valid request.
+			queueRelease = func() {}
 		}
 		started := time.Now()
-		response, requestErr := client.Do(upstreamRequest)
-		queueRelease()
+		response, requestErr := doGatewayUpstreamRequest(r, client, upstreamRequest, prepared)
 		if requestErr != nil {
+			queueRelease()
 			a.releaseGatewayAccount(account.ID)
+			if !prepared.Passthrough {
+				message := "Upstream request failed"
+				if countTokens {
+					message = "Request failed"
+				}
+				writeAnthropicGatewayError(w, http.StatusBadGateway, "upstream_error", message)
+				return
+			}
 			lastDispatchError = requestErr
 			continue
 		}
-		a.captureAccountUpstreamState(account.ID, response)
+		response = retryGatewayCompatibility400(client, upstreamRequest, response, prepared, started)
+		if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+			a.captureAccountUpstreamState(account.ID, response)
+		}
 		if retryableGatewayStatus(response.StatusCode) {
+			queueRelease()
 			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 			response.Body.Close()
 			a.releaseGatewayAccount(account.ID)
-			if response.StatusCode == http.StatusUnauthorized && gatewayAccountHasRefreshToken(account) && !refreshedAfterUnauthorized[account.ID] {
-				refreshedAfterUnauthorized[account.ID] = true
-				if _, refreshErr := a.refreshGatewayAccountToken(r.Context(), account, true); refreshErr == nil {
-					delete(excluded, account.ID)
-					continue
-				}
+			if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+				a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 			}
-			a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 			lastFailure = &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}
 			continue
 		}
-		usage, forwardErr := forwardGatewayResponse(w, response, prepared.Stream && !countTokens, account, key.GroupID)
+		if response.StatusCode >= 400 && !prepared.Passthrough {
+			queueRelease()
+			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+			response.Body.Close()
+			a.releaseGatewayAccount(account.ID)
+			if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+				a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
+			}
+			writeSub2CompatibilityError(w, response.StatusCode, failureBody, countTokens)
+			return
+		}
+		queueRelease()
+		usage, forwardErr := forwardGatewayResponse(w, response, prepared.Stream && !countTokens, account, key.GroupID, prepared)
 		response.Body.Close()
 		a.releaseGatewayAccount(account.ID)
+		var preOutputErr *gatewayPreOutputStreamError
+		if errors.As(forwardErr, &preOutputErr) {
+			if preOutputErr.status == 529 && !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
+				a.captureAccountUpstreamState(account.ID, &http.Response{StatusCode: 529, Header: response.Header.Clone()})
+			}
+			lastFailure = &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account}
+			continue
+		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			if countTokens {
 				if forwardErr != nil {
@@ -234,6 +304,9 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				}
 				_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
 				return
+			}
+			if forwardErr == nil {
+				a.recordGatewayAccountRPM(account.ID)
 			}
 			if forwardErr == nil || usage.hasUsage() {
 				a.recordGatewayUsage(key, account, envelope.Model, prepared.Stream, response.Header.Get("request-id"), usage, started)
@@ -245,6 +318,10 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		return
 	}
 	if lastFailure != nil {
+		if !accountRequestPassthrough(lastFailure.account) {
+			writeSub2CompatibilityError(w, lastFailure.status, lastFailure.body, countTokens)
+			return
+		}
 		copyGatewayResponseHeaders(w.Header(), lastFailure.header)
 		w.Header().Set("X-CCMAX-Account", lastFailure.account.Name)
 		w.Header().Set("X-CCMAX-Group", key.GroupID)
@@ -261,6 +338,67 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 	}
 	writeError(w, status, message)
+}
+
+func validateGatewayAccountCredential(account gatewayAccount) error {
+	credentials := decodeObject(account.CredentialsJSON)
+	switch account.AuthType {
+	case "oauth", "setup_token", "setup-token":
+		if _, ok := stringObjectValue(credentials, "access_token"); !ok {
+			return errors.New("access_token not found in credentials")
+		}
+	case "api_key":
+		if _, ok := stringObjectValue(credentials, "api_key"); !ok {
+			return errors.New("api_key not found in credentials")
+		}
+	}
+	return nil
+}
+
+func writeSub2CompatibilityError(w http.ResponseWriter, upstreamStatus int, body []byte, countTokens bool) {
+	if countTokens {
+		message := "Upstream request failed"
+		switch upstreamStatus {
+		case http.StatusTooManyRequests:
+			message = "Rate limit exceeded"
+		case 529:
+			message = "Service overloaded"
+		}
+		writeAnthropicGatewayError(w, upstreamStatus, "upstream_error", message)
+		return
+	}
+	if upstreamStatus == http.StatusBadRequest {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(body)
+		return
+	}
+	status, errorType, message := http.StatusBadGateway, "upstream_error", "Upstream request failed"
+	switch upstreamStatus {
+	case http.StatusUnauthorized:
+		message = "Upstream authentication failed, please contact administrator"
+	case http.StatusForbidden:
+		message = "Upstream access forbidden, please contact administrator"
+	case http.StatusTooManyRequests:
+		status, errorType, message = http.StatusTooManyRequests, "rate_limit_error", "Upstream rate limit exceeded, please retry later"
+	case 529:
+		status, errorType, message = http.StatusServiceUnavailable, "overloaded_error", "Upstream service overloaded, please retry later"
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		message = "Upstream service temporarily unavailable"
+	}
+	writeAnthropicGatewayError(w, status, errorType, message)
+}
+
+func writeAnthropicGatewayError(w http.ResponseWriter, status int, errorType, message string) {
+	writeJSON(w, status, map[string]any{
+		"type":  "error",
+		"error": map[string]string{"type": errorType, "message": message},
+	})
+}
+
+func gatewayAPIKeyID(ctx context.Context) int64 {
+	value, _ := ctx.Value(gatewayAPIKeyContextKey{}).(int64)
+	return value
 }
 
 func (a *app) acquireGatewayQuotaLock(keyID int64) func() {
@@ -311,52 +449,236 @@ func (a *app) checkGatewayGroupBudget(groupID string) error {
 }
 
 func gatewayMaxAttempts() int {
-	return 4
+	// Sub2API defaults to the initial account plus up to ten account switches.
+	return 11
 }
 
 func retryableGatewayStatus(status int) bool {
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests,
-		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
 		return true
 	default:
-		return false
+		return status == 529 || status >= http.StatusInternalServerError
 	}
 }
 
-func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stream bool, account gatewayAccount, groupID string) (tokenUsage, error) {
-	copyGatewayResponseHeaders(w.Header(), response.Header)
-	w.Header().Set("X-CCMAX-Account", account.Name)
-	w.Header().Set("X-CCMAX-Group", groupID)
+func doGatewayUpstreamRequest(r *http.Request, client *http.Client, request *http.Request, prepared claudePreparedRequest) (*http.Response, error) {
+	poolRetryCount := 0
+	for {
+		response, err := doGatewayUpstreamForward(r, client, request, prepared)
+		if err != nil || response == nil || prepared.Passthrough || prepared.CountTokens {
+			return response, err
+		}
+		policy := sub2service.ResolveCCMaxCompatibilityAccountPolicy(gatewayPreparedAuthType(prepared), prepared.Credentials, response.StatusCode)
+		if !policy.PoolRetryable || poolRetryCount >= policy.PoolRetryCount {
+			return response, nil
+		}
+		poolRetryCount++
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 2<<20))
+		_ = response.Body.Close()
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-r.Context().Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, r.Context().Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func doGatewayUpstreamForward(r *http.Request, client *http.Client, request *http.Request, prepared claudePreparedRequest) (*http.Response, error) {
+	maxAttempts := 1
+	if !prepared.Passthrough && !prepared.CountTokens {
+		// The actual status is evaluated below. OAuth retries only 403; API-key
+		// custom policies may enable retries for other statuses.
+		maxAttempts = 5
+	}
+	started := time.Now()
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		current := request.Clone(request.Context())
+		if request.GetBody != nil {
+			body, err := request.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			current.Body = body
+		} else if attempt > 1 {
+			return nil, errors.New("upstream request body cannot be replayed")
+		}
+		response, err := client.Do(current)
+		if err != nil || response == nil || prepared.Passthrough || prepared.CountTokens ||
+			!sub2service.ShouldRetryCCMaxCompatibilityStatus(gatewayPreparedAuthType(prepared), prepared.Credentials, response.StatusCode) || attempt == maxAttempts {
+			return response, err
+		}
+		elapsed := time.Since(started)
+		if elapsed >= 10*time.Second {
+			return response, nil
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 2<<20))
+		_ = response.Body.Close()
+		delay := 300 * time.Millisecond * time.Duration(1<<(attempt-1))
+		if delay > 3*time.Second {
+			delay = 3 * time.Second
+		}
+		if remaining := 10*time.Second - elapsed; delay > remaining {
+			delay = remaining
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-r.Context().Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, r.Context().Err()
+		case <-timer.C:
+		}
+	}
+	return nil, errors.New("upstream request failed: empty response")
+}
+
+func skipGatewayDefaultErrorHandling(prepared claudePreparedRequest, status int) bool {
+	if prepared.Passthrough || prepared.Compat == nil {
+		return false
+	}
+	return sub2service.ResolveCCMaxCompatibilityAccountPolicy(
+		gatewayPreparedAuthType(prepared), prepared.Credentials, status,
+	).SkipDefaultErrorHandling
+}
+
+func gatewayPreparedAuthType(prepared claudePreparedRequest) string {
+	if prepared.AuthType != "" {
+		return prepared.AuthType
+	}
+	if prepared.OAuth {
+		return "oauth"
+	}
+	return "api_key"
+}
+
+func retryGatewayCompatibility400(client *http.Client, request *http.Request, response *http.Response, prepared claudePreparedRequest, started time.Time) *http.Response {
+	if prepared.Passthrough || prepared.Compat == nil || response == nil || response.StatusCode != http.StatusBadRequest {
+		return response
+	}
+	originalBody, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	_ = response.Body.Close()
+	response.Body = io.NopCloser(bytes.NewReader(originalBody))
+	if readErr != nil {
+		return response
+	}
+	if time.Since(started) >= 10*time.Second {
+		return response
+	}
+
+	if sub2service.IsCCMaxCompatibilitySignatureError(originalBody, prepared.Model) {
+		retryPrepared, applied, err := sub2service.PrepareCCMaxCompatibilityRetry(prepared.Compat, sub2service.CCMaxCompatibilityRetryThinking)
+		if err != nil || !applied {
+			return response
+		}
+		retryResponse, retryErr := sendGatewayCompatibilityRetry(client, request, retryPrepared)
+		if retryErr != nil || retryResponse == nil {
+			return response
+		}
+		if prepared.CountTokens || retryResponse.StatusCode < 400 {
+			return retryResponse
+		}
+		retryBody, retryReadErr := io.ReadAll(io.LimitReader(retryResponse.Body, 2<<20))
+		_ = retryResponse.Body.Close()
+		if retryReadErr != nil {
+			return response
+		}
+		retryResponse.Body = io.NopCloser(bytes.NewReader(retryBody))
+		if retryReadErr == nil && retryResponse.StatusCode == http.StatusBadRequest &&
+			sub2service.IsCCMaxCompatibilitySignatureError(retryBody, prepared.Model) &&
+			sub2service.IsCCMaxCompatibilityToolSignatureError(retryBody) && time.Since(started) < 10*time.Second {
+			strongPrepared, strongApplied, strongErr := sub2service.PrepareCCMaxCompatibilityRetry(prepared.Compat, sub2service.CCMaxCompatibilityRetryThinkingTools)
+			if strongErr == nil && strongApplied {
+				strongResponse, sendErr := sendGatewayCompatibilityRetry(client, request, strongPrepared)
+				if sendErr == nil && strongResponse != nil {
+					// Sub2API treats the strong retry as the final upstream response,
+					// including when it is still an error.
+					return strongResponse
+				}
+			}
+		}
+		// Once the weak retry reached upstream, Sub2API returns that response
+		// instead of falling back to the first 400 response.
+		return retryResponse
+	}
+
+	if !prepared.CountTokens && sub2service.IsCCMaxCompatibilityBudgetError(originalBody) {
+		retryPrepared, applied, err := sub2service.PrepareCCMaxCompatibilityRetry(prepared.Compat, sub2service.CCMaxCompatibilityRetryBudget)
+		if err == nil && applied {
+			if retryResponse, sendErr := sendGatewayCompatibilityRetry(client, request, retryPrepared); sendErr == nil && retryResponse != nil {
+				return retryResponse
+			}
+		}
+	}
+	return response
+}
+
+func sendGatewayCompatibilityRetry(client *http.Client, base *http.Request, prepared *sub2service.CCMaxCompatibilityPrepared) (*http.Response, error) {
+	retry, err := http.NewRequestWithContext(base.Context(), http.MethodPost, base.URL.String(), bytes.NewReader(prepared.Body))
+	if err != nil {
+		return nil, err
+	}
+	retry.Header = prepared.Headers.Clone()
+	return client.Do(retry)
+}
+
+func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stream bool, account gatewayAccount, groupID string, prepared claudePreparedRequest) (tokenUsage, error) {
 	if !stream || response.StatusCode < 200 || response.StatusCode >= 300 {
+		copyGatewayResponseHeaders(w.Header(), response.Header)
+		w.Header().Set("X-CCMAX-Account", account.Name)
+		w.Header().Set("X-CCMAX-Group", groupID)
 		body, err := io.ReadAll(io.LimitReader(response.Body, 64<<20))
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "failed to read upstream response")
 			return tokenUsage{}, err
 		}
+		body = restoreGatewayResponse(body, prepared)
 		w.WriteHeader(response.StatusCode)
 		_, err = w.Write(body)
 		return parseAnthropicUsage(body, false), err
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(response.StatusCode)
-	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReaderSize(response.Body, 64<<10)
 	usage := tokenUsage{}
 	terminalSeen := false
 	var clientWriteErr error
+	committed := false
+	flusher, _ := w.(http.Flusher)
 	for {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			usage = mergeTokenUsage(usage, parseAnthropicUsage(line, true))
-			eventType := gatewaySSEEventType(line)
+		block, err := readGatewaySSEBlock(reader)
+		if len(block) > 0 {
+			eventType, eventBody := gatewaySSEEvent(block)
+			if !committed && !prepared.Passthrough && eventType == "error" {
+				status := http.StatusForbidden
+				if gjson.GetBytes(eventBody, "error.type").String() == "overloaded_error" {
+					status = 529
+				}
+				return tokenUsage{}, &gatewayPreOutputStreamError{status: status, body: eventBody}
+			}
+			if !committed {
+				copyGatewayResponseHeaders(w.Header(), response.Header)
+				w.Header().Set("X-CCMAX-Account", account.Name)
+				w.Header().Set("X-CCMAX-Group", groupID)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("X-Accel-Buffering", "no")
+				w.WriteHeader(response.StatusCode)
+				committed = true
+			}
+			usage = mergeTokenUsage(usage, parseAnthropicUsage(block, true))
 			if eventType == "message_stop" {
 				terminalSeen = true
 			}
+			if eventType == "error" && !prepared.Passthrough {
+				writeGatewaySSEError(w, flusher, "upstream_error", "Upstream access forbidden, please contact administrator")
+				return usage, errors.New("upstream stream returned an error event")
+			}
 			if clientWriteErr == nil {
-				if _, writeErr := w.Write(line); writeErr != nil {
+				if _, writeErr := w.Write(restoreGatewaySSEBlock(block, prepared)); writeErr != nil {
 					clientWriteErr = writeErr
 				}
 			}
@@ -375,6 +697,14 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 				if terminalSeen {
 					return usage, nil
 				}
+				if !committed {
+					copyGatewayResponseHeaders(w.Header(), response.Header)
+					w.Header().Set("X-CCMAX-Account", account.Name)
+					w.Header().Set("X-CCMAX-Group", groupID)
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(response.StatusCode)
+					committed = true
+				}
 				writeGatewaySSEError(w, flusher, "upstream_disconnected", "upstream stream ended before message_stop")
 				return usage, errors.New("upstream stream ended before message_stop")
 			}
@@ -384,17 +714,85 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 	}
 }
 
-func gatewaySSEEventType(line []byte) string {
-	value := strings.TrimSpace(string(line))
-	if !strings.HasPrefix(value, "data:") {
-		return ""
+func readGatewaySSEBlock(reader *bufio.Reader) ([]byte, error) {
+	var block []byte
+	for {
+		line, err := reader.ReadBytes('\n')
+		block = append(block, line...)
+		if len(bytes.TrimRight(line, "\r\n")) == 0 && len(block) > 0 {
+			return block, err
+		}
+		if err != nil {
+			return block, err
+		}
 	}
-	var payload map[string]any
-	if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(value, "data:"))), &payload) != nil {
-		return ""
+}
+
+func restoreGatewayResponse(body []byte, prepared claudePreparedRequest) []byte {
+	if prepared.Passthrough || prepared.Compat == nil {
+		return body
 	}
-	eventType, _ := payload["type"].(string)
-	return eventType
+	return sub2service.RestoreCCMaxCompatibilityResponse(body, prepared.Compat)
+}
+
+func restoreGatewaySSELine(line []byte, prepared claudePreparedRequest) []byte {
+	if prepared.Passthrough || prepared.Compat == nil {
+		return line
+	}
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return sub2service.RestoreCCMaxCompatibilityResponse(line, prepared.Compat)
+	}
+	payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return line
+	}
+	restored := sub2service.RestoreCCMaxCompatibilityResponse(payload, prepared.Compat)
+	ending := []byte{}
+	if bytes.HasSuffix(line, []byte("\r\n")) {
+		ending = []byte("\r\n")
+	} else if bytes.HasSuffix(line, []byte("\n")) {
+		ending = []byte("\n")
+	}
+	result := append([]byte("data: "), restored...)
+	return append(result, ending...)
+}
+
+func restoreGatewaySSEBlock(block []byte, prepared claudePreparedRequest) []byte {
+	if prepared.Passthrough || prepared.Compat == nil {
+		return block
+	}
+	lines := bytes.SplitAfter(block, []byte("\n"))
+	var restored []byte
+	for _, line := range lines {
+		if len(line) > 0 {
+			restored = append(restored, restoreGatewaySSELine(line, prepared)...)
+		}
+	}
+	return restored
+}
+
+func gatewaySSEEvent(block []byte) (string, []byte) {
+	var eventType string
+	var eventBody []byte
+	for _, line := range bytes.Split(block, []byte("\n")) {
+		value := strings.TrimSpace(string(line))
+		if strings.HasPrefix(value, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(value, "event:"))
+			continue
+		}
+		if !strings.HasPrefix(value, "data:") || len(eventBody) > 0 {
+			continue
+		}
+		eventBody = bytes.TrimSpace(bytes.TrimPrefix([]byte(value), []byte("data:")))
+		if eventType == "" {
+			var payload map[string]any
+			if json.Unmarshal(eventBody, &payload) == nil {
+				eventType, _ = payload["type"].(string)
+			}
+		}
+	}
+	return eventType, eventBody
 }
 
 func writeGatewaySSEError(w http.ResponseWriter, flusher http.Flusher, errorType, message string) {
@@ -639,35 +1037,38 @@ func (a *app) checkAndIncrementUserRPM(key gatewayKey) error {
 	}
 	tx, err := a.db.Begin()
 	if err != nil {
-		return err
+		return nil
 	}
 	defer tx.Rollback()
 	_, _ = tx.Exec(`DELETE FROM user_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`)
 	var current int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM user_rpm_events WHERE user_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, key.UserID).Scan(&current); err != nil {
-		return err
+		return nil
 	}
 	if current >= key.UserRPM {
 		return errors.New("user RPM limit reached")
 	}
 	if _, err := tx.Exec(`INSERT INTO user_rpm_events (user_id) VALUES (?)`, key.UserID); err != nil {
-		return err
+		return nil
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil
+	}
+	return nil
 }
 
-func messageSession(r *http.Request, metadata map[string]any) string {
-	for _, header := range []string{"x-session-id", "session-id"} {
-		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
-			return hashToken(value)
-		}
+func gatewayClientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
 	}
-	if metadata != nil {
-		if value, ok := metadata["user_id"].(string); ok && value != "" {
-			return hashToken(value)
-		}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
 	}
-	return ""
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool) (gatewayAccount, error) {
@@ -724,16 +1125,12 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 	if selected.ID == 0 {
 		return gatewayAccount{}, errors.New("no account capacity or model support available for group " + strings.ToUpper(key.GroupID) + " (model, concurrency, or RPM limit)")
 	}
-	if _, err := tx.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, selected.ID); err != nil {
-		return gatewayAccount{}, err
-	}
 	if _, err := tx.Exec(`INSERT INTO account_inflight (account_id, requests) VALUES (?, 1) ON CONFLICT(account_id) DO UPDATE SET requests = requests + 1`, selected.ID); err != nil {
 		return gatewayAccount{}, err
 	}
 	if sessionHash != "" {
-		expires := time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339Nano)
-		_, err = tx.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_hash, api_key_id) DO UPDATE SET account_id = excluded.account_id, expires_at = excluded.expires_at`, sessionHash, key.ID, selected.ID, expires)
-		if err != nil {
+		expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+		if _, err := tx.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_hash, api_key_id) DO UPDATE SET account_id = excluded.account_id, expires_at = excluded.expires_at`, sessionHash, key.ID, selected.ID, expires); err != nil {
 			return gatewayAccount{}, err
 		}
 	}
@@ -746,25 +1143,34 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 	return selected, nil
 }
 
+func (a *app) recordGatewayAccountRPM(accountID int64) {
+	_, _ = a.db.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, accountID)
+}
+
+func (a *app) gatewayStickyAccountID(apiKeyID int64, sessionHash string) int64 {
+	if sessionHash == "" {
+		return 0
+	}
+	var accountID int64
+	_ = a.db.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ? AND expires_at > `+nowSQL, sessionHash, apiKeyID).Scan(&accountID)
+	return accountID
+}
+
+func (a *app) bindGatewayStickySession(apiKeyID int64, sessionHash string, accountID int64) {
+	if sessionHash == "" || accountID == 0 {
+		return
+	}
+	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	_, _ = a.db.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_hash, api_key_id) DO UPDATE SET account_id = excluded.account_id, expires_at = excluded.expires_at`, sessionHash, apiKeyID, accountID, expires)
+}
+
 func rpmSchedulable(account gatewayAccount, current int, sticky bool) bool {
-	if account.BaseRPM <= 0 || current < account.BaseRPM {
-		return true
-	}
-	if account.RPMStrategy == "sticky_exempt" {
-		return sticky
-	}
-	buffer := account.StickyBuffer
-	if buffer <= 0 {
-		buffer = account.Concurrency
-		floor := account.BaseRPM / 5
-		if floor < 1 {
-			floor = 1
-		}
-		if buffer < floor {
-			buffer = floor
-		}
-	}
-	return current < account.BaseRPM+buffer && sticky
+	extra := decodeObject(account.ExtraJSON)
+	maxSessions := intFromJSON(extra["max_sessions"])
+	return sub2service.IsCCMaxCompatibilityRPMSchedulable(
+		account.AuthType, account.BaseRPM, account.Concurrency, account.StickyBuffer,
+		int(maxSessions), current, account.RPMStrategy, sticky,
+	)
 }
 
 func (a *app) releaseGatewayAccount(accountID int64) {

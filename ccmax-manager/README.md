@@ -12,7 +12,7 @@
 - 用户权限：管理员、只读管理员、普通用户；管理员可逐个配置普通用户和只读管理员的可见页面，普通用户按 A/B 分组隔离且只能管理自己的 SK。
 - API 调度：每个用户独立生成、禁用 `sk-` 密钥，支持 `/v1/messages`、`/v1/messages/count_tokens`、`/v1/models` 和 `/v1/models/{id}`；同时提供 `/models` 兼容别名。
 - CCMAX 全链路：复用 Sub2API 的 Claude Code 客户端识别、OAuth 请求转换、计费指纹、CLI 请求头、beta 合并、缓存断点限制、模型映射、粘性调度、账号故障切换和实时 SSE 转发。
-- 按账号透传：可在账号编辑窗口开启“原始请求参数透传”，让该账号保持客户端请求体的原始字节和全部参数。
+- 双支线请求：默认走 Sub2API 原版完整链路；可按账号开启“原始请求完整透传”，保留客户端请求体的原始字节和全部参数。
 - CCMAX 授权：可使用 Claude Session Key 自动换取 Access Token 与 Refresh Token，也可发起 OAuth / Setup Token 浏览器授权；临近过期时自动刷新，失效后标记为“需要重新授权”。
 - 批量上号：最多一次提交 200 个 Session Key，每个成功账号分配独享代理，并读取授权 Token 中的邮箱作为账号名称和订阅类型。
 - 配额：记录每个账号的 5 小时、7 天使用率和刷新时间，支持主动刷新，也会从上游响应头被动更新。
@@ -89,7 +89,7 @@ curl http://127.0.0.1:8088/v1/models \
 
 OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system prompt 和缓存结构；其他客户端会按 Sub2API 规则转换成 Claude Code 请求，补齐 billing attribution、稳定账号身份、CLI 字段和 beta。客户端 Cookie、下游鉴权头及非白名单头不会转发到上游。流式响应会在收到 SSE 事件后立即 flush，账号遇到授权失败、429 或可重试的 5xx 时会切换到同组的其他可用账号。
 
-需要使用上游自身的参数处理逻辑时，可以为账号开启“原始请求参数透传”。开启后 `/v1/messages` 会保留请求体原始字节，不执行提示词注入、metadata 重写、模型映射或缓存字段清理；`/v1/messages/count_tokens` 会保留自定义参数，但仍会按 Anthropic 接口约束移除 `max_tokens`、`stream`、`temperature` 等生成字段。用户 SK 始终会被替换为账号上游凭证。
+账号默认关闭“原始请求完整透传”，此时直接复用 Sub2API 原版 CCMAX 的请求变换、指纹、metadata、模型映射、beta、缓存控制和响应还原链路。开启后 `/v1/messages` 与 `/v1/messages/count_tokens` 都保留请求体原始字节和客户端参数，不再执行任何 body 变换；客户端请求头也会原样转发，但下游鉴权、Cookie、Host、Content-Length 和逐跳头会被剔除，用户 SK 始终替换为账号上游凭证。
 
 账号凭证 JSON 支持：
 
