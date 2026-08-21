@@ -1522,11 +1522,20 @@ textarea:focus {
   font-size: 10px;
 }
 .gateway-endpoint code {
+  flex: 1 1 auto;
   overflow: hidden;
   color: var(--ink);
   font-family: "SFMono-Regular", monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.user-balance-summary {
+  flex: 0 0 auto;
+  color: var(--ink);
+  font-weight: 650;
+}
+.ordinary-user .internal-cost-column {
+  display: none;
 }
 .empty-state {
   display: grid;
@@ -1682,8 +1691,11 @@ textarea:focus {
 }
 
 .modal {
+  position: fixed;
+  inset: 0;
   width: min(520px, calc(100vw - 28px));
   max-height: calc(100vh - 28px);
+  margin: auto;
   padding: 0;
   overflow: hidden;
   overflow: clip;
@@ -1753,7 +1765,9 @@ textarea:focus {
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px;
+  scrollbar-gutter: stable;
 }
 .form-grid {
   display: grid;

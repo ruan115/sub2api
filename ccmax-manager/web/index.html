@@ -240,7 +240,7 @@
                     <th>模型</th>
                     <th class="num">Tokens</th>
                     <th class="num">计费</th>
-                    <th class="num">成本</th>
+                    <th class="num internal-cost-column">成本</th>
                   </tr>
                 </thead>
                 <tbody id="recent-usage-body"></tbody>
@@ -492,6 +492,7 @@
                     <th>用户</th>
                     <th>角色</th>
                     <th>允许分组</th>
+                    <th class="num">可支配余额</th>
                     <th class="num">用户 RPM</th>
                     <th>状态</th>
                     <th>创建时间</th>
@@ -514,6 +515,7 @@
             </div>
             <div class="gateway-endpoint">
               <span>Anthropic Messages</span><code id="gateway-endpoint"></code>
+              <span class="user-balance-summary" id="user-balance-summary" hidden></span>
             </div>
             <div class="table-wrap">
               <table>
@@ -602,8 +604,8 @@
                     <th class="num">输出</th>
                     <th class="num">缓存</th>
                     <th class="num">计费</th>
-                    <th class="num">成本</th>
-                    <th class="num">毛差</th>
+                    <th class="num internal-cost-column">成本</th>
+                    <th class="num internal-cost-column">毛差</th>
                   </tr>
                 </thead>
                 <tbody id="usage-body"></tbody>
@@ -1216,6 +1218,15 @@
             <small>页面权限仅控制查看范围；普通用户不能修改系统配置，只读管理员不能执行任何写操作。</small>
           </fieldset>
           <label
+            ><span>可支配余额 USD</span
+            ><input
+              id="user-balance"
+              type="number"
+              min="0"
+              step="0.00000001"
+              placeholder="不限制"
+            /><small>留空表示不限制；余额耗尽后停止新的 API 请求。</small></label
+          ><label
             ><span>用户 RPM（0 不限制）</span
             ><input id="user-rpm" type="number" min="0" value="0" /></label
           ><label

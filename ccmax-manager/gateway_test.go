@@ -1500,6 +1500,58 @@ func TestGatewayUsesSub2RPMThreeZoneDecision(t *testing.T) {
 	}
 }
 
+func TestGatewayDeductsUserBalanceAndBlocksTheNextRequest(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("request-id", "balance-"+strconv.Itoa(upstreamCalls))
+		_, _ = w.Write([]byte(`{"id":"msg_balance","usage":{"input_tokens":100,"output_tokens":100}}`))
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	if _, err := a.db.Exec(`UPDATE users SET balance = 0.0001 WHERE id = ?`, key.UserID); err != nil {
+		t.Fatal(err)
+	}
+	createGatewayTestAccount(t, a, handler, "balance", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+
+	request := func(expectedStatus int) *httptest.ResponseRecorder {
+		t.Helper()
+		body := strings.NewReader(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`)
+		r := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+		r.Header.Set("Authorization", "Bearer "+key.Key)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, r)
+		if response.Code != expectedStatus {
+			t.Fatalf("gateway status=%d want=%d body=%s", response.Code, expectedStatus, response.Body.String())
+		}
+		return response
+	}
+
+	request(http.StatusOK)
+	var balance, quotaUsed, billedCost float64
+	if err := a.db.QueryRow(`SELECT balance FROM users WHERE id = ?`, key.UserID).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT quota_used FROM api_keys WHERE id = ?`, key.ID).Scan(&quotaUsed); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT billed_cost FROM usage_logs WHERE request_id = 'balance-1'`).Scan(&billedCost); err != nil {
+		t.Fatal(err)
+	}
+	if billedCost <= 0 || balance >= 0 || quotaUsed != billedCost || balance != money(0.0001-billedCost) {
+		t.Fatalf("balance=%f quota_used=%f billed=%f", balance, quotaUsed, billedCost)
+	}
+	response := request(http.StatusPaymentRequired)
+	if upstreamCalls != 1 || !strings.Contains(response.Body.String(), "billing_error") {
+		t.Fatalf("exhausted balance reached upstream=%d body=%s", upstreamCalls, response.Body.String())
+	}
+}
+
 func TestUserRPMStorageFailureFailsOpenLikeSub2(t *testing.T) {
 	a, _ := newGatewayTestApp(t)
 	if err := a.db.Close(); err != nil {

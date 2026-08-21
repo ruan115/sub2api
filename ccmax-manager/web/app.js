@@ -381,6 +381,7 @@ async function boot() {
 function configureRole() {
   state.selectedAccountIDs.clear();
   $("#app-shell").dataset.role = state.me.role;
+  document.body.classList.toggle("ordinary-user", state.me.role === "user");
   $("#identity-name").textContent = state.me.name || state.me.username;
   $("#identity-role").textContent = roleName(state.me.role);
   $("#readonly-banner").hidden = state.me.role !== "readonly_admin";
@@ -427,6 +428,10 @@ async function loadCore() {
       renderPriceSync();
     }
     if (canView("access")) {
+      if (state.me.role === "user") {
+        state.me = await api("/api/me");
+        $("#identity-name").textContent = state.me.name || state.me.username;
+      }
       state.keys = await api("/api/api-keys");
       if (isAdmin()) state.users = await api("/api/users");
       renderAccess();
@@ -925,7 +930,7 @@ function renderAccess() {
     $("#users-body").innerHTML = paginatedItems("users", state.users)
       .map(
         (item) =>
-          `<tr><td><span class="row-title">${escapeHTML(item.name || item.username)}</span><span class="row-subtitle mono">${escapeHTML(item.username)}</span></td><td><span class="pill">${roleName(item.role)}</span></td><td><div class="group-pills">${item.allowed_group_ids.map((id) => groupMark(id, "pill")).join("")}</div></td><td class="num mono">${item.rpm_limit || "∞"}</td><td><span class="pill ${item.status === "active" ? "ok" : "off"}">${item.status === "active" ? "启用" : "停用"}</span></td><td class="mono">${dateTime(item.created_at)}</td><td class="actions"><span class="row-actions"><button data-edit-user="${item.id}" title="编辑用户"><i data-lucide="square-pen"></i></button>${item.id === state.me.id ? "" : `<button class="danger" data-delete-user="${item.id}" title="删除用户"><i data-lucide="trash-2"></i></button>`}</span></td></tr>`,
+          `<tr><td><span class="row-title">${escapeHTML(item.name || item.username)}</span><span class="row-subtitle mono">${escapeHTML(item.username)}</span></td><td><span class="pill">${roleName(item.role)}</span></td><td><div class="group-pills">${item.allowed_group_ids.map((id) => groupMark(id, "pill")).join("")}</div></td><td class="num mono">${item.balance == null ? "不限" : money(item.balance)}</td><td class="num mono">${item.rpm_limit || "∞"}</td><td><span class="pill ${item.status === "active" ? "ok" : "off"}">${item.status === "active" ? "启用" : "停用"}</span></td><td class="mono">${dateTime(item.created_at)}</td><td class="actions"><span class="row-actions"><button data-edit-user="${item.id}" title="编辑用户"><i data-lucide="square-pen"></i></button>${item.id === state.me.id ? "" : `<button class="danger" data-delete-user="${item.id}" title="删除用户"><i data-lucide="trash-2"></i></button>`}</span></td></tr>`,
       )
       .join("");
   $("#keys-empty").hidden = state.keys.length > 0;
@@ -936,6 +941,10 @@ function renderAccess() {
     )
     .join("");
   $("#gateway-endpoint").textContent = `${location.origin}/v1/messages`;
+  const balanceSummary = $("#user-balance-summary");
+  balanceSummary.hidden = state.me.role !== "user";
+  if (!balanceSummary.hidden)
+    balanceSummary.textContent = `可支配余额 ${state.me.balance == null ? "不限" : money(state.me.balance)}`;
   refreshIcons();
 }
 
@@ -989,7 +998,31 @@ function renderAudit() {
 function renderBilling() {
   const data = state.billing;
   if (!data) return;
-  $("#billing-metrics").innerHTML = [
+  const userMetrics = [
+    metric(
+      "BILLED",
+      money(data.totals.billed_cost),
+      `${data.totals.requests} 次请求`,
+      "a",
+    ),
+    metric(
+      "AVAILABLE",
+      data.available_balance == null ? "不限" : money(data.available_balance),
+      "可支配余额",
+      "b",
+    ),
+    metric("REQUESTS", compact(data.totals.requests), "当前筛选区间"),
+    metric(
+      "TOKENS",
+      compact(
+        data.totals.input_tokens +
+          data.totals.output_tokens +
+          data.totals.cache_tokens,
+      ),
+      `输入 ${compact(data.totals.input_tokens)} / 输出 ${compact(data.totals.output_tokens)}`,
+    ),
+  ];
+  const managerMetrics = [
     metric(
       "BILLED",
       money(data.totals.billed_cost),
@@ -1013,7 +1046,10 @@ function renderBilling() {
       ),
       `输入 ${compact(data.totals.input_tokens)} / 输出 ${compact(data.totals.output_tokens)}`,
     ),
-  ].join("");
+  ];
+  $("#billing-metrics").innerHTML = (
+    state.me.role === "user" ? userMetrics : managerMetrics
+  ).join("");
   renderBreakdown();
   $("#usage-body").innerHTML = usageRows(
     paginatedItems("usage", state.usage),
@@ -1034,7 +1070,7 @@ function renderBreakdown() {
     ? rows
         .map(
           (item) =>
-            `<div class="breakdown-row"><div><strong>${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}</strong><small>${item.requests} 次请求</small></div><div class="breakdown-bar"><span style="width:${maxValue ? Math.max((item.billed_cost / maxValue) * 100, 2) : 0}%"></span></div><div class="breakdown-values"><strong>${money(item.billed_cost)}</strong><small>成本 ${money(item.actual_cost)}</small></div></div>`,
+            `<div class="breakdown-row"><div><strong>${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}</strong><small>${item.requests} 次请求</small></div><div class="breakdown-bar"><span style="width:${maxValue ? Math.max((item.billed_cost / maxValue) * 100, 2) : 0}%"></span></div><div class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</div></div>`,
         )
         .join("")
     : '<div class="empty-state"><strong>暂无拆分数据</strong></div>';
@@ -1052,8 +1088,8 @@ function usageRows(items, compactMode) {
         item.cache_creation_tokens +
         item.cache_read_tokens;
       if (compactMode)
-        return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${escapeHTML(item.account_name)}</td><td class="mono">${escapeHTML(item.model)}</td><td class="num mono">${compact(total)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono">${money(item.actual_cost)}</td></tr>`;
-      return `<tr><td><span class="mono">${escapeHTML(item.request_id)}</span><span class="row-subtitle">${dateTime(item.created_at)}</span></td><td><span class="row-title">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${escapeHTML(item.account_name)}</td><td class="mono">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono">${money(item.actual_cost)}</td><td class="num mono">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
+        return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${escapeHTML(item.account_name)}</td><td class="mono">${escapeHTML(item.model)}</td><td class="num mono">${compact(total)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td></tr>`;
+      return `<tr><td><span class="mono">${escapeHTML(item.request_id)}</span><span class="row-subtitle">${dateTime(item.created_at)}</span></td><td><span class="row-title">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${escapeHTML(item.account_name)}</td><td class="mono">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
     })
     .join("");
 }
@@ -1298,6 +1334,7 @@ function openUser(item = null) {
   $("#user-name").value = item?.name || "";
   $("#user-role").value = item?.role || "user";
   $("#user-status").value = item?.status || "active";
+  $("#user-balance").value = item?.balance ?? "";
   $("#user-rpm").value = item?.rpm_limit || 0;
   $("#user-password").required = !item;
   $("#user-password-help").textContent = item
@@ -2113,6 +2150,10 @@ $("#user-form").addEventListener("submit", async (event) => {
       password: $("#user-password").value,
       role: $("#user-role").value,
       status: $("#user-status").value,
+      balance:
+        $("#user-balance").value === ""
+          ? null
+          : Number($("#user-balance").value),
       rpm_limit: Number($("#user-rpm").value),
       allowed_group_ids: $$('input[name="user-group"]:checked').map(
         (node) => node.value,

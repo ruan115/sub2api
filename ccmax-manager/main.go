@@ -264,12 +264,13 @@ type billingBreakdown struct {
 }
 
 type billingSummary struct {
-	From      string             `json:"from"`
-	To        string             `json:"to"`
-	Totals    billingTotals      `json:"totals"`
-	ByGroup   []billingBreakdown `json:"by_group"`
-	ByAccount []billingBreakdown `json:"by_account"`
-	ByPurpose []billingBreakdown `json:"by_purpose"`
+	From             string             `json:"from"`
+	To               string             `json:"to"`
+	AvailableBalance *float64           `json:"available_balance"`
+	Totals           billingTotals      `json:"totals"`
+	ByGroup          []billingBreakdown `json:"by_group"`
+	ByAccount        []billingBreakdown `json:"by_account"`
+	ByPurpose        []billingBreakdown `json:"by_purpose"`
 }
 
 type dashboard struct {
@@ -650,6 +651,11 @@ func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeDBError(w, err)
 		return
+	}
+	if user.Role == "user" {
+		redactBillingTotals(&result.Today)
+		redactBillingTotals(&result.Month)
+		redactUsageCosts(result.RecentUsage)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1654,6 +1660,16 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 	if _, err := tx.Exec(`UPDATE accounts SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, item.AccountID); err != nil {
 		return usageLog{}, false, err
 	}
+	if input.APIKeyID > 0 {
+		if _, err := tx.Exec(`UPDATE api_keys SET quota_used = quota_used + ?, last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, item.BilledCost, input.APIKeyID); err != nil {
+			return usageLog{}, false, err
+		}
+	}
+	if input.UserID > 0 {
+		if _, err := tx.Exec(`UPDATE users SET balance = ROUND(balance - ?, 8), updated_at = `+nowSQL+` WHERE id = ? AND balance IS NOT NULL AND deleted_at IS NULL`, item.BilledCost, input.UserID); err != nil {
+			return usageLog{}, false, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return usageLog{}, false, err
 	}
@@ -1697,13 +1713,17 @@ type usageFilters struct {
 
 func (a *app) handleUsageList(w http.ResponseWriter, r *http.Request) {
 	filters := filtersFromRequest(r)
-	if user := currentUser(r); user.Role == "user" {
+	user := currentUser(r)
+	if user.Role == "user" {
 		filters.UserID = user.ID
 	}
 	items, err := a.listUsage(filters)
 	if err != nil {
 		writeDBError(w, err)
 		return
+	}
+	if user.Role == "user" {
+		redactUsageCosts(items)
 	}
 	total, err := a.countUsage(filters)
 	if err != nil {
@@ -1787,7 +1807,8 @@ func (a *app) countUsage(filters usageFilters) (int64, error) {
 
 func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 	filters := filtersFromRequest(r)
-	if user := currentUser(r); user.Role == "user" {
+	user := currentUser(r)
+	if user.Role == "user" {
 		filters.UserID = user.ID
 	}
 	if filters.From == "" {
@@ -1798,7 +1819,40 @@ func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
+	if user.Role == "user" {
+		summary.AvailableBalance = user.Balance
+		redactBillingTotals(&summary.Totals)
+		redactBillingBreakdowns(summary.ByGroup)
+		redactBillingBreakdowns(summary.ByAccount)
+		redactBillingBreakdowns(summary.ByPurpose)
+	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+func redactUsageCosts(items []usageLog) {
+	for index := range items {
+		items[index].InputCost = 0
+		items[index].OutputCost = 0
+		items[index].CacheCreationCost = 0
+		items[index].CacheReadCost = 0
+		items[index].BaseCost = 0
+		items[index].ActualCost = 0
+		items[index].GroupRateMultiplier = 0
+		items[index].AccountRateMultiplier = 0
+	}
+}
+
+func redactBillingTotals(totals *billingTotals) {
+	totals.BaseCost = 0
+	totals.ActualCost = 0
+	totals.Margin = 0
+}
+
+func redactBillingBreakdowns(items []billingBreakdown) {
+	for index := range items {
+		items[index].ActualCost = 0
+		items[index].Margin = 0
+	}
 }
 
 func (a *app) billingSummary(filters usageFilters) (billingSummary, error) {

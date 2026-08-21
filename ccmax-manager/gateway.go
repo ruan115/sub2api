@@ -28,6 +28,7 @@ type gatewayKey struct {
 	GroupID              string
 	Quota                float64
 	QuotaUsed            float64
+	UserBalance          sql.NullFloat64
 	UserRPM              int
 	Allowed              string
 	UserRole             string
@@ -126,7 +127,11 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 	}
 	if key.Quota > 0 && key.QuotaUsed >= key.Quota {
-		writeError(w, http.StatusForbidden, "API key quota exhausted")
+		writeAnthropicGatewayError(w, http.StatusForbidden, "permission_error", "API key quota exhausted")
+		return
+	}
+	if key.UserBalance.Valid && key.UserBalance.Float64 <= 0 {
+		writeAnthropicGatewayError(w, http.StatusPaymentRequired, "billing_error", "User balance exhausted")
 		return
 	}
 	if ok := groupAllowedJSON(key.UserRole, key.Allowed, key.GroupID); !ok {
@@ -894,13 +899,12 @@ func copyGatewayResponseHeaders(target, source http.Header) {
 }
 
 func (a *app) recordGatewayUsage(key gatewayKey, account gatewayAccount, model string, stream bool, requestID string, usage tokenUsage, started time.Time) {
-	item, _, usageErr := a.recordUsage(usageInput{
+	_, _, usageErr := a.recordUsage(usageInput{
 		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, Model: model,
 		InputTokens: usage.Input, OutputTokens: usage.Output, CacheCreationTokens: usage.CacheCreation,
 		CacheReadTokens: usage.CacheRead, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
 	})
 	if usageErr == nil {
-		_, _ = a.db.Exec(`UPDATE api_keys SET quota_used = quota_used + ?, last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, item.BilledCost, key.ID)
 		return
 	}
 	_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
@@ -919,10 +923,10 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, streamHedgeEnabled, adaptiveHedgeEnabled int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.stream_hedge_enabled, g.adaptive_hedge_enabled
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.stream_hedge_enabled, g.adaptive_hedge_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active'
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &streamHedgeEnabled, &adaptiveHedgeEnabled)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &streamHedgeEnabled, &adaptiveHedgeEnabled)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
 	key.AdaptiveHedgeEnabled = adaptiveHedgeEnabled == 1

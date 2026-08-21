@@ -649,11 +649,11 @@ func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
 	pages := []string{"overview", "accounts", "daily", "authorization", "proxies", "access", "billing", "audit"}
 	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
 		"username": "tenant-a", "name": "Tenant A", "password": "tenant-password", "role": "user",
-		"status": "active", "allowed_group_ids": []string{"a"}, "visible_pages": pages, "rpm_limit": 0,
+		"status": "active", "allowed_group_ids": []string{"a"}, "visible_pages": pages, "balance": 25, "rpm_limit": 0,
 	}, adminCookie, "", http.StatusCreated, &userA)
 	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
 		"username": "tenant-b", "name": "Tenant B", "password": "tenant-password", "role": "user",
-		"status": "active", "allowed_group_ids": []string{"b"}, "visible_pages": pages, "rpm_limit": 0,
+		"status": "active", "allowed_group_ids": []string{"b"}, "visible_pages": pages, "balance": 50, "rpm_limit": 0,
 	}, adminCookie, "", http.StatusCreated, &userB)
 
 	createAccount := func(name, groupID string) account {
@@ -712,6 +712,18 @@ func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
 	if usagePage.Total != 1 || len(usagePage.Items) != 1 || usagePage.Items[0].RequestID != "tenant-a-usage" {
 		t.Fatalf("scoped usage=%+v", usagePage)
 	}
+	if usagePage.Items[0].BilledCost <= 0 || usagePage.Items[0].ActualCost != 0 || usagePage.Items[0].BaseCost != 0 {
+		t.Fatalf("ordinary user usage costs were not redacted: %+v", usagePage.Items[0])
+	}
+	var billing billingSummary
+	requestJSON(t, handler, http.MethodGet, "/api/billing", nil, userCookie, "", http.StatusOK, &billing)
+	if billing.Totals.Requests != 1 || billing.Totals.BilledCost <= 0 || billing.Totals.ActualCost != 0 || billing.Totals.Margin != 0 {
+		t.Fatalf("scoped billing totals=%+v", billing.Totals)
+	}
+	if billing.AvailableBalance == nil || *billing.AvailableBalance >= 25 || len(billing.ByAccount) != 1 || billing.ByAccount[0].Key != strconv.FormatInt(accountA.ID, 10) {
+		t.Fatalf("scoped billing=%+v", billing)
+	}
+	requestJSON(t, handler, http.MethodPut, "/api/accounts/"+strconv.FormatInt(accountA.ID, 10), map[string]any{}, userCookie, "", http.StatusForbidden, nil)
 	var authorization authorizationStats
 	requestJSON(t, handler, http.MethodGet, "/api/authorization-logs", nil, userCookie, "", http.StatusOK, &authorization)
 	if authorization.Summary.Total != 1 || len(authorization.Items) != 1 || authorization.Items[0].AccountID == nil || *authorization.Items[0].AccountID != accountA.ID {
@@ -725,6 +737,15 @@ func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
 		if item.ActorUserID == nil || *item.ActorUserID != userA.ID {
 			t.Fatalf("unscoped audit item=%+v", item)
 		}
+	}
+	requestJSON(t, handler, http.MethodPut, "/api/users/"+strconv.FormatInt(userA.ID, 10), map[string]any{
+		"username": "tenant-a", "name": "Tenant A", "password": "", "role": "user", "status": "active",
+		"allowed_group_ids": []string{"a"}, "visible_pages": pages, "balance": 10, "rpm_limit": 0,
+	}, adminCookie, "", http.StatusOK, &userA)
+	var refreshed panelUser
+	requestJSON(t, handler, http.MethodGet, "/api/me", nil, userCookie, "", http.StatusOK, &refreshed)
+	if refreshed.Balance == nil || *refreshed.Balance != 10 {
+		t.Fatalf("updated user balance=%v", refreshed.Balance)
 	}
 }
 
