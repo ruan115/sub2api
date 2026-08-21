@@ -57,6 +57,13 @@ type messageEnvelope struct {
 
 type gatewayAPIKeyContextKey struct{}
 
+type gatewayProtocolContextKey struct{}
+
+type gatewayProtocolContext struct {
+	openAIChat   bool
+	clientStream bool
+}
+
 type tokenUsage struct {
 	Input         int64
 	Output        int64
@@ -133,7 +140,15 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			return
 		}
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
+	var body []byte
+	if gatewayOpenAIChatRequest(r.Context()) {
+		// The public Chat Completions body was already limited before protocol
+		// conversion. Do not apply the same limit again to the expanded internal
+		// Anthropic representation.
+		body, err = io.ReadAll(r.Body)
+	} else {
+		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "request body is too large or invalid")
 		return
@@ -310,7 +325,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				a.recordGatewayAccountRPM(account.ID)
 			}
 			if forwardErr == nil || usage.hasUsage() {
-				a.recordGatewayUsage(key, account, envelope.Model, prepared.Stream, response.Header.Get("request-id"), usage, started)
+				a.recordGatewayUsage(key, account, envelope.Model, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
 			}
 		}
 		if forwardErr != nil {
@@ -423,6 +438,19 @@ func writeAnthropicGatewayError(w http.ResponseWriter, status int, errorType, me
 func gatewayAPIKeyID(ctx context.Context) int64 {
 	value, _ := ctx.Value(gatewayAPIKeyContextKey{}).(int64)
 	return value
+}
+
+func gatewayOpenAIChatRequest(ctx context.Context) bool {
+	protocol, _ := ctx.Value(gatewayProtocolContextKey{}).(gatewayProtocolContext)
+	return protocol.openAIChat
+}
+
+func gatewayRecordedStream(ctx context.Context, upstreamStream bool) bool {
+	protocol, ok := ctx.Value(gatewayProtocolContextKey{}).(gatewayProtocolContext)
+	if ok && protocol.openAIChat {
+		return protocol.clientStream
+	}
+	return upstreamStream
 }
 
 func (a *app) acquireGatewayQuotaLock(keyID int64) func() {

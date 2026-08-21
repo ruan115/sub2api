@@ -146,6 +146,18 @@ func TestPrepareCCMaxCompatibilityRequestStrictClaudeCodeClassification(t *testi
 	require.True(t, prepared.ClaudeCode)
 }
 
+func TestPrepareCCMaxCompatibilityRequestCanForceChatMimicry(t *testing.T) {
+	body := []byte(`{"model":"claude-test","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-test", Stream: true, OAuth: true,
+		AccessToken: "token", ClientHeaders: http.Header{"User-Agent": {"claude-cli/2.1.220 (external, cli)"}},
+		ForceNonClaudeCode: true,
+	})
+	require.NoError(t, err)
+	require.True(t, prepared.Mimic)
+	require.False(t, prepared.ClaudeCode)
+}
+
 func TestPrepareCCMaxCompatibilityCountTokensUsesOriginalSanitizer(t *testing.T) {
 	body := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"metadata":{"trace":"keep"},"max_tokens":12,"stream":true,"temperature":0.2}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{

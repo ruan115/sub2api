@@ -38,6 +38,9 @@ type CCMaxCompatibilityInput struct {
 	APIKeyID        int64
 	MappedModel     string
 	Fingerprint     *Fingerprint
+	// ForceNonClaudeCode keeps protocol bridges on the same mimicry lane as
+	// Sub2API's Chat Completions handler, regardless of the caller User-Agent.
+	ForceNonClaudeCode bool
 }
 
 // CCMaxCompatibilityPrepared is the exact wire request produced by the
@@ -130,6 +133,9 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 	claudeCode := isClaudeCodeClient(input.ClientHeaders.Get("User-Agent"), metadataUserID)
 	if !input.CountTokens && !claudeCode && metadataUserID != "" {
 		claudeCode = systemHasBillingAttributionBlock(body)
+	}
+	if input.ForceNonClaudeCode {
+		claudeCode = false
 	}
 	mimic := input.OAuth && !claudeCode
 	var toolRewrite *ToolNameRewrite

@@ -534,6 +534,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/authorization-logs", a.handleAuthorizationStats)
 	mux.HandleFunc("POST /v1/messages", a.handleMessages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", a.handleCountTokens)
+	mux.HandleFunc("POST /v1/chat/completions", a.handleChatCompletions)
+	mux.HandleFunc("POST /chat/completions", a.handleChatCompletions)
 	mux.HandleFunc("GET /v1/models", a.handleModels)
 	mux.HandleFunc("GET /v1/models/{id}", a.handleModels)
 	mux.HandleFunc("GET /models", a.handleModels)
