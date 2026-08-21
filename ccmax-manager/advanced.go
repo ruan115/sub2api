@@ -26,6 +26,13 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "adaptive_hedge_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "groups", "rpm_dispatch_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	// Existing hedge groups keep their explicit dispatch strategy after this feature is introduced.
+	if _, err := a.db.Exec(`UPDATE groups SET rpm_dispatch_enabled = 0 WHERE stream_hedge_enabled = 1 OR adaptive_hedge_enabled = 1`); err != nil {
+		return fmt.Errorf("migrate RPM dispatch compatibility: %w", err)
+	}
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -47,6 +47,7 @@ type app struct {
 	quotaLocks    sync.Map
 	budgetLocks   sync.Map
 	queueStates   sync.Map
+	dispatchLocks sync.Map
 	streamHedges  *gatewayHedgeController
 }
 
@@ -60,6 +61,7 @@ type group struct {
 	NormalRequestMode    bool     `json:"normal_request_mode"`
 	StreamHedgeEnabled   bool     `json:"stream_hedge_enabled"`
 	AdaptiveHedgeEnabled bool     `json:"adaptive_hedge_enabled"`
+	RPMDispatchEnabled   bool     `json:"rpm_dispatch_enabled"`
 	Status               string   `json:"status"`
 	ActiveAccounts       int      `json:"active_accounts"`
 	TotalAccounts        int      `json:"total_accounts"`
@@ -78,6 +80,7 @@ type groupInput struct {
 	NormalRequestMode    bool     `json:"normal_request_mode"`
 	StreamHedgeEnabled   bool     `json:"stream_hedge_enabled"`
 	AdaptiveHedgeEnabled bool     `json:"adaptive_hedge_enabled"`
+	RPMDispatchEnabled   *bool    `json:"rpm_dispatch_enabled"`
 	Status               string   `json:"status"`
 }
 
@@ -383,6 +386,7 @@ func (a *app) migrate() error {
 			normal_request_mode INTEGER NOT NULL DEFAULT 0,
 			stream_hedge_enabled INTEGER NOT NULL DEFAULT 0,
 			adaptive_hedge_enabled INTEGER NOT NULL DEFAULT 0,
+			rpm_dispatch_enabled INTEGER NOT NULL DEFAULT 1,
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -551,6 +555,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/usage", a.handleUsageCreate)
 	mux.HandleFunc("GET /api/billing", a.handleBilling)
 	mux.HandleFunc("GET /api/stats/daily", a.handleDailyStats)
+	mux.HandleFunc("GET /api/stats/realtime", a.handleRealtimeStats)
 	mux.HandleFunc("GET /api/authorization-logs", a.handleAuthorizationStats)
 	mux.HandleFunc("POST /v1/messages", a.handleMessages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", a.handleCountTokens)
@@ -705,7 +710,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, stream_hedge_enabled, adaptive_hedge_enabled, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +719,7 @@ func (a *app) listGroups() ([]group, error) {
 	for rows.Next() {
 		var item group
 		var daily, monthly sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -756,7 +761,19 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "only one stream dispatch algorithm can be enabled")
 		return
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, strings.TrimSpace(input.Description), input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), input.Status, id)
+	if input.RPMDispatchEnabled != nil && *input.RPMDispatchEnabled && (input.StreamHedgeEnabled || input.AdaptiveHedgeEnabled) {
+		writeError(w, http.StatusBadRequest, "RPM concentrated dispatch cannot be combined with stream hedging")
+		return
+	}
+	var rpmDispatch any
+	if input.RPMDispatchEnabled != nil {
+		rpmDispatch = boolInt(*input.RPMDispatchEnabled)
+	} else if input.StreamHedgeEnabled || input.AdaptiveHedgeEnabled {
+		// Older clients do not send the new field. Enabling a hedge mode still
+		// selects that explicit multi-account policy instead of silently blocking it.
+		rpmDispatch = 0
+	}
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, strings.TrimSpace(input.Description), input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

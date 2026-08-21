@@ -806,15 +806,22 @@ svg {
   display: grid;
   gap: 5px;
   min-width: 0;
+  overflow: hidden;
 }
 .group-mode-setting strong {
+  overflow: hidden;
   color: var(--ink);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .group-mode-setting small {
+  overflow: hidden;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .group-mode-setting .compact-toggle {
   flex: 0 0 auto;
@@ -1126,6 +1133,7 @@ textarea:focus {
   padding-right: 10px;
   padding-left: 10px;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .accounts-table th:nth-child(1) {
   width: 36px;
@@ -1333,6 +1341,86 @@ textarea:focus {
   font-size: 12px;
   line-height: 1.35;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.realtime-load-strip {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfb;
+}
+.realtime-load-heading,
+.realtime-load-item {
+  flex: 1 0 118px;
+  min-width: 0;
+  min-height: 68px;
+  padding: 11px 15px;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+}
+.realtime-load-heading {
+  flex-basis: 170px;
+  flex-grow: 1.3;
+}
+.realtime-load-item:last-child {
+  border-right: 0;
+}
+.realtime-load-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  gap: 3px 8px;
+}
+.realtime-pulse {
+  width: 8px;
+  height: 8px;
+  grid-row: span 2;
+  border-radius: 50%;
+  background: var(--a);
+  box-shadow: 0 0 0 4px rgba(45, 102, 82, 0.1);
+  animation: realtime-pulse 2s ease-in-out infinite;
+}
+.realtime-load-heading strong,
+.realtime-load-heading small,
+.realtime-load-item span,
+.realtime-load-item strong,
+.realtime-load-item small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.realtime-load-heading strong {
+  font-size: 12px;
+}
+.realtime-load-heading small,
+.realtime-load-item small {
+  color: var(--muted);
+  font-size: 9px;
+}
+.realtime-load-item {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+}
+.realtime-load-item span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+}
+.realtime-load-item strong {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+@keyframes realtime-pulse {
+  50% {
+    opacity: 0.55;
+  }
 }
 .account-action-popover {
   position: fixed;
@@ -1400,7 +1488,10 @@ textarea:focus {
 }
 .usage-window-row {
   display: grid;
-  grid-template-columns: 18px minmax(30px, 0.8fr) 28px minmax(50px, 1fr);
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  grid-template-columns: 18px minmax(26px, 0.8fr) 28px minmax(44px, 1fr);
   align-items: center;
   gap: 4px;
   font-size: 9px;
@@ -1442,6 +1533,8 @@ textarea:focus {
 }
 .usage-window > small {
   padding-left: 25px;
+  display: block;
+  max-width: 100%;
 }
 .dead-table {
   min-width: 1320px;

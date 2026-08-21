@@ -4,6 +4,8 @@ const state = {
   dashboard: null,
   accounts: [],
   accountSummary: null,
+  realtime: null,
+  realtimeLoading: null,
   prices: [],
   pricingSync: null,
   billing: null,
@@ -72,6 +74,7 @@ const sidebarStorageKey = "ccmax.sidebar.collapsed";
 const accountAutoRefreshStorageKey = "ccmax.accounts.auto-refresh";
 const accountColumnWidthsStorageKey = "ccmax.accounts.column-widths";
 const accountAutoRefreshInterval = 30000;
+const realtimeRefreshInterval = 5000;
 const paginationTables = {
   accounts: { body: "accounts-body", size: 20, render: renderAccounts },
   dead: { body: "dead-accounts-body", size: 20, render: renderDeadAccounts },
@@ -535,13 +538,55 @@ async function loadAccounts() {
     state.accountsLoadedAt = performance.now();
     renderAccounts();
     renderDeadAccounts();
-    if (canView("accounts")) await loadAccountSummary();
+    if (canView("accounts"))
+      await Promise.all([loadAccountSummary(), loadRealtime()]);
   })();
   try {
     return await state.accountsLoading;
   } finally {
     state.accountsLoading = null;
   }
+}
+
+async function loadRealtime() {
+  if (!canView("accounts")) return;
+  if (state.realtimeLoading) return state.realtimeLoading;
+  const requestedGroup = state.accountGroup;
+  state.realtimeLoading = (async () => {
+    const params = new URLSearchParams();
+    if (requestedGroup) params.set("group_id", requestedGroup);
+    const realtime = await api(`/api/stats/realtime?${params}`);
+    if (requestedGroup !== state.accountGroup) return;
+    state.realtime = realtime;
+    renderRealtime();
+  })();
+  try {
+    return await state.realtimeLoading;
+  } finally {
+    state.realtimeLoading = null;
+    if (requestedGroup !== state.accountGroup && state.view === "accounts") {
+      loadRealtime().catch(() => {});
+    }
+  }
+}
+
+function initializeRealtimeRefresh() {
+  window.setInterval(async () => {
+    if (
+      !state.me ||
+      state.view !== "accounts" ||
+      document.hidden ||
+      $("dialog[open]") ||
+      state.realtimeLoading ||
+      !canView("accounts")
+    )
+      return;
+    try {
+      await loadRealtime();
+    } catch {
+      // Keep the last rolling snapshot; the next interval retries.
+    }
+  }, realtimeRefreshInterval);
 }
 
 function initializeAccountAutoRefresh() {
@@ -712,7 +757,7 @@ function renderDashboard() {
         : item.stream_hedge_enabled
           ? "极速竞速"
           : "串行";
-      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -803,7 +848,63 @@ function accountUsageCell(item) {
     const resetText = resetAt ? dateTime(resetAt) : "等待刷新";
     return `<div class="usage-window-row"><b>${label}</b><span><i style="width:${used}%"></i></span><strong>${used.toFixed(0)}%</strong><small title="${escapeHTML(resetText)}">${resetText}</small></div>`;
   };
-  return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}<small>${item.request_count.toLocaleString("zh-CN")} 请求 · ${compact(item.input_tokens + item.output_tokens)} Token</small></div>`;
+  const realtime = state.realtime?.accounts?.find(
+    (load) => load.account_id === item.id,
+  );
+  const liveText = accountRealtimeText(realtime, item.base_rpm);
+  return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}<small data-account-realtime="${item.id}" title="${escapeHTML(liveText)}">${liveText}</small></div>`;
+}
+function accountRealtimeText(load, fallbackBaseRPM = 0) {
+  const rpm = Number(load?.rpm || 0);
+  const tpm = Number(load?.tpm || 0);
+  const baseRPM = Number(load?.base_rpm ?? fallbackBaseRPM ?? 0);
+  const rpmText = baseRPM > 0 ? `${rpm}/${baseRPM}` : `${rpm}/不限`;
+  return `RPM ${rpmText} · TPM ${compact(tpm)}`;
+}
+function renderRealtime() {
+  const data = state.realtime;
+  if (!data) return;
+  $("#realtime-rpm").textContent = Number(data.rpm || 0).toLocaleString("zh-CN");
+  $("#realtime-tpm").textContent = compact(data.tpm);
+  $("#realtime-inflight").textContent = Number(
+    data.inflight || 0,
+  ).toLocaleString("zh-CN");
+  $("#realtime-active-accounts").textContent = `${data.active_accounts} / ${data.eligible_accounts}`;
+  const capacity = data.unlimited_capacity
+    ? "含不限速账号"
+    : `容量 ${Number(data.rpm_capacity || 0).toLocaleString("zh-CN")} RPM`;
+  $("#realtime-rpm-capacity").textContent = capacity;
+  $("#realtime-rpm-capacity").title = capacity;
+  const activeNames = (data.accounts || [])
+    .filter((item) => item.active)
+    .map((item) => item.name)
+    .join("、");
+  const activeText = activeNames || "暂无负载";
+  $("#realtime-active-names").textContent = activeText;
+  $("#realtime-active-names").title = activeText;
+  $("#realtime-active-item").title = activeNames
+    ? `当前激活：${activeNames}`
+    : "最近 60 秒没有账号承担请求";
+  const updated = new Date(data.updated_at);
+  const updatedText = Number.isNaN(updated.getTime())
+    ? "刚刚更新"
+    : `${updated.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })} 更新`;
+  $("#realtime-updated-at").textContent = updatedText;
+  $("#realtime-updated-at").title = `${updatedText} · 每 5 秒局部刷新`;
+  const loads = new Map(
+    (data.accounts || []).map((item) => [item.account_id, item]),
+  );
+  $$('[data-account-realtime]').forEach((node) => {
+    const account = state.accounts.find(
+      (item) => item.id === Number(node.dataset.accountRealtime),
+    );
+    const text = accountRealtimeText(
+      loads.get(Number(node.dataset.accountRealtime)),
+      account?.base_rpm,
+    );
+    node.textContent = text;
+    node.title = text;
+  });
 }
 function closeAccountActionMenu() {
   const menu = $("#account-action-menu");
@@ -1282,7 +1383,10 @@ function setView(view) {
   $("#primary-action").hidden = !canAct;
   if (view === "billing") loadBilling();
   if (view === "audit") loadAudit();
-  if (view === "accounts") loadAccountSummary();
+  if (view === "accounts") {
+    loadAccountSummary();
+    loadRealtime();
+  }
   if (view === "daily") loadDaily();
   if (view === "authorization") loadAuthorization();
   refreshIcons();
@@ -1430,6 +1534,9 @@ function openGroup(item) {
   $("#group-daily").value = item.daily_limit_usd ?? "";
   $("#group-monthly").value = item.monthly_limit_usd ?? "";
   $("#group-normal-request-mode").checked = Boolean(item.normal_request_mode);
+  $("#group-rpm-dispatch-enabled").checked = Boolean(
+    item.rpm_dispatch_enabled,
+  );
   $("#group-stream-hedge-enabled").checked = Boolean(item.stream_hedge_enabled);
   $("#group-adaptive-hedge-enabled").checked = Boolean(
     item.adaptive_hedge_enabled,
@@ -1660,6 +1767,7 @@ document.addEventListener("click", async (event) => {
     );
     renderAccounts();
     loadAccountSummary();
+    loadRealtime();
   }
   try {
     if (target.dataset.purposeSwitch) {
@@ -2295,10 +2403,22 @@ $("#purpose-form").addEventListener("submit", async (event) => {
   }
 });
 $("#group-stream-hedge-enabled").addEventListener("change", (event) => {
-  if (event.target.checked) $("#group-adaptive-hedge-enabled").checked = false;
+  if (event.target.checked) {
+    $("#group-adaptive-hedge-enabled").checked = false;
+    $("#group-rpm-dispatch-enabled").checked = false;
+  }
 });
 $("#group-adaptive-hedge-enabled").addEventListener("change", (event) => {
-  if (event.target.checked) $("#group-stream-hedge-enabled").checked = false;
+  if (event.target.checked) {
+    $("#group-stream-hedge-enabled").checked = false;
+    $("#group-rpm-dispatch-enabled").checked = false;
+  }
+});
+$("#group-rpm-dispatch-enabled").addEventListener("change", (event) => {
+  if (event.target.checked) {
+    $("#group-stream-hedge-enabled").checked = false;
+    $("#group-adaptive-hedge-enabled").checked = false;
+  }
 });
 $("#group-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2318,6 +2438,7 @@ $("#group-form").addEventListener("submit", async (event) => {
         normal_request_mode: $("#group-normal-request-mode").checked,
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
         adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
+        rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
       }),
     });
     $("#group-dialog").close();
@@ -2505,6 +2626,7 @@ function initializeDates() {
   $("#authorization-to").value = to;
 }
 initializeAccountAutoRefresh();
+initializeRealtimeRefresh();
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeAccountActionMenu();
 });

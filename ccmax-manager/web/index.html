@@ -348,6 +348,25 @@
                 </button>
               </div>
             </div>
+            <div class="realtime-load-strip" id="realtime-load-strip" aria-label="60 秒实时负载">
+              <div class="realtime-load-heading">
+                <span class="realtime-pulse" aria-hidden="true"></span>
+                <strong>实时负载</strong>
+                <small id="realtime-updated-at" title="每 5 秒更新">等待数据</small>
+              </div>
+              <div class="realtime-load-item" title="最近 60 秒上游请求数">
+                <span>RPM</span><strong id="realtime-rpm">0</strong><small id="realtime-rpm-capacity">60 秒滚动</small>
+              </div>
+              <div class="realtime-load-item" title="最近 60 秒输入、输出及缓存 Token 总量">
+                <span>TPM</span><strong id="realtime-tpm">0</strong><small>60 秒滚动</small>
+              </div>
+              <div class="realtime-load-item" title="当前仍在处理的上游请求">
+                <span>在途请求</span><strong id="realtime-inflight">0</strong><small>当前并发</small>
+              </div>
+              <div class="realtime-load-item" id="realtime-active-item" title="最近 60 秒实际承担请求的账号">
+                <span>激活账号</span><strong id="realtime-active-accounts">0 / 0</strong><small id="realtime-active-names">暂无负载</small>
+              </div>
+            </div>
             <div class="table-wrap">
               <table class="accounts-table resizable-table">
                 <thead>
@@ -1062,6 +1081,19 @@
                 id="group-normal-request-mode"
                 type="checkbox"
                 aria-label="普通请求模式" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>RPM 集中调度</strong>
+              <small>优先持续使用当前账号，达到 RPM 或并发容量后才启用下一个；异常最多切换一次</small>
+            </div>
+            <label class="compact-toggle" title="RPM 集中调度">
+              <input
+                id="group-rpm-dispatch-enabled"
+                type="checkbox"
+                aria-label="RPM 集中调度" />
               <i></i>
             </label>
           </div>

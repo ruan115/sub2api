@@ -253,6 +253,8 @@ func userCanReadAPI(user panelUser, path string) bool {
 		return userCanSeePage(user, "billing")
 	case strings.HasPrefix(path, "/api/stats/daily"):
 		return userCanSeePage(user, "daily")
+	case strings.HasPrefix(path, "/api/stats/realtime"):
+		return userCanSeePage(user, "accounts")
 	case strings.HasPrefix(path, "/api/authorization-logs"):
 		return userCanSeePage(user, "authorization")
 	case strings.HasPrefix(path, "/api/audit-logs"):

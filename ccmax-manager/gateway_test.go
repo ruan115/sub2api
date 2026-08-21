@@ -463,7 +463,7 @@ func TestGatewayFailsOverOnSub2PreOutputSSEOverload(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, second.ID).Scan(&secondRPM); err != nil {
 		t.Fatal(err)
 	}
-	if firstRPM != 0 || secondRPM != 1 {
+	if firstRPM != 1 || secondRPM != 1 {
 		t.Fatalf("RPM events overloaded=%d healthy=%d", firstRPM, secondRPM)
 	}
 }
@@ -982,7 +982,7 @@ func TestPassthroughCountTokensPreservesRawBody(t *testing.T) {
 		t.Fatalf("raw count_tokens body changed\n got: %s\nwant: %s", got, rawBody)
 	}
 	var rpmEvents int
-	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, created.ID).Scan(&rpmEvents); err != nil || rpmEvents != 0 {
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, created.ID).Scan(&rpmEvents); err != nil || rpmEvents != 1 {
 		t.Fatalf("count_tokens RPM events=%d err=%v", rpmEvents, err)
 	}
 }
