@@ -751,6 +751,36 @@ func TestIndependentAPIKeysCanBeDisabledImmediately(t *testing.T) {
 	}
 }
 
+func TestCreatedAPIKeyRemainsCopyable(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	var user panelUser
+	putJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "copy-client", "name": "Copy Client", "password": "client-password", "role": "user",
+		"status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 0,
+	}, http.StatusCreated, &user)
+	var created apiKeyRecord
+	putJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"user_id": user.ID, "name": "copyable-key", "group_id": "a", "status": "active", "quota": 0,
+	}, http.StatusCreated, &created)
+	if !strings.HasPrefix(created.Key, "sk-") {
+		t.Fatalf("created key = %q", created.Key)
+	}
+	var listed []apiKeyRecord
+	putJSON(t, handler, http.MethodGet, "/api/api-keys", nil, http.StatusOK, &listed)
+	if len(listed) != 1 || listed[0].Key != created.Key {
+		t.Fatalf("listed keys = %+v, want stored secret %q", listed, created.Key)
+	}
+	if _, err := a.authenticateGatewayKey(listed[0].Key); err != nil {
+		t.Fatalf("listed secret was not usable: %v", err)
+	}
+}
+
 func TestAuditLogsLoginMutationsAndRedactsSecrets(t *testing.T) {
 	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

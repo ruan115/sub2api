@@ -1162,7 +1162,7 @@ function renderAccess() {
   $("#keys-body").innerHTML = paginatedItems("keys", state.keys)
     .map(
       (item) =>
-        `<tr><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle mono">${escapeHTML(item.key_prefix)}••••••••</span></td><td>${escapeHTML(item.username)}</td><td>${groupMark(item.group_id, "pill")}</td><td class="num mono">${money(item.quota_used)} / ${item.quota > 0 ? money(item.quota) : "∞"}</td><td class="mono">${dateTime(item.expires_at)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td><span class="pill ${item.status === "active" ? "ok" : "off"}">${item.status === "active" ? "启用" : "停用"}</span></td><td class="actions">${canManageKeys ? `<span class="row-actions"><button data-toggle-key="${item.id}" title="${item.status === "active" ? "禁用 API Key" : "启用 API Key"}"><i data-lucide="power"></i></button><button data-edit-key="${item.id}" title="编辑 API Key"><i data-lucide="square-pen"></i></button><button class="danger" data-delete-key="${item.id}" title="删除 API Key"><i data-lucide="trash-2"></i></button></span>` : '<span class="muted">只读</span>'}</td></tr>`,
+        `<tr><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle mono">${escapeHTML(item.key_prefix)}••••••••</span></td><td>${escapeHTML(item.username)}</td><td>${groupMark(item.group_id, "pill")}</td><td class="num mono">${money(item.quota_used)} / ${item.quota > 0 ? money(item.quota) : "∞"}</td><td class="mono">${dateTime(item.expires_at)}</td><td class="mono">${dateTime(item.last_used_at)}</td><td><span class="pill ${item.status === "active" ? "ok" : "off"}">${item.status === "active" ? "启用" : "停用"}</span></td><td class="actions">${canManageKeys ? `<span class="row-actions">${item.key ? `<button data-copy-key="${item.id}" title="复制 SK"><i data-lucide="copy"></i></button>` : ""}<button data-toggle-key="${item.id}" title="${item.status === "active" ? "禁用 API Key" : "启用 API Key"}"><i data-lucide="power"></i></button><button data-edit-key="${item.id}" title="编辑 API Key"><i data-lucide="square-pen"></i></button><button class="danger" data-delete-key="${item.id}" title="删除 API Key"><i data-lucide="trash-2"></i></button></span>` : '<span class="muted">只读</span>'}</td></tr>`,
     )
     .join("");
   $("#gateway-endpoint").textContent = `${location.origin}/v1/messages`;
@@ -1813,6 +1813,18 @@ document.addEventListener("click", async (event) => {
       });
       toast("账号配额已刷新");
       await loadCore();
+    }
+    if (target.dataset.copyKey) {
+      const item = state.keys.find(
+        (value) => value.id === Number(target.dataset.copyKey),
+      );
+      try {
+        await copyToClipboard(item?.key);
+        toast("SK 已复制");
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
     }
     if (target.dataset.toggleKey) {
       const item = state.keys.find(

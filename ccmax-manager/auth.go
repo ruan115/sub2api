@@ -107,6 +107,7 @@ func (a *app) migrateFeatures() error {
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			key_hash TEXT NOT NULL UNIQUE,
 			key_prefix TEXT NOT NULL,
+			key_secret TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
 			group_id TEXT REFERENCES groups(id),
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
@@ -130,6 +131,9 @@ func (a *app) migrateFeatures() error {
 		if _, err := a.db.Exec(statement); err != nil {
 			return fmt.Errorf("migrate auth: %w", err)
 		}
+	}
+	if err := addColumnIfMissing(a.db, "api_keys", "key_secret", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
 	}
 	if err := addColumnIfMissing(a.db, "users", "visible_pages_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
@@ -596,7 +600,7 @@ func (a *app) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
-	query := `SELECT k.id, k.user_id, u.username, k.name, k.key_prefix, COALESCE(k.group_id, ''), k.status, k.quota, k.quota_used, k.expires_at, k.last_used_at, k.created_at, k.updated_at FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.deleted_at IS NULL`
+	query := apiKeySelect + ` WHERE k.deleted_at IS NULL`
 	args := []any{}
 	if user.Role == "user" {
 		query += ` AND k.user_id = ?`
@@ -618,6 +622,9 @@ func (a *app) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeDBError(w, err)
 			return
+		}
+		if !canRevealAPIKey(user, item.UserID) {
+			item.Key = ""
 		}
 		items = append(items, item)
 	}
@@ -647,7 +654,7 @@ func (a *app) handleAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := "sk-" + randomSecret(32)
-	result, err := a.db.Exec(`INSERT INTO api_keys (user_id, key_hash, key_prefix, name, group_id, status, quota, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))`, input.UserID, hashToken(secret), secret[:11], input.Name, input.GroupID, input.Status, input.Quota, strings.TrimSpace(input.ExpiresAt))
+	result, err := a.db.Exec(`INSERT INTO api_keys (user_id, key_hash, key_prefix, key_secret, name, group_id, status, quota, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))`, input.UserID, hashToken(secret), secret[:11], secret, input.Name, input.GroupID, input.Status, input.Quota, strings.TrimSpace(input.ExpiresAt))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -762,17 +769,26 @@ func (a *app) handleAPIKeyDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+const apiKeySelect = `SELECT k.id, k.user_id, u.username, k.name, k.key_prefix, k.key_secret, COALESCE(k.group_id, ''), k.status, k.quota, k.quota_used, k.expires_at, k.last_used_at, k.created_at, k.updated_at FROM api_keys k JOIN users u ON u.id = k.user_id`
+
 func (a *app) getAPIKey(id int64) (apiKeyRecord, error) {
-	return scanAPIKey(a.db.QueryRow(`SELECT k.id, k.user_id, u.username, k.name, k.key_prefix, COALESCE(k.group_id, ''), k.status, k.quota, k.quota_used, k.expires_at, k.last_used_at, k.created_at, k.updated_at FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.id = ? AND k.deleted_at IS NULL`, id))
+	return scanAPIKey(a.db.QueryRow(apiKeySelect+` WHERE k.id = ? AND k.deleted_at IS NULL`, id))
 }
 
 func scanAPIKey(row scanner) (apiKeyRecord, error) {
 	var item apiKeyRecord
 	var expires, lastUsed sql.NullString
-	err := row.Scan(&item.ID, &item.UserID, &item.Username, &item.Name, &item.KeyPrefix, &item.GroupID, &item.Status, &item.Quota, &item.QuotaUsed, &expires, &lastUsed, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.UserID, &item.Username, &item.Name, &item.KeyPrefix, &item.Key, &item.GroupID, &item.Status, &item.Quota, &item.QuotaUsed, &expires, &lastUsed, &item.CreatedAt, &item.UpdatedAt)
 	item.ExpiresAt = nullText(expires)
 	item.LastUsedAt = nullText(lastUsed)
 	return item, err
+}
+
+func canRevealAPIKey(user panelUser, ownerID int64) bool {
+	if user.Role == "admin" {
+		return true
+	}
+	return user.Role == "user" && user.ID == ownerID
 }
 
 func (a *app) userCanUseGroup(userID int64, groupID string) (bool, error) {
