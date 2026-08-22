@@ -61,9 +61,19 @@ func TestRestoreToolNamesInBytes_LongestFirst(t *testing.T) {
 }
 
 func TestRestoreToolNamesInBytes_StaticPrefixRollback(t *testing.T) {
+	// 本次请求确实产生了 cc_ses_ 映射，静态前缀兜底才允许生效。
+	rw := buildToolNameRewriteFromBody([]byte(`{"tools":[{"name":"session_get","input_schema":{}}]}`))
+	require.NotNil(t, rw)
 	data := []byte(`{"name":"sessions_list","id":"cc_ses_xyz"}`)
-	got := string(restoreToolNamesInBytes(data, nil))
+	got := string(restoreToolNamesInBytes(data, rw))
 	require.Equal(t, `{"name":"sessions_list","id":"session_xyz"}`, got)
+}
+
+func TestRestoreToolNamesInBytes_WithoutMappingKeepsStaticPrefixText(t *testing.T) {
+	// 请求侧没有改写过工具名时，模型正文里出现的 cc_sess_ 字样不是假名，
+	// 不能被当成映射还原掉。
+	data := []byte(`{"text":"call cc_sess_list first","id":"cc_ses_xyz"}`)
+	require.Equal(t, string(data), string(restoreToolNamesInBytes(data, nil)))
 }
 
 func TestApplyToolNameRewriteToBody_RenamesToolsAndToolChoice(t *testing.T) {

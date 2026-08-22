@@ -62,6 +62,7 @@ type group struct {
 	StreamHedgeEnabled   bool     `json:"stream_hedge_enabled"`
 	AdaptiveHedgeEnabled bool     `json:"adaptive_hedge_enabled"`
 	RPMDispatchEnabled   bool     `json:"rpm_dispatch_enabled"`
+	MCPToolNamesEnabled  bool     `json:"mcp_tool_names_enabled"`
 	Status               string   `json:"status"`
 	ActiveAccounts       int      `json:"active_accounts"`
 	TotalAccounts        int      `json:"total_accounts"`
@@ -81,6 +82,7 @@ type groupInput struct {
 	StreamHedgeEnabled   bool     `json:"stream_hedge_enabled"`
 	AdaptiveHedgeEnabled bool     `json:"adaptive_hedge_enabled"`
 	RPMDispatchEnabled   *bool    `json:"rpm_dispatch_enabled"`
+	MCPToolNamesEnabled  *bool    `json:"mcp_tool_names_enabled"`
 	Status               string   `json:"status"`
 }
 
@@ -387,6 +389,7 @@ func (a *app) migrate() error {
 			stream_hedge_enabled INTEGER NOT NULL DEFAULT 0,
 			adaptive_hedge_enabled INTEGER NOT NULL DEFAULT 0,
 			rpm_dispatch_enabled INTEGER NOT NULL DEFAULT 1,
+			mcp_tool_names_enabled INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -710,7 +713,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +722,7 @@ func (a *app) listGroups() ([]group, error) {
 	for rows.Next() {
 		var item group
 		var daily, monthly sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -773,7 +776,13 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		// selects that explicit multi-account policy instead of silently blocking it.
 		rpmDispatch = 0
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, strings.TrimSpace(input.Description), input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, input.Status, id)
+	// Clients that predate this switch omit the field; keeping the stored value
+	// prevents a stale cached page from turning the lane off on an unrelated save.
+	var mcpToolNames any
+	if input.MCPToolNamesEnabled != nil {
+		mcpToolNames = boolInt(*input.MCPToolNamesEnabled)
+	}
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, strings.TrimSpace(input.Description), input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

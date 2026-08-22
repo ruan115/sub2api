@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,6 +162,103 @@ func TestOAuthGatewayUsesGroupNormalRequestMode(t *testing.T) {
 	}
 	if got.Header.Get("X-App") != "cli" || !strings.Contains(got.Header.Get("anthropic-beta"), "claude-code-20250219") {
 		t.Fatalf("normal mode lost OAuth mimicry headers: %#v", got.Header)
+	}
+}
+
+func TestOAuthGatewayRewritesToolNamesAsMCPForGroup(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	captured := make(chan capturedClaudeRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- capturedClaudeRequest{Header: r.Header.Clone(), Body: body}
+		tools, _ := body["tools"].([]any)
+		first, _ := tools[0].(map[string]any)
+		name, _ := first["name"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_mcp","content":[{"type":"tool_use","id":"tu_1","name":"` + name + `","input":{}}],"usage":{"input_tokens":2,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "MCP 工具名", "rate_multiplier": 1,
+		"status": "active", "mcp_tool_names_enabled": true,
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "mcp-tools", upstream.URL, 0, nil, map[string]any{
+		"access_token": "oauth-token", "account_uuid": "account-uuid",
+	})
+
+	body := []byte(`{"model":"claude-fable-5","max_tokens":64,"tools":[{"name":"read.file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	got := <-captured
+	tools, _ := got.Body["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("upstream tools=%#v", got.Body["tools"])
+	}
+	sent, _ := tools[0].(map[string]any)["name"].(string)
+	if !strings.HasPrefix(sent, "mcp__") || !strings.HasSuffix(sent, "__read_file") {
+		t.Fatalf("upstream tool name=%q", sent)
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`).MatchString(sent) {
+		t.Fatalf("upstream tool name violates Anthropic pattern: %q", sent)
+	}
+	if strings.Contains(response.Body.String(), sent) {
+		t.Fatalf("client response leaked the upstream alias: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"name":"read.file"`) {
+		t.Fatalf("client response lost the original tool name: %s", response.Body.String())
+	}
+}
+
+func TestAccountOverrideDisablesMCPToolNames(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	captured := make(chan capturedClaudeRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- capturedClaudeRequest{Header: r.Header.Clone(), Body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_plain","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "MCP 工具名", "rate_multiplier": 1,
+		"status": "active", "mcp_tool_names_enabled": true,
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "mcp-opt-out", upstream.URL, 0, map[string]any{
+		"mcp_tool_names": false,
+	}, map[string]any{"access_token": "oauth-token", "account_uuid": "account-uuid"})
+
+	body := []byte(`{"model":"claude-fable-5","max_tokens":64,"tools":[{"name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	got := <-captured
+	tools, _ := got.Body["tools"].([]any)
+	sent, _ := tools[0].(map[string]any)["name"].(string)
+	if sent != "read_file" {
+		t.Fatalf("account override did not opt out of the MCP lane: %q", sent)
 	}
 }
 

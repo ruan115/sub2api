@@ -948,6 +948,14 @@
           <label class="toggle-field span-2"
             ><span>原始请求完整透传</span
             ><input type="checkbox" id="account-request-passthrough" /><i></i></label
+          ><label class="span-2"
+            ><span>工具名 MCP 化</span
+            ><select id="account-mcp-tool-names">
+              <option value="">跟随分组设置</option>
+              <option value="on">强制开启</option>
+              <option value="off">强制关闭</option>
+            </select
+            ><small>开启完整透传时不做任何改写，此项无效</small></label
           >
           <div class="form-section span-2"><strong>凭证与生命周期</strong></div>
           <label
@@ -1081,6 +1089,19 @@
                 id="group-normal-request-mode"
                 type="checkbox"
                 aria-label="普通请求模式" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>工具名 MCP 化</strong>
+              <small>把上游工具名改写为 mcp__ 前缀并保留原名，客户端仍收到原名；对真实 Claude Code 客户端、完整透传账号和 API Key 账号不生效</small>
+            </div>
+            <label class="compact-toggle" title="工具名 MCP 化">
+              <input
+                id="group-mcp-tool-names"
+                type="checkbox"
+                aria-label="工具名 MCP 化" />
               <i></i>
             </label>
           </div>

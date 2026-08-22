@@ -757,7 +757,7 @@ function renderDashboard() {
         : item.stream_hedge_enabled
           ? "极速竞速"
           : "串行";
-      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "普通" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -1426,6 +1426,12 @@ function openAccount(account = null) {
   $("#account-queue-mode").value = account?.user_msg_queue_mode || "off";
   $("#account-request-passthrough").checked =
     account?.extra?.request_passthrough === true;
+  $("#account-mcp-tool-names").value =
+    typeof account?.extra?.mcp_tool_names === "boolean"
+      ? account.extra.mcp_tool_names
+        ? "on"
+        : "off"
+      : "";
   $("#account-expires").value = dateTimeInput(account?.expires_at);
   $("#account-rate-reset").value = dateTimeInput(account?.rate_limit_reset_at);
   $("#account-credentials").value = "";
@@ -1534,6 +1540,7 @@ function openGroup(item) {
   $("#group-daily").value = item.daily_limit_usd ?? "";
   $("#group-monthly").value = item.monthly_limit_usd ?? "";
   $("#group-normal-request-mode").checked = Boolean(item.normal_request_mode);
+  $("#group-mcp-tool-names").checked = Boolean(item.mcp_tool_names_enabled);
   $("#group-rpm-dispatch-enabled").checked = Boolean(
     item.rpm_dispatch_enabled,
   );
@@ -2365,6 +2372,9 @@ $("#account-form").addEventListener("submit", async (event) => {
     const proxyText = $("#account-proxy-text").value.trim();
     const extra = JSON.parse($("#account-extra").value.trim() || "{}");
     extra.request_passthrough = $("#account-request-passthrough").checked;
+    const mcpToolNames = $("#account-mcp-tool-names").value;
+    if (mcpToolNames === "") delete extra.mcp_tool_names;
+    else extra.mcp_tool_names = mcpToolNames === "on";
     const payload = {
       name: $("#account-name").value,
       platform: "anthropic",
@@ -2473,6 +2483,7 @@ $("#group-form").addEventListener("submit", async (event) => {
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
         adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
         rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
+        mcp_tool_names_enabled: $("#group-mcp-tool-names").checked,
       }),
     });
     $("#group-dialog").close();

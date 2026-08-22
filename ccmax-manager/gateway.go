@@ -37,6 +37,7 @@ type gatewayKey struct {
 	StreamHedgeEnabled   bool
 	AdaptiveHedgeEnabled bool
 	RPMDispatchEnabled   bool
+	MCPToolNamesEnabled  bool
 }
 
 type gatewayAccount struct {
@@ -65,6 +66,8 @@ type gatewayAPIKeyContextKey struct{}
 type gatewayProtocolContextKey struct{}
 
 type gatewayNormalRequestModeContextKey struct{}
+
+type gatewayMCPToolNamesContextKey struct{}
 
 type gatewayProtocolContext struct {
 	openAIChat   bool
@@ -175,6 +178,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	}
 	r = r.WithContext(context.WithValue(r.Context(), gatewayAPIKeyContextKey{}, key.ID))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayNormalRequestModeContextKey{}, key.NormalRequestMode))
+	r = r.WithContext(context.WithValue(r.Context(), gatewayMCPToolNamesContextKey{}, key.MCPToolNamesEnabled))
 	session := sub2service.GenerateCCMaxCompatibilitySessionHash(body, gatewayClientIP(r), r.UserAgent(), key.ID)
 	excluded := map[int64]bool{}
 	var lastFailure *gatewayUpstreamFailure
@@ -467,6 +471,11 @@ func gatewayOpenAIChatRequest(ctx context.Context) bool {
 
 func gatewayNormalRequestMode(ctx context.Context) bool {
 	value, _ := ctx.Value(gatewayNormalRequestModeContextKey{}).(bool)
+	return value
+}
+
+func gatewayMCPToolNames(ctx context.Context) bool {
+	value, _ := ctx.Value(gatewayMCPToolNamesContextKey{}).(bool)
 	return value
 }
 
@@ -927,14 +936,15 @@ func bearerOrAPIKey(r *http.Request) string {
 
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
-	var normalRequestMode, streamHedgeEnabled, adaptiveHedgeEnabled int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled
+	var normalRequestMode, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active'
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
 	key.AdaptiveHedgeEnabled = adaptiveHedgeEnabled == 1
+	key.MCPToolNamesEnabled = mcpToolNames == 1
 	return key, err
 }
 

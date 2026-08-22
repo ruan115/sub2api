@@ -45,6 +45,10 @@ type CCMaxCompatibilityInput struct {
 	// the security-oriented Claude Code expansion with a neutral assistant
 	// prompt. The default false value preserves the original Sub2API lane.
 	NormalRequestMode bool
+	// MCPToolNames rewrites mimicked tool names into the mcp__<server>__<tool>
+	// shape Claude Code uses for MCP servers instead of the Parrot-style opaque
+	// aliases. The default false value preserves the original Sub2API lane.
+	MCPToolNames bool
 }
 
 const ccmaxNormalRequestExpansionPrompt = "You are an interactive assistant. Follow the user's instructions and provide a direct, helpful response."
@@ -150,7 +154,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		body = StripEmptyTextBlocks(body)
 		if mimic {
 			body, model = normalizeClaudeOAuthRequestBody(body, model, claudeOAuthNormalizeOptions{stripSystemCacheControl: true})
-			if toolRewrite = buildToolNameRewriteFromBody(body); toolRewrite != nil {
+			if toolRewrite = buildCCMaxToolRewrite(body, input); toolRewrite != nil {
 				body = applyToolNameRewriteToBody(body, toolRewrite)
 			} else {
 				body = applyToolsLastCacheBreakpoint(body)
@@ -186,7 +190,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 				)
 			}
 			body, model = normalizeClaudeOAuthRequestBody(body, model, opts)
-			if toolRewrite = buildToolNameRewriteFromBody(body); toolRewrite != nil {
+			if toolRewrite = buildCCMaxToolRewrite(body, input); toolRewrite != nil {
 				body = applyToolNameRewriteToBody(body, toolRewrite)
 			} else {
 				body = applyToolsLastCacheBreakpoint(body)

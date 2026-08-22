@@ -76,6 +76,7 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		MappedModel: mappedModel, Fingerprint: fingerprint,
 		ForceNonClaudeCode: gatewayOpenAIChatRequest(r.Context()),
 		NormalRequestMode:  gatewayNormalRequestMode(r.Context()),
+		MCPToolNames:       accountMCPToolNames(account, gatewayMCPToolNames(r.Context())),
 	})
 	if err != nil {
 		return claudePreparedRequest{}, err
@@ -92,6 +93,18 @@ func accountRequestPassthrough(account gatewayAccount) bool {
 	extra := decodeObject(account.ExtraJSON)
 	value, _ := extra["request_passthrough"].(bool)
 	return value
+}
+
+// accountMCPToolNames resolves the MCP tool naming lane for one account. The
+// account setting is a three-state override: absent inherits the group switch,
+// while an explicit value wins so a single account can be pulled out of the
+// lane without touching the rest of the group.
+func accountMCPToolNames(account gatewayAccount, groupEnabled bool) bool {
+	extra := decodeObject(account.ExtraJSON)
+	if value, ok := extra["mcp_tool_names"].(bool); ok {
+		return value
+	}
+	return groupEnabled
 }
 
 func gatewayAccountUsesOAuth(account gatewayAccount) bool {
