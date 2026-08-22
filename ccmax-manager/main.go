@@ -229,6 +229,8 @@ type usageLog struct {
 	ID                    int64   `json:"id"`
 	UserID                *int64  `json:"user_id,omitempty"`
 	APIKeyID              *int64  `json:"api_key_id,omitempty"`
+	APIKeyName            string  `json:"api_key_name"`
+	APIKeyPrefix          string  `json:"api_key_prefix"`
 	RequestID             string  `json:"request_id"`
 	PurposeKey            string  `json:"purpose_key"`
 	PurposeName           string  `json:"purpose_name"`
@@ -282,6 +284,7 @@ type billingSummary struct {
 	ByGroup          []billingBreakdown `json:"by_group"`
 	ByAccount        []billingBreakdown `json:"by_account"`
 	ByPurpose        []billingBreakdown `json:"by_purpose"`
+	ByAPIKey         []billingBreakdown `json:"by_api_key"`
 }
 
 type dashboard struct {
@@ -1791,16 +1794,21 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 }
 
 func (a *app) getUsageByRequestID(requestID string) (usageLog, error) {
-	return scanUsage(a.db.QueryRow(usageSelect+` WHERE request_id = ?`, requestID))
+	return scanUsage(a.db.QueryRow(usageSelect+` WHERE u.request_id = ?`, requestID))
 }
 
-const usageSelect = `SELECT id, user_id, api_key_id, request_id, purpose_key, purpose_name, group_id, account_id, account_name, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms, created_at FROM usage_logs`
+// usageFrom joins the owning API key so every ledger row can be attributed to
+// the SK that produced it. The join is a LEFT JOIN because manually recorded
+// usage and deleted keys have no live api_keys row.
+const usageFrom = ` FROM usage_logs u LEFT JOIN api_keys k ON k.id = u.api_key_id`
+
+const usageSelect = `SELECT u.id, u.user_id, u.api_key_id, COALESCE(k.name, ''), COALESCE(k.key_prefix, ''), u.request_id, u.purpose_key, u.purpose_name, u.group_id, u.account_id, u.account_name, u.model, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens, u.input_cost, u.output_cost, u.cache_creation_cost, u.cache_read_cost, u.base_cost, u.billed_cost, u.actual_cost, u.group_rate_multiplier, u.account_rate_multiplier, u.stream, u.duration_ms, u.created_at` + usageFrom
 
 func scanUsage(row scanner) (usageLog, error) {
 	var item usageLog
 	var stream int
 	var userID, apiKeyID sql.NullInt64
-	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.RequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
+	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.APIKeyName, &item.APIKeyPrefix, &item.RequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
 	item.UserID = nullIntPointer(userID)
 	item.APIKeyID = nullIntPointer(apiKeyID)
 	item.Stream = stream == 1
@@ -1820,6 +1828,7 @@ type usageFilters struct {
 	GroupID    string
 	PurposeKey string
 	AccountID  int64
+	APIKeyID   int64
 	UserID     int64
 	Limit      int
 	Offset     int
@@ -1857,6 +1866,7 @@ func filtersFromRequest(r *http.Request) usageFilters {
 		Limit:      20,
 	}
 	filters.AccountID, _ = strconv.ParseInt(r.URL.Query().Get("account_id"), 10, 64)
+	filters.APIKeyID, _ = strconv.ParseInt(r.URL.Query().Get("api_key_id"), 10, 64)
 	page, pageSize, offset := paginationFromRequest(r, 20, 100)
 	filters.Limit, filters.Offset = pageSize, offset
 	_ = page
@@ -1867,27 +1877,31 @@ func buildUsageWhere(filters usageFilters) (string, []any) {
 	conditions := []string{"1 = 1"}
 	args := []any{}
 	if filters.From != "" {
-		conditions = append(conditions, "created_at >= ?")
+		conditions = append(conditions, "u.created_at >= ?")
 		args = append(args, normalizeDateStart(filters.From))
 	}
 	if filters.To != "" {
-		conditions = append(conditions, "created_at < ?")
+		conditions = append(conditions, "u.created_at < ?")
 		args = append(args, normalizeDateEnd(filters.To))
 	}
 	if filters.GroupID == "a" || filters.GroupID == "b" {
-		conditions = append(conditions, "group_id = ?")
+		conditions = append(conditions, "u.group_id = ?")
 		args = append(args, filters.GroupID)
 	}
 	if filters.PurposeKey != "" {
-		conditions = append(conditions, "purpose_key = ?")
+		conditions = append(conditions, "u.purpose_key = ?")
 		args = append(args, filters.PurposeKey)
 	}
 	if filters.AccountID > 0 {
-		conditions = append(conditions, "account_id = ?")
+		conditions = append(conditions, "u.account_id = ?")
 		args = append(args, filters.AccountID)
 	}
+	if filters.APIKeyID > 0 {
+		conditions = append(conditions, "u.api_key_id = ?")
+		args = append(args, filters.APIKeyID)
+	}
 	if filters.UserID > 0 {
-		conditions = append(conditions, "user_id = ?")
+		conditions = append(conditions, "u.user_id = ?")
 		args = append(args, filters.UserID)
 	}
 	return strings.Join(conditions, " AND "), args
@@ -1896,7 +1910,7 @@ func buildUsageWhere(filters usageFilters) (string, []any) {
 func (a *app) listUsage(filters usageFilters) ([]usageLog, error) {
 	where, args := buildUsageWhere(filters)
 	args = append(args, filters.Limit, filters.Offset)
-	rows, err := a.db.Query(usageSelect+` WHERE `+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, args...)
+	rows, err := a.db.Query(usageSelect+` WHERE `+where+` ORDER BY u.created_at DESC, u.id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1915,7 +1929,7 @@ func (a *app) listUsage(filters usageFilters) ([]usageLog, error) {
 func (a *app) countUsage(filters usageFilters) (int64, error) {
 	where, args := buildUsageWhere(filters)
 	var total int64
-	err := a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE `+where, args...).Scan(&total)
+	err := a.db.QueryRow(`SELECT COUNT(*)`+usageFrom+` WHERE `+where, args...).Scan(&total)
 	return total, err
 }
 
@@ -1939,6 +1953,7 @@ func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 		redactBillingBreakdowns(summary.ByGroup)
 		redactBillingBreakdowns(summary.ByAccount)
 		redactBillingBreakdowns(summary.ByPurpose)
+		redactBillingBreakdowns(summary.ByAPIKey)
 	}
 	writeJSON(w, http.StatusOK, summary)
 }
@@ -1971,23 +1986,26 @@ func redactBillingBreakdowns(items []billingBreakdown) {
 
 func (a *app) billingSummary(filters usageFilters) (billingSummary, error) {
 	where, args := buildUsageWhere(filters)
-	result := billingSummary{From: filters.From, To: filters.To, ByGroup: []billingBreakdown{}, ByAccount: []billingBreakdown{}, ByPurpose: []billingBreakdown{}}
-	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0), COALESCE(SUM(base_cost), 0), COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0), COALESCE(SUM(billed_cost - actual_cost), 0) FROM usage_logs WHERE `+where, args...).Scan(&result.Totals.Requests, &result.Totals.InputTokens, &result.Totals.OutputTokens, &result.Totals.CacheTokens, &result.Totals.BaseCost, &result.Totals.BilledCost, &result.Totals.ActualCost, &result.Totals.Margin); err != nil {
+	result := billingSummary{From: filters.From, To: filters.To, ByGroup: []billingBreakdown{}, ByAccount: []billingBreakdown{}, ByPurpose: []billingBreakdown{}, ByAPIKey: []billingBreakdown{}}
+	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cache_creation_tokens + u.cache_read_tokens), 0), COALESCE(SUM(u.base_cost), 0), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)`+usageFrom+` WHERE `+where, args...).Scan(&result.Totals.Requests, &result.Totals.InputTokens, &result.Totals.OutputTokens, &result.Totals.CacheTokens, &result.Totals.BaseCost, &result.Totals.BilledCost, &result.Totals.ActualCost, &result.Totals.Margin); err != nil {
 		return result, err
 	}
 	var err error
-	result.ByGroup, err = a.queryBreakdown(where, args, "group_id", "group_id")
+	result.ByGroup, err = a.queryBreakdown(where, args, "u.group_id", "u.group_id")
 	if err == nil {
-		result.ByAccount, err = a.queryBreakdown(where, args, "CAST(account_id AS TEXT)", "account_name")
+		result.ByAccount, err = a.queryBreakdown(where, args, "CAST(u.account_id AS TEXT)", "u.account_name")
 	}
 	if err == nil {
-		result.ByPurpose, err = a.queryBreakdown(where, args, "purpose_key", "purpose_name")
+		result.ByPurpose, err = a.queryBreakdown(where, args, "u.purpose_key", "u.purpose_name")
+	}
+	if err == nil {
+		result.ByAPIKey, err = a.queryBreakdown(where, args, "COALESCE(CAST(u.api_key_id AS TEXT), '')", `COALESCE(k.name, '手动记录')`)
 	}
 	return result, err
 }
 
 func (a *app) queryBreakdown(where string, args []any, keyExpr, nameExpr string) ([]billingBreakdown, error) {
-	query := `SELECT ` + keyExpr + `, ` + nameExpr + `, COUNT(*), COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0), COALESCE(SUM(billed_cost - actual_cost), 0) FROM usage_logs WHERE ` + where + ` GROUP BY ` + keyExpr + `, ` + nameExpr + ` ORDER BY SUM(billed_cost) DESC`
+	query := `SELECT ` + keyExpr + `, ` + nameExpr + `, COUNT(*), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)` + usageFrom + ` WHERE ` + where + ` GROUP BY ` + keyExpr + `, ` + nameExpr + ` ORDER BY SUM(u.billed_cost) DESC`
 	rows, err := a.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -2011,7 +2029,7 @@ func (a *app) queryTotals(from, to string) (billingTotals, error) {
 func (a *app) queryTotalsFiltered(filters usageFilters) (billingTotals, error) {
 	where, args := buildUsageWhere(filters)
 	var totals billingTotals
-	err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0), COALESCE(SUM(base_cost), 0), COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0), COALESCE(SUM(billed_cost - actual_cost), 0) FROM usage_logs WHERE `+where, args...).Scan(&totals.Requests, &totals.InputTokens, &totals.OutputTokens, &totals.CacheTokens, &totals.BaseCost, &totals.BilledCost, &totals.ActualCost, &totals.Margin)
+	err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cache_creation_tokens + u.cache_read_tokens), 0), COALESCE(SUM(u.base_cost), 0), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)`+usageFrom+` WHERE `+where, args...).Scan(&totals.Requests, &totals.InputTokens, &totals.OutputTokens, &totals.CacheTokens, &totals.BaseCost, &totals.BilledCost, &totals.ActualCost, &totals.Margin)
 	return totals, err
 }
 

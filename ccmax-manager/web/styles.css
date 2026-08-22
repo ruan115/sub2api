@@ -1124,7 +1124,7 @@ textarea:focus {
 }
 .accounts-table {
   width: 100%;
-  min-width: 960px;
+  min-width: 1090px;
   table-layout: fixed;
 }
 .accounts-table th,
@@ -1537,6 +1537,66 @@ textarea:focus {
   display: block;
   max-width: 100%;
 }
+.live-load {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 4px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.live-chip {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 3px;
+  padding: 2px 5px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-muted);
+  font-family: var(--font-ui);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.live-chip b {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+}
+.live-chip.ok {
+  border-color: #bcd9c6;
+  background: #f1faf5;
+}
+.live-chip.warn {
+  border-color: #e4cf9d;
+  background: #fdf6e6;
+}
+.live-chip.error {
+  border-color: #e3aaa5;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.live-meter {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  grid-column: span 2;
+  border-radius: 3px;
+  background: #e8ece9;
+}
+.live-meter i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--a);
+  transition: width 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.live-meter.warn i {
+  background: #d39b32;
+}
+.live-meter.error i {
+  background: var(--danger);
+}
 .dead-table {
   min-width: 1320px;
 }
@@ -1821,7 +1881,7 @@ textarea:focus {
 
 .billing-filters {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr)) auto;
+  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
 }
 .billing-filters label > span,
 .form-grid label > span,
@@ -2027,8 +2087,12 @@ textarea:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.form-grid,
-.form-stack {
+.modal form > .form-grid,
+.modal form > .form-stack,
+.modal > .form-grid,
+.modal > .form-stack,
+.modal > .secret-body,
+.modal form > .secret-body {
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
@@ -2069,8 +2133,18 @@ textarea:focus {
   font-size: 9px;
   text-align: right;
 }
+.form-stack .form-grid,
+.form-grid .form-grid,
+.form-stack .form-stack,
+.form-grid .form-stack,
 .compact-grid {
+  min-height: auto;
+  flex: none;
+  overflow: visible;
+  overflow-y: visible;
+  overscroll-behavior: auto;
   padding: 0;
+  scrollbar-gutter: auto;
 }
 label small {
   display: block;

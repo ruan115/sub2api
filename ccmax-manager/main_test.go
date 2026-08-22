@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -714,6 +715,88 @@ func TestAPIKeyGatewayDispatchAndBilling(t *testing.T) {
 	var usageCount int
 	if err := a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE request_id = 'req-gateway-test' AND input_tokens = 100 AND output_tokens = 20`).Scan(&usageCount); err != nil || usageCount != 1 {
 		t.Fatalf("usageCount=%d err=%v", usageCount, err)
+	}
+}
+
+func TestUsageLedgerAttributesRequestsToTheProducingKey(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("request-id", "req-key-attribution")
+		_, _ = w.Write([]byte(`{"id":"msg_key","usage":{"input_tokens":30,"output_tokens":7}}`))
+	}))
+	defer upstream.Close()
+
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var user panelUser
+	putJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
+		"username": "ledger-client", "name": "Ledger", "password": "client-password", "role": "user",
+		"status": "active", "allowed_group_ids": []string{"a"}, "rpm_limit": 0,
+	}, http.StatusCreated, &user)
+	var caller, other apiKeyRecord
+	putJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"user_id": user.ID, "name": "caller-sk", "group_id": "a", "status": "active", "quota": 0,
+	}, http.StatusCreated, &caller)
+	putJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"user_id": user.ID, "name": "idle-sk", "group_id": "a", "status": "active", "quota": 0,
+	}, http.StatusCreated, &other)
+	proxyID := createTestForwardProxy(t, a)
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "ledger-account", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "upstream-token"},
+		"extra":       map[string]any{"custom_forward_url": upstream.URL}, "status": "active", "schedulable": true,
+		"concurrency": 2, "priority": 1, "rate_multiplier": 1, "group_ids": []string{"a"},
+		"proxy_pool_id": 1, "proxy_id": proxyID,
+		"base_rpm": 15, "rpm_strategy": "tiered", "rpm_sticky_buffer": 0, "user_msg_queue_mode": "off",
+	}, http.StatusCreated, nil)
+
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-test", "max_tokens": 32, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}, nil, caller.Key, http.StatusOK, nil)
+
+	var ledger struct {
+		Items []usageLog `json:"items"`
+		Total int64      `json:"total"`
+	}
+	putJSON(t, handler, http.MethodGet, "/api/usage", nil, http.StatusOK, &ledger)
+	if len(ledger.Items) != 1 {
+		t.Fatalf("ledger items = %d, want 1", len(ledger.Items))
+	}
+	entry := ledger.Items[0]
+	if entry.APIKeyID == nil || *entry.APIKeyID != caller.ID {
+		t.Fatalf("ledger api_key_id = %v, want %d", entry.APIKeyID, caller.ID)
+	}
+	if entry.APIKeyName != "caller-sk" || entry.APIKeyPrefix != caller.KeyPrefix {
+		t.Fatalf("ledger key attribution = %q/%q", entry.APIKeyName, entry.APIKeyPrefix)
+	}
+
+	// Filtering by the key that never called must not return the other key's row.
+	var filtered struct {
+		Items []usageLog `json:"items"`
+		Total int64      `json:"total"`
+	}
+	putJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/usage?api_key_id=%d", other.ID), nil, http.StatusOK, &filtered)
+	if filtered.Total != 0 || len(filtered.Items) != 0 {
+		t.Fatalf("idle key ledger total=%d items=%d", filtered.Total, len(filtered.Items))
+	}
+	putJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/usage?api_key_id=%d", caller.ID), nil, http.StatusOK, &filtered)
+	if filtered.Total != 1 {
+		t.Fatalf("caller key ledger total = %d, want 1", filtered.Total)
+	}
+
+	var summary billingSummary
+	putJSON(t, handler, http.MethodGet, "/api/billing", nil, http.StatusOK, &summary)
+	if len(summary.ByAPIKey) != 1 {
+		t.Fatalf("billing by_api_key = %+v", summary.ByAPIKey)
+	}
+	if summary.ByAPIKey[0].Name != "caller-sk" || summary.ByAPIKey[0].Requests != 1 {
+		t.Fatalf("billing key breakdown = %+v", summary.ByAPIKey[0])
 	}
 }
 
