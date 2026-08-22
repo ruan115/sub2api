@@ -425,7 +425,7 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Concurrency <= 0 {
-		input.Concurrency = 3
+		input.Concurrency = 10
 	}
 	if input.BaseRPM < 0 || input.BaseRPM > 10000 {
 		writeError(w, http.StatusBadRequest, "base RPM is invalid")

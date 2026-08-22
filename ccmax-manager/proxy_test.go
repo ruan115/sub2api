@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -57,6 +59,67 @@ func TestProxyTextFromAPIEncodesCredentials(t *testing.T) {
 	}
 	if item.Protocol != "http" || item.Username != "a@b" || item.Password != "p:a ss" {
 		t.Fatalf("API proxy = %+v", item)
+	}
+}
+
+func TestProxyPoolDeleteRemovesPoolProxies(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var pool proxyPool
+	putJSON(t, handler, http.MethodPost, "/api/proxy-pools", map[string]any{
+		"name": "spare", "source_type": "manual", "default_protocol": "socks5", "status": "active",
+	}, http.StatusCreated, &pool)
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": pool.ID, "text": "198.51.100.10:1080\n198.51.100.11:1080",
+	}, http.StatusCreated, nil)
+
+	var deletion struct {
+		DeletedProxies int `json:"deleted_proxies"`
+	}
+	putJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/proxy-pools/%d", pool.ID), nil, http.StatusOK, &deletion)
+	if deletion.DeletedProxies != 2 {
+		t.Fatalf("deleted proxies = %d, want 2", deletion.DeletedProxies)
+	}
+
+	var pools []proxyPool
+	putJSON(t, handler, http.MethodGet, "/api/proxy-pools", nil, http.StatusOK, &pools)
+	for _, item := range pools {
+		if item.ID == pool.ID {
+			t.Fatalf("deleted pool %d still listed", pool.ID)
+		}
+	}
+	var proxies []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
+	for _, item := range proxies {
+		if item.PoolID == pool.ID {
+			t.Fatalf("proxy %d of deleted pool still listed", item.ID)
+		}
+	}
+}
+
+func TestProxyPoolDeleteRejectsAssignedPool(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	if _, err := a.db.Exec(`INSERT INTO accounts (name, proxy_pool_id) VALUES ('bound', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	putJSON(t, a.routes(), http.MethodDelete, "/api/proxy-pools/1", nil, http.StatusConflict, nil)
+	var deleted sql.NullString
+	if err := a.db.QueryRow(`SELECT deleted_at FROM proxy_pools WHERE id = 1`).Scan(&deleted); err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Valid {
+		t.Fatalf("assigned pool was deleted at %q", deleted.String)
 	}
 }
 

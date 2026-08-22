@@ -1125,7 +1125,7 @@ function renderProxies() {
   $("#proxy-pool-list").innerHTML = state.proxyPools
     .map(
       (pool) =>
-        `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small>${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${isAdmin() && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${isAdmin() ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button>` : ""}</div></article>`,
+        `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small>${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${isAdmin() && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${isAdmin() ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button><button class="danger" data-delete-pool="${pool.id}" title="删除代理池">✕</button>` : ""}</div></article>`,
     )
     .join("");
   const selected = state.proxyPoolFilter
@@ -1411,7 +1411,7 @@ function openAccount(account = null) {
   $("#account-session-key").value = "";
   $("#account-status").value = account?.status || "active";
   $("#account-schedulable").checked = account?.schedulable ?? false;
-  $("#account-concurrency").value = account?.concurrency ?? 3;
+  $("#account-concurrency").value = account?.concurrency ?? 10;
   $("#account-priority").value = account?.priority ?? 50;
   $("#account-rate").value = account?.rate_multiplier ?? 1;
   $("#account-price").value = account?.account_price ?? 0;
@@ -1869,6 +1869,40 @@ document.addEventListener("click", async (event) => {
       }
       return;
     }
+    if (target.dataset.deletePool) {
+      const item = state.proxyPools.find(
+        (value) => value.id === Number(target.dataset.deletePool),
+      );
+      if (!item) return;
+      if (item.assigned_count) {
+        toast(
+          `代理池“${item.name}”仍被 ${item.assigned_count} 个账号占用，请先解绑账号`,
+          "error",
+        );
+        return;
+      }
+      const confirmed = await confirmAction(
+        `删除代理池“${item.name}”`,
+        item.proxy_count
+          ? `池内 ${item.proxy_count} 个代理会一并删除，删除后无法恢复。`
+          : "该代理池当前没有代理，删除后无法恢复。",
+        "确认删除",
+      );
+      if (!confirmed) return;
+      const result = await api(`/api/proxy-pools/${item.id}`, {
+        method: "DELETE",
+      });
+      if (String(state.proxyPoolFilter) === String(item.id))
+        state.proxyPoolFilter = "";
+      resetPagination("proxies");
+      toast(
+        result?.deleted_proxies
+          ? `代理池已删除，同时清理 ${result.deleted_proxies} 个代理`
+          : "代理池已删除",
+      );
+      await loadCore();
+      return;
+    }
     for (const [dataset, path, collection, label] of [
       ["deleteAccount", "/api/accounts/", state.accounts, "账号"],
       ["deleteUser", "/api/users/", state.users, "用户"],
@@ -2070,7 +2104,7 @@ $("#test-proxies-batch").addEventListener("click", async (event) => {
   const label = button.querySelector("span");
   try {
     button.disabled = true;
-    label.textContent = `检测中 0/${candidates.length}`;
+    label.textContent = "检测中…";
     const result = await api("/api/proxies/batch-test", {
       method: "POST",
       body: JSON.stringify({ pool_id: poolID, concurrency: 8 }),
@@ -2286,7 +2320,7 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
         group_ids: groupIDs,
         auth_type: $("#batch-auth-type").value,
         account_price: Number($("#batch-account-price").value || 0),
-        concurrency: Number($("#batch-concurrency").value || 3),
+        concurrency: Number($("#batch-concurrency").value || 10),
         base_rpm: Number($("#batch-base-rpm").value || 0),
       }),
     });

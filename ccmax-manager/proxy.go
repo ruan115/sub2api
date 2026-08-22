@@ -340,15 +340,43 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 	var assigned int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE proxy_pool_id = ? AND deleted_at IS NULL`, id).Scan(&assigned)
 	if assigned > 0 {
-		writeError(w, http.StatusConflict, "proxy pool is assigned to accounts")
+		writeError(w, http.StatusConflict, fmt.Sprintf("代理池仍被 %d 个账号占用，请先解绑账号", assigned))
 		return
 	}
-	_, err := a.db.Exec(`UPDATE proxy_pools SET status = 'disabled', deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, id)
+	tx, err := a.db.Begin()
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	defer tx.Rollback()
+	var name string
+	if err := tx.QueryRow(`SELECT name FROM proxy_pools WHERE id = ? AND deleted_at IS NULL`, id).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "proxy pool not found")
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+	result, err := tx.Exec(`UPDATE proxies SET status = 'disabled', deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE pool_id = ? AND deleted_at IS NULL`, id)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	deletedProxies, _ := result.RowsAffected()
+	if _, err := tx.Exec(`UPDATE proxy_pools SET status = 'disabled', deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, id); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted":         true,
+		"name":            name,
+		"deleted_proxies": deletedProxies,
+	})
 }
 
 const proxySelect = `SELECT x.id, x.pool_id, p.name, x.name, x.protocol, x.host, x.port, x.username, x.password != '', x.status, x.exit_ip, x.latency_ms, x.last_test_at,

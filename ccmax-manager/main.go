@@ -401,7 +401,7 @@ func (a *app) migrate() error {
 			extra_json TEXT NOT NULL DEFAULT '{}',
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'error', 'disabled')),
 			schedulable INTEGER NOT NULL DEFAULT 1,
-			concurrency INTEGER NOT NULL DEFAULT 3 CHECK (concurrency > 0),
+			concurrency INTEGER NOT NULL DEFAULT 10 CHECK (concurrency > 0),
 			priority INTEGER NOT NULL DEFAULT 50,
 			rate_multiplier REAL NOT NULL DEFAULT 1 CHECK (rate_multiplier >= 0),
 			notes TEXT NOT NULL DEFAULT '',

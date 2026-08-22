@@ -397,6 +397,7 @@ svg {
   gap: 8px;
   min-height: 40px;
   padding: 0 15px;
+  white-space: nowrap;
 }
 .button:hover,
 .icon-button:hover {
@@ -1744,11 +1745,19 @@ textarea:focus {
 }
 .heading-actions {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
 }
+.heading-actions > .button {
+  flex: 0 0 auto;
+}
 .heading-actions select {
-  min-width: 150px;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 150px;
 }
 .access-toolbar {
   display: flex;
