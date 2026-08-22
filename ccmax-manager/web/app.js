@@ -214,8 +214,7 @@ function initializeResizableTable() {
     subscription: 64,
     price: 57,
     billing: 57,
-    quota: 130,
-    live: 132,
+    quota: 186,
     requests: 48,
     onboarded: 72,
     survival: 70,
@@ -854,27 +853,26 @@ function accountUsageCell(item) {
     const resetText = resetAt ? dateTime(resetAt) : "等待刷新";
     return `<div class="usage-window-row"><b>${label}</b><span><i style="width:${used}%"></i></span><strong>${used.toFixed(0)}%</strong><small title="${escapeHTML(resetText)}">${resetText}</small></div>`;
   };
-  return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}</div>`;
+  const load = state.realtime?.accounts?.find(
+    (entry) => entry.account_id === item.id,
+  );
+  return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}<div class="usage-window-row live-row" data-account-realtime="${item.id}">${accountLiveLoadInner(load, item.base_rpm)}</div></div>`;
 }
 function accountLiveLoadInner(load, fallbackBaseRPM = 0) {
   const rpm = Number(load?.rpm || 0);
   const tpm = Number(load?.tpm || 0);
   const inflight = Number(load?.inflight || 0);
   const baseRPM = Number(load?.base_rpm ?? fallbackBaseRPM ?? 0);
-  const capacity = baseRPM > 0 ? `${rpm} / ${baseRPM}` : `${rpm} / 不限`;
   let tone = "idle";
   if (baseRPM > 0 && rpm >= baseRPM) tone = "error";
   else if (baseRPM > 0 && rpm >= baseRPM * 0.8) tone = "warn";
   else if (rpm > 0 || inflight > 0) tone = "ok";
   const ratio =
     baseRPM > 0 ? Math.min(100, Math.round((rpm / baseRPM) * 100)) : 0;
-  return `<span class="live-chip ${tone}" title="最近 60 秒上游请求数${baseRPM > 0 ? `，基础 RPM ${baseRPM}` : "，未设置 RPM 上限"}"><b>RPM</b>${capacity}</span><span class="live-chip" title="最近 60 秒输入、输出与缓存 Token 总量"><b>TPM</b>${compact(tpm)}</span><span class="live-chip ${inflight > 0 ? "ok" : "idle"}" title="当前仍在处理的上游请求"><b>在途</b>${inflight}</span><span class="live-meter ${tone}" aria-hidden="true"><i style="width:${ratio}%"></i></span>`;
-}
-function accountLiveCell(item) {
-  const load = state.realtime?.accounts?.find(
-    (entry) => entry.account_id === item.id,
-  );
-  return `<div class="live-load" data-account-realtime="${item.id}">${accountLiveLoadInner(load, item.base_rpm)}</div>`;
+  const capacity = baseRPM > 0 ? `${rpm}/${baseRPM}` : `${rpm}/∞`;
+  const detail = `TPM ${compact(tpm)} · 在途 ${inflight}`;
+  const hint = `最近 60 秒：RPM ${capacity}${baseRPM > 0 ? "" : "（未设置 RPM 上限）"} · TPM ${Number(tpm).toLocaleString("zh-CN")} · 在途 ${inflight}`;
+  return `<b>RPM</b><span class="${tone}"><i style="width:${ratio}%"></i></span><strong class="${tone}" title="${escapeHTML(hint)}">${capacity}</strong><small title="${escapeHTML(hint)}">${detail}</small>`;
 }
 function renderRealtime() {
   const data = state.realtime;
@@ -1022,7 +1020,7 @@ function renderAccounts() {
       const statusDetail = `${authDetail}${checked}`;
       const onboardedAt = dateTime(item.onboarded_at);
       const lastUsedAt = dateTime(item.last_used_at);
-      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionName(item.subscription_type))}">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td>${accountLiveCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
+      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionName(item.subscription_type))}">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
