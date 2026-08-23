@@ -41,17 +41,16 @@ type CCMaxCompatibilityInput struct {
 	// ForceNonClaudeCode keeps protocol bridges on the same mimicry lane as
 	// Sub2API's Chat Completions handler, regardless of the caller User-Agent.
 	ForceNonClaudeCode bool
-	// NormalRequestMode retains the OAuth mimicry wire shape while replacing
-	// the security-oriented Claude Code expansion with a neutral assistant
-	// prompt. The default false value preserves the original Sub2API lane.
+	// NormalRequestMode selects the distilled-compatible lane observed from the
+	// configured upstream: no Claude Code system injection, a strict Anthropic
+	// top-level field set, and Fable 5 sampling controls removed. The default
+	// false value preserves the original Sub2API lane.
 	NormalRequestMode bool
 	// MCPToolNames rewrites mimicked tool names into the mcp__<server>__<tool>
 	// shape Claude Code uses for MCP servers instead of the Parrot-style opaque
 	// aliases. The default false value preserves the original Sub2API lane.
 	MCPToolNames bool
 }
-
-const ccmaxNormalRequestExpansionPrompt = "You are an interactive assistant. Follow the user's instructions and provide a direct, helpful response."
 
 // CCMaxCompatibilityPrepared is the exact wire request produced by the
 // original Sub2API Anthropic OAuth defaults.
@@ -63,8 +62,50 @@ type CCMaxCompatibilityPrepared struct {
 	Model         string
 	Mimic         bool
 	ClaudeCode    bool
+	Distilled     bool
 	ToolRewrite   *ToolNameRewrite
 	input         CCMaxCompatibilityInput
+}
+
+// ccmaxDistilledClaudeRequest mirrors the effective Anthropic request surface
+// exposed by the New API channel in front of the distilled upstream. RawMessage
+// keeps supported nested payloads intact while dropping unknown top-level keys.
+type ccmaxDistilledClaudeRequest struct {
+	Model             json.RawMessage `json:"model"`
+	Prompt            json.RawMessage `json:"prompt,omitempty"`
+	System            json.RawMessage `json:"system,omitempty"`
+	Messages          json.RawMessage `json:"messages,omitempty"`
+	CacheControl      json.RawMessage `json:"cache_control,omitempty"`
+	MaxTokens         json.RawMessage `json:"max_tokens,omitempty"`
+	MaxTokensToSample json.RawMessage `json:"max_tokens_to_sample,omitempty"`
+	StopSequences     json.RawMessage `json:"stop_sequences,omitempty"`
+	Temperature       json.RawMessage `json:"temperature,omitempty"`
+	TopP              json.RawMessage `json:"top_p,omitempty"`
+	TopK              json.RawMessage `json:"top_k,omitempty"`
+	Stream            json.RawMessage `json:"stream,omitempty"`
+	Tools             json.RawMessage `json:"tools,omitempty"`
+	ContextManagement json.RawMessage `json:"context_management,omitempty"`
+	OutputConfig      json.RawMessage `json:"output_config,omitempty"`
+	OutputFormat      json.RawMessage `json:"output_format,omitempty"`
+	Container         json.RawMessage `json:"container,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	Thinking          json.RawMessage `json:"thinking,omitempty"`
+	MCPServers        json.RawMessage `json:"mcp_servers,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
+}
+
+type ccmaxDistilledCacheCreation struct {
+	Ephemeral5MInputTokens int64 `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1HInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+}
+
+type ccmaxDistilledUsageIteration struct {
+	InputTokens              int64                       `json:"input_tokens"`
+	OutputTokens             int64                       `json:"output_tokens"`
+	CacheReadInputTokens     int64                       `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                       `json:"cache_creation_input_tokens"`
+	CacheCreation            ccmaxDistilledCacheCreation `json:"cache_creation"`
+	Type                     string                      `json:"type"`
 }
 
 type CCMaxCompatibilityRetryMode string
@@ -135,6 +176,13 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 	if model == "" {
 		return nil, fmt.Errorf("invalid Anthropic message request: model is required")
 	}
+	if input.NormalRequestMode {
+		var err error
+		body, err = normalizeCCMaxDistilledRequestBody(body, model)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if strings.TrimSpace(input.Model) == "" {
 		input.Model = model
 	}
@@ -162,16 +210,14 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		}
 	} else {
 		if mimic {
-			var system any
-			if raw := gjson.GetBytes(body, "system"); raw.Exists() {
-				_ = json.Unmarshal([]byte(raw.Raw), &system)
+			if !input.NormalRequestMode {
+				var system any
+				if raw := gjson.GetBytes(body, "system"); raw.Exists() {
+					_ = json.Unmarshal([]byte(raw.Raw), &system)
+				}
+				body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
 			}
-			expansionPrompt := ""
-			if input.NormalRequestMode {
-				expansionPrompt = ccmaxNormalRequestExpansionPrompt
-			}
-			body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, expansionPrompt, "")
-			opts := claudeOAuthNormalizeOptions{}
+			opts := claudeOAuthNormalizeOptions{stripSystemCacheControl: input.NormalRequestMode}
 			if metadataUserID == "" && input.Fingerprint != nil {
 				userID := strings.TrimSpace(input.ClaudeUserID)
 				if userID == "" {
@@ -219,6 +265,9 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		body = FilterWebSearchHistoryBlocks(body, model)
 		body = FilterThinkingBlocks(body, model)
 	}
+	if input.NormalRequestMode && isCCMaxDistilledFable5(input.Model) {
+		body = stripCCMaxDistilledFableControls(body)
+	}
 
 	logicalBody := append([]byte(nil), body...)
 	body, headers, err := finalizeCCMaxCompatibilityWire(input, logicalBody, model, mimic)
@@ -229,8 +278,41 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 	return &CCMaxCompatibilityPrepared{
 		Body: body, LogicalBody: logicalBody, Headers: headers,
 		OriginalModel: originalModel, Model: model,
-		Mimic: mimic, ClaudeCode: claudeCode, ToolRewrite: toolRewrite, input: input,
+		Mimic: mimic, ClaudeCode: claudeCode, Distilled: input.NormalRequestMode,
+		ToolRewrite: toolRewrite, input: input,
 	}, nil
+}
+
+func normalizeCCMaxDistilledRequestBody(body []byte, model string) ([]byte, error) {
+	var request ccmaxDistilledClaudeRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, fmt.Errorf("invalid Anthropic message request: %w", err)
+	}
+	if isCCMaxDistilledFable5(model) {
+		request.Temperature = nil
+		request.TopP = nil
+		request.TopK = nil
+		request.Thinking = nil
+	}
+	normalized, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize distilled Anthropic request: %w", err)
+	}
+	return normalized, nil
+}
+
+func isCCMaxDistilledFable5(model string) bool {
+	value := strings.ToLower(strings.TrimSpace(model))
+	return value == "claude-fable-5" || strings.HasPrefix(value, "claude-fable-5-")
+}
+
+func stripCCMaxDistilledFableControls(body []byte) []byte {
+	for _, path := range []string{"temperature", "top_p", "top_k", "thinking"} {
+		if next, err := sjson.DeleteBytes(body, path); err == nil {
+			body = next
+		}
+	}
+	return body
 }
 
 func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody []byte, model string, mimic bool) ([]byte, http.Header, error) {
@@ -387,6 +469,40 @@ func RestoreCCMaxCompatibilityResponse(body []byte, prepared *CCMaxCompatibility
 		}
 	}
 	return body
+}
+
+// NormalizeCCMaxDistilledResponse adds the per-request usage iteration exposed
+// by the distilled channel. Existing iterations and thinking signatures are
+// preserved byte-for-byte; the same function works for non-stream messages and
+// message_delta SSE payloads because both place final usage at the top level.
+func NormalizeCCMaxDistilledResponse(body []byte) []byte {
+	usage := gjson.GetBytes(body, "usage")
+	if !usage.Exists() || usage.Get("iterations").Exists() {
+		return body
+	}
+	if !usage.Get("input_tokens").Exists() && !usage.Get("output_tokens").Exists() {
+		return body
+	}
+	iteration := ccmaxDistilledUsageIteration{
+		InputTokens:              usage.Get("input_tokens").Int(),
+		OutputTokens:             usage.Get("output_tokens").Int(),
+		CacheReadInputTokens:     usage.Get("cache_read_input_tokens").Int(),
+		CacheCreationInputTokens: usage.Get("cache_creation_input_tokens").Int(),
+		CacheCreation: ccmaxDistilledCacheCreation{
+			Ephemeral5MInputTokens: usage.Get("cache_creation.ephemeral_5m_input_tokens").Int(),
+			Ephemeral1HInputTokens: usage.Get("cache_creation.ephemeral_1h_input_tokens").Int(),
+		},
+		Type: "message",
+	}
+	encoded, err := json.Marshal([]ccmaxDistilledUsageIteration{iteration})
+	if err != nil {
+		return body
+	}
+	normalized, err := sjson.SetRawBytes(body, "usage.iterations", encoded)
+	if err != nil {
+		return body
+	}
+	return normalized
 }
 
 // GenerateCCMaxCompatibilitySessionHash exposes the original three-level

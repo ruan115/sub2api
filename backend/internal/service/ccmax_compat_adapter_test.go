@@ -158,18 +158,41 @@ func TestPrepareCCMaxCompatibilityRequestCanForceChatMimicry(t *testing.T) {
 	require.False(t, prepared.ClaudeCode)
 }
 
-func TestPrepareCCMaxCompatibilityRequestNormalModeKeepsMimicryWithNeutralExpansion(t *testing.T) {
-	body := []byte(`{"model":"claude-fable-5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurface(t *testing.T) {
+	body := []byte(`{"unknown":{"drop":true},"model":"claude-fable-5","system":"Keep this system prompt.","stream":true,"max_tokens":64,"temperature":999,"top_p":999,"top_k":-1,"thinking":{"type":"enabled","budget_tokens":1024},"stop_sequences":["END"],"tools":[{"name":"read.file","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"read.file"},"messages":[{"role":"user","content":"hi"}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
 		Body: body, Model: "claude-fable-5", Stream: true, OAuth: true,
 		AccessToken: "token", NormalRequestMode: true,
 	})
 	require.NoError(t, err)
 	require.True(t, prepared.Mimic)
-	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
-	require.Equal(t, ccmaxNormalRequestExpansionPrompt, gjson.GetBytes(prepared.Body, "system.2.text").String())
-	require.NotContains(t, string(prepared.Body), "authorized security testing")
+	require.True(t, prepared.Distilled)
+	require.Equal(t, "Keep this system prompt.", gjson.GetBytes(prepared.Body, "system").String())
+	require.NotContains(t, string(prepared.Body), "x-anthropic-billing-header")
+	for _, path := range []string{"unknown", "temperature", "top_p", "top_k", "thinking"} {
+		require.False(t, gjson.GetBytes(prepared.Body, path).Exists(), path)
+	}
+	require.Equal(t, "END", gjson.GetBytes(prepared.Body, "stop_sequences.0").String())
+	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tools.0.name").String())
+	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tool_choice.name").String())
 	require.Contains(t, getHeaderRaw(prepared.Headers, "anthropic-beta"), "claude-code-20250219")
+}
+
+func TestNormalizeCCMaxDistilledResponseAddsIterationsAndPreservesSignature(t *testing.T) {
+	body := []byte(`{"type":"message","content":[{"type":"thinking","thinking":"","signature":"signed-thinking"},{"type":"text","text":"ok"}],"usage":{"input_tokens":23,"output_tokens":33,"cache_read_input_tokens":4,"cache_creation_input_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":5},"output_tokens_details":{"thinking_tokens":21}}}`)
+	normalized := NormalizeCCMaxDistilledResponse(body)
+	require.Equal(t, "signed-thinking", gjson.GetBytes(normalized, "content.0.signature").String())
+	require.EqualValues(t, 23, gjson.GetBytes(normalized, "usage.iterations.0.input_tokens").Int())
+	require.EqualValues(t, 33, gjson.GetBytes(normalized, "usage.iterations.0.output_tokens").Int())
+	require.EqualValues(t, 4, gjson.GetBytes(normalized, "usage.iterations.0.cache_read_input_tokens").Int())
+	require.EqualValues(t, 7, gjson.GetBytes(normalized, "usage.iterations.0.cache_creation_input_tokens").Int())
+	require.EqualValues(t, 2, gjson.GetBytes(normalized, "usage.iterations.0.cache_creation.ephemeral_5m_input_tokens").Int())
+	require.EqualValues(t, 5, gjson.GetBytes(normalized, "usage.iterations.0.cache_creation.ephemeral_1h_input_tokens").Int())
+	require.Equal(t, "message", gjson.GetBytes(normalized, "usage.iterations.0.type").String())
+	require.EqualValues(t, 21, gjson.GetBytes(normalized, "usage.output_tokens_details.thinking_tokens").Int())
+
+	again := NormalizeCCMaxDistilledResponse(normalized)
+	require.JSONEq(t, string(normalized), string(again))
 }
 
 func TestPrepareCCMaxCompatibilityCountTokensUsesOriginalSanitizer(t *testing.T) {

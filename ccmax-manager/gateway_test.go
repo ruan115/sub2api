@@ -114,7 +114,7 @@ func TestOAuthGatewayMimicsClaudeCodeAndFiltersHeaders(t *testing.T) {
 	}
 }
 
-func TestOAuthGatewayUsesGroupNormalRequestMode(t *testing.T) {
+func TestOAuthGatewayUsesGroupDistilledCompatibilityMode(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	captured := make(chan capturedClaudeRequest, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,14 +122,14 @@ func TestOAuthGatewayUsesGroupNormalRequestMode(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		captured <- capturedClaudeRequest{Header: r.Header.Clone(), Body: body}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_normal","usage":{"input_tokens":2,"output_tokens":1}}`))
+		_, _ = w.Write([]byte(`{"id":"msg_normal","type":"message","content":[{"type":"thinking","thinking":"","signature":"signed-thinking"},{"type":"text","text":"PARAM_OK"}],"usage":{"input_tokens":20,"output_tokens":27,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens_details":{"thinking_tokens":18}}}`))
 	}))
 	defer upstream.Close()
 
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
-		"name": "A 分组", "description": "普通客户端", "rate_multiplier": 1,
+		"name": "A 分组", "description": "蒸馏兼容", "rate_multiplier": 1,
 		"status": "active", "normal_request_mode": true,
 	}, http.StatusOK, nil)
 	key := createGatewayTestKey(t, handler)
@@ -137,7 +137,7 @@ func TestOAuthGatewayUsesGroupNormalRequestMode(t *testing.T) {
 		"access_token": "oauth-token", "account_uuid": "account-uuid",
 	})
 
-	body := []byte(`{"model":"claude-fable-5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"unknown":{"drop":true},"model":"claude-fable-5","system":"Keep this system prompt.","max_tokens":64,"temperature":999,"top_p":999,"top_k":-1,"thinking":{"type":"enabled","budget_tokens":1024},"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"}]}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+key.Key)
 	request.Header.Set("Content-Type", "application/json")
@@ -148,20 +148,129 @@ func TestOAuthGatewayUsesGroupNormalRequestMode(t *testing.T) {
 	}
 
 	got := <-captured
-	system, _ := got.Body["system"].([]any)
-	if len(system) != 3 {
-		t.Fatalf("system blocks=%d body=%#v", len(system), got.Body)
+	if got.Body["system"] != "Keep this system prompt." {
+		t.Fatalf("distilled system=%#v", got.Body["system"])
 	}
-	expansion, _ := system[2].(map[string]any)["text"].(string)
-	if !strings.Contains(expansion, "interactive assistant") || strings.Contains(expansion, "authorized security testing") {
-		t.Fatalf("normal request expansion=%q", expansion)
+	for _, field := range []string{"unknown", "temperature", "top_p", "top_k", "thinking"} {
+		if _, exists := got.Body[field]; exists {
+			t.Fatalf("distilled request retained %s: %#v", field, got.Body[field])
+		}
 	}
-	billing, _ := system[0].(map[string]any)["text"].(string)
-	if !strings.HasPrefix(billing, "x-anthropic-billing-header: cc_version="+claudeCLIVersion+".") {
-		t.Fatalf("billing block=%q", billing)
+	if stops, _ := got.Body["stop_sequences"].([]any); len(stops) != 1 || stops[0] != "END" {
+		t.Fatalf("distilled stop sequences=%#v", got.Body["stop_sequences"])
 	}
 	if got.Header.Get("X-App") != "cli" || !strings.Contains(got.Header.Get("anthropic-beta"), "claude-code-20250219") {
-		t.Fatalf("normal mode lost OAuth mimicry headers: %#v", got.Header)
+		t.Fatalf("distilled mode lost OAuth headers: %#v", got.Header)
+	}
+	if gjson.Get(response.Body.String(), "content.0.signature").String() != "signed-thinking" {
+		t.Fatalf("thinking signature changed: %s", response.Body.String())
+	}
+	if gjson.Get(response.Body.String(), "usage.iterations.0.input_tokens").Int() != 20 ||
+		gjson.Get(response.Body.String(), "usage.iterations.0.output_tokens").Int() != 27 ||
+		gjson.Get(response.Body.String(), "usage.iterations.0.type").String() != "message" {
+		t.Fatalf("distilled usage iterations=%s", response.Body.String())
+	}
+}
+
+func TestDistilledCompatibilityStreamPreservesSignatureAndAddsIterations(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":23,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"stream-signature\"}}\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":33,\"output_tokens_details\":{\"thinking_tokens\":21}}}\n\n")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "蒸馏兼容", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": true,
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "distilled-stream", upstream.URL, 0, nil, map[string]any{
+		"access_token": "oauth-token", "account_uuid": "account-uuid",
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-fable-5","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	var signatureSeen, finalUsageSeen bool
+	for _, line := range strings.Split(response.Body.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if gjson.Get(payload, "delta.type").String() == "signature_delta" {
+			signatureSeen = gjson.Get(payload, "delta.signature").String() == "stream-signature"
+		}
+		if gjson.Get(payload, "type").String() == "message_delta" {
+			finalUsageSeen = gjson.Get(payload, "usage.input_tokens").Int() == 23 &&
+				gjson.Get(payload, "usage.output_tokens").Int() == 33 &&
+				gjson.Get(payload, "usage.iterations.0.input_tokens").Int() == 23 &&
+				gjson.Get(payload, "usage.iterations.0.output_tokens").Int() == 33 &&
+				gjson.Get(payload, "usage.iterations.0.type").String() == "message"
+		}
+	}
+	if !signatureSeen || !finalUsageSeen {
+		t.Fatalf("distilled stream signature=%v final_usage=%v body=%s", signatureSeen, finalUsageSeen, response.Body.String())
+	}
+}
+
+func TestDistilledCompatibilityPreservesDottedToolCalls(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		encoded, _ := json.Marshal(body)
+		if gjson.GetBytes(encoded, "tools.0.name").String() != "read.file" ||
+			gjson.GetBytes(encoded, "tool_choice.name").String() != "read.file" {
+			t.Errorf("distilled tool request=%#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","model":"claude-fable-5","content":[{"type":"tool_use","id":"toolu_1","name":"read.file","input":{"path":"/tmp/audit"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","usage":{"input_tokens":515,"output_tokens":38,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`)
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "蒸馏兼容", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": true,
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "distilled-tool", upstream.URL, 0, nil, map[string]any{
+		"access_token": "oauth-token", "account_uuid": "account-uuid",
+	})
+
+	payload := map[string]any{
+		"model": "claude-fable-5", "max_tokens": 256,
+		"messages": []any{map[string]any{"role": "user", "content": "Call read.file."}},
+		"tools": []any{map[string]any{
+			"name": "read.file", "description": "Read a file",
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}, "required": []string{"path"}},
+		}},
+		"tool_choice": map[string]any{"type": "tool", "name": "read.file"},
+	}
+	var response map[string]any
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", payload, nil, key.Key, http.StatusOK, &response)
+	encoded, _ := json.Marshal(response)
+	if gjson.GetBytes(encoded, "content.0.name").String() != "read.file" ||
+		gjson.GetBytes(encoded, "content.0.input.path").String() != "/tmp/audit" ||
+		gjson.GetBytes(encoded, "content.0.caller.type").String() != "direct" ||
+		gjson.GetBytes(encoded, "usage.iterations.0.input_tokens").Int() != 515 {
+		t.Fatalf("distilled tool response=%s", encoded)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	sub2claude "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type gatewayKey struct {
@@ -769,7 +770,7 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 				return usage, errors.New("upstream stream returned an error event")
 			}
 			if clientWriteErr == nil {
-				if _, writeErr := w.Write(restoreGatewaySSEBlock(block, prepared)); writeErr != nil {
+				if _, writeErr := w.Write(restoreGatewaySSEBlock(block, prepared, usage)); writeErr != nil {
 					clientWriteErr = writeErr
 				}
 			}
@@ -823,10 +824,14 @@ func restoreGatewayResponse(body []byte, prepared claudePreparedRequest) []byte 
 	if prepared.Passthrough || prepared.Compat == nil {
 		return body
 	}
-	return sub2service.RestoreCCMaxCompatibilityResponse(body, prepared.Compat)
+	body = sub2service.RestoreCCMaxCompatibilityResponse(body, prepared.Compat)
+	if prepared.Compat.Distilled {
+		body = sub2service.NormalizeCCMaxDistilledResponse(body)
+	}
+	return body
 }
 
-func restoreGatewaySSELine(line []byte, prepared claudePreparedRequest) []byte {
+func restoreGatewaySSELine(line []byte, prepared claudePreparedRequest, usage tokenUsage) []byte {
 	if prepared.Passthrough || prepared.Compat == nil {
 		return line
 	}
@@ -839,6 +844,10 @@ func restoreGatewaySSELine(line []byte, prepared claudePreparedRequest) []byte {
 		return line
 	}
 	restored := sub2service.RestoreCCMaxCompatibilityResponse(payload, prepared.Compat)
+	if prepared.Compat.Distilled {
+		restored = patchCCMaxDistilledStreamUsage(restored, usage)
+		restored = sub2service.NormalizeCCMaxDistilledResponse(restored)
+	}
 	ending := []byte{}
 	if bytes.HasSuffix(line, []byte("\r\n")) {
 		ending = []byte("\r\n")
@@ -849,7 +858,7 @@ func restoreGatewaySSELine(line []byte, prepared claudePreparedRequest) []byte {
 	return append(result, ending...)
 }
 
-func restoreGatewaySSEBlock(block []byte, prepared claudePreparedRequest) []byte {
+func restoreGatewaySSEBlock(block []byte, prepared claudePreparedRequest, usage tokenUsage) []byte {
 	if prepared.Passthrough || prepared.Compat == nil {
 		return block
 	}
@@ -857,10 +866,41 @@ func restoreGatewaySSEBlock(block []byte, prepared claudePreparedRequest) []byte
 	var restored []byte
 	for _, line := range lines {
 		if len(line) > 0 {
-			restored = append(restored, restoreGatewaySSELine(line, prepared)...)
+			restored = append(restored, restoreGatewaySSELine(line, prepared, usage)...)
 		}
 	}
 	return restored
+}
+
+func patchCCMaxDistilledStreamUsage(body []byte, usage tokenUsage) []byte {
+	if gjson.GetBytes(body, "type").String() != "message_delta" || !gjson.GetBytes(body, "usage").Exists() {
+		return body
+	}
+	updates := []struct {
+		path  string
+		value int64
+	}{
+		{"usage.input_tokens", usage.Input},
+		{"usage.output_tokens", usage.Output},
+		{"usage.cache_creation_input_tokens", usage.CacheCreation},
+		{"usage.cache_read_input_tokens", usage.CacheRead},
+	}
+	for _, update := range updates {
+		if next, err := sjson.SetBytes(body, update.path, update.value); err == nil {
+			body = next
+		}
+	}
+	for _, path := range []string{
+		"usage.cache_creation.ephemeral_5m_input_tokens",
+		"usage.cache_creation.ephemeral_1h_input_tokens",
+	} {
+		if !gjson.GetBytes(body, path).Exists() {
+			if next, err := sjson.SetBytes(body, path, 0); err == nil {
+				body = next
+			}
+		}
+	}
+	return body
 }
 
 func gatewaySSEEvent(block []byte) (string, []byte) {
