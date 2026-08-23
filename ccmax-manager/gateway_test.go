@@ -148,13 +148,22 @@ func TestOAuthGatewayUsesGroupDistilledCompatibilityMode(t *testing.T) {
 	}
 
 	got := <-captured
-	if got.Body["system"] != "Keep this system prompt." {
+	system, _ := got.Body["system"].([]any)
+	if len(system) != 3 || system[2].(map[string]any)["text"] != "Keep this system prompt." {
 		t.Fatalf("distilled system=%#v", got.Body["system"])
 	}
-	for _, field := range []string{"unknown", "temperature", "top_p", "top_k", "thinking"} {
+	if !strings.Contains(system[0].(map[string]any)["text"].(string), "x-anthropic-billing-header") ||
+		system[1].(map[string]any)["text"] != claudeCodeSystemPrompt {
+		t.Fatalf("distilled OAuth identity blocks=%#v", got.Body["system"])
+	}
+	for _, field := range []string{"unknown", "temperature", "top_p", "top_k"} {
 		if _, exists := got.Body[field]; exists {
 			t.Fatalf("distilled request retained %s: %#v", field, got.Body[field])
 		}
+	}
+	thinking, _ := got.Body["thinking"].(map[string]any)
+	if thinking["type"] != "adaptive" {
+		t.Fatalf("distilled adaptive thinking=%#v", got.Body["thinking"])
 	}
 	if stops, _ := got.Body["stop_sequences"].([]any); len(stops) != 1 || stops[0] != "END" {
 		t.Fatalf("distilled stop sequences=%#v", got.Body["stop_sequences"])

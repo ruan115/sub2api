@@ -42,8 +42,9 @@ type CCMaxCompatibilityInput struct {
 	// Sub2API's Chat Completions handler, regardless of the caller User-Agent.
 	ForceNonClaudeCode bool
 	// NormalRequestMode selects the distilled-compatible lane observed from the
-	// configured upstream: no Claude Code system injection, a strict Anthropic
-	// top-level field set, and Fable 5 sampling controls removed. The default
+	// configured upstream: only the minimum OAuth identity blocks are added, the
+	// original system prompt remains a system prompt, unsupported top-level
+	// fields are dropped, and client Fable 5 controls are ignored. The default
 	// false value preserves the original Sub2API lane.
 	NormalRequestMode bool
 	// MCPToolNames rewrites mimicked tool names into the mcp__<server>__<tool>
@@ -66,6 +67,11 @@ type CCMaxCompatibilityPrepared struct {
 	ToolRewrite   *ToolNameRewrite
 	input         CCMaxCompatibilityInput
 }
+
+const ccmaxDistilledOAuthSystemBlocks = `[
+	{"type":"text","text":"{billing_header}"},
+	{"type":"text","text":"{claude_code_system_prompt}"}
+]`
 
 // ccmaxDistilledClaudeRequest mirrors the effective Anthropic request surface
 // exposed by the New API channel in front of the distilled upstream. RawMessage
@@ -210,14 +216,16 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		}
 	} else {
 		if mimic {
-			if !input.NormalRequestMode {
-				var system any
-				if raw := gjson.GetBytes(body, "system"); raw.Exists() {
-					_ = json.Unmarshal([]byte(raw.Raw), &system)
-				}
+			var system any
+			if raw := gjson.GetBytes(body, "system"); raw.Exists() {
+				_ = json.Unmarshal([]byte(raw.Raw), &system)
+			}
+			if input.NormalRequestMode {
+				body = rewriteCCMaxDistilledSystem(body)
+			} else {
 				body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
 			}
-			opts := claudeOAuthNormalizeOptions{stripSystemCacheControl: input.NormalRequestMode}
+			opts := claudeOAuthNormalizeOptions{}
 			if metadataUserID == "" && input.Fingerprint != nil {
 				userID := strings.TrimSpace(input.ClaudeUserID)
 				if userID == "" {
@@ -266,7 +274,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		body = FilterThinkingBlocks(body, model)
 	}
 	if input.NormalRequestMode && isCCMaxDistilledFable5(input.Model) {
-		body = stripCCMaxDistilledFableControls(body)
+		body = applyCCMaxDistilledFableControls(body, !input.CountTokens)
 	}
 
 	logicalBody := append([]byte(nil), body...)
@@ -306,13 +314,55 @@ func isCCMaxDistilledFable5(model string) bool {
 	return value == "claude-fable-5" || strings.HasPrefix(value, "claude-fable-5-")
 }
 
-func stripCCMaxDistilledFableControls(body []byte) []byte {
-	for _, path := range []string{"temperature", "top_p", "top_k", "thinking"} {
+func applyCCMaxDistilledFableControls(body []byte, adaptiveThinking bool) []byte {
+	for _, path := range []string{"temperature", "top_p", "top_k"} {
 		if next, err := sjson.DeleteBytes(body, path); err == nil {
 			body = next
 		}
 	}
+	if adaptiveThinking {
+		if next, err := sjson.SetRawBytes(body, "thinking", []byte(`{"type":"adaptive"}`)); err == nil {
+			body = next
+		}
+		if !gjson.GetBytes(body, "context_management").Exists() {
+			const contextManagement = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
+			if next, err := sjson.SetRawBytes(body, "context_management", []byte(contextManagement)); err == nil {
+				body = next
+			}
+		}
+	}
 	return body
+}
+
+// rewriteCCMaxDistilledSystem keeps client system instructions in the system
+// field while adding only the two identity blocks required by direct Anthropic
+// OAuth. The larger Sub2API expansion prompt is intentionally not injected.
+func rewriteCCMaxDistilledSystem(body []byte) []byte {
+	identityBlocks, err := buildClaudeOAuthSystemPromptBlocksJSON(body, "", ccmaxDistilledOAuthSystemBlocks)
+	if err != nil {
+		return body
+	}
+	items := append([][]byte(nil), identityBlocks...)
+	original := gjson.GetBytes(body, "system")
+	switch {
+	case original.Type == gjson.String && strings.TrimSpace(original.String()) != "":
+		block, err := json.Marshal(map[string]any{"type": "text", "text": original.String()})
+		if err == nil {
+			items = append(items, block)
+		}
+	case original.IsArray():
+		original.ForEach(func(_, item gjson.Result) bool {
+			items = append(items, []byte(item.Raw))
+			return true
+		})
+	case original.Exists() && original.Raw != "null":
+		items = append(items, []byte(original.Raw))
+	}
+	result, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(items))
+	if !ok {
+		return body
+	}
+	return result
 }
 
 func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody []byte, model string, mimic bool) ([]byte, http.Header, error) {

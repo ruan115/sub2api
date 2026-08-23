@@ -167,11 +167,15 @@ func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurfac
 	require.NoError(t, err)
 	require.True(t, prepared.Mimic)
 	require.True(t, prepared.Distilled)
-	require.Equal(t, "Keep this system prompt.", gjson.GetBytes(prepared.Body, "system").String())
-	require.NotContains(t, string(prepared.Body), "x-anthropic-billing-header")
-	for _, path := range []string{"unknown", "temperature", "top_p", "top_k", "thinking"} {
+	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
+	require.Contains(t, gjson.GetBytes(prepared.Body, "system.0.text").String(), "x-anthropic-billing-header")
+	require.Equal(t, claudeCodeSystemPrompt, gjson.GetBytes(prepared.Body, "system.1.text").String())
+	require.Equal(t, "Keep this system prompt.", gjson.GetBytes(prepared.Body, "system.2.text").String())
+	require.NotContains(t, string(prepared.Body), "authorized security testing")
+	for _, path := range []string{"unknown", "temperature", "top_p", "top_k"} {
 		require.False(t, gjson.GetBytes(prepared.Body, path).Exists(), path)
 	}
+	require.Equal(t, "adaptive", gjson.GetBytes(prepared.Body, "thinking.type").String())
 	require.Equal(t, "END", gjson.GetBytes(prepared.Body, "stop_sequences.0").String())
 	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tools.0.name").String())
 	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tool_choice.name").String())
