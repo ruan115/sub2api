@@ -990,6 +990,61 @@ tbody tr:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.usage-table {
+  width: 100%;
+  table-layout: fixed;
+}
+.usage-table th,
+.usage-table td {
+  overflow: hidden;
+  padding-right: 6px;
+  padding-left: 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-table .row-title,
+.usage-table .row-subtitle {
+  max-width: 100%;
+  white-space: nowrap;
+}
+.recent-usage-table th:nth-child(1) {
+  width: 11%;
+}
+.recent-usage-table th:nth-child(2) {
+  width: 15%;
+}
+.recent-usage-table th:nth-child(3) {
+  width: 19%;
+}
+.recent-usage-table th:nth-child(4) {
+  width: 17%;
+}
+.recent-usage-table th:nth-child(5) {
+  width: 14%;
+}
+.recent-usage-table th:nth-child(6),
+.recent-usage-table th:nth-child(7),
+.recent-usage-table th:nth-child(8) {
+  width: 8%;
+}
+.billing-usage-table th:nth-child(1) {
+  width: 10%;
+}
+.billing-usage-table th:nth-child(2) {
+  width: 7%;
+}
+.billing-usage-table th:nth-child(3) {
+  width: 16%;
+}
+.billing-usage-table th:nth-child(4) {
+  width: 14%;
+}
+.billing-usage-table th:nth-child(5) {
+  width: 11%;
+}
+.billing-usage-table th:nth-child(n + 6) {
+  width: 7%;
+}
 .pill {
   display: inline-flex;
   align-items: center;
@@ -2740,6 +2795,12 @@ label small {
   .table-pagination {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .recent-usage-table {
+    min-width: 780px;
+  }
+  .billing-usage-table {
+    min-width: 960px;
   }
   .pagination-controls {
     justify-content: space-between;

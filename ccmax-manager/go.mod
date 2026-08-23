@@ -9,6 +9,8 @@ require (
 )
 
 require (
+	github.com/andybalholm/brotli v1.2.0
+	github.com/klauspost/compress v1.18.2
 	github.com/tidwall/gjson v1.18.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.56.0
@@ -19,7 +21,6 @@ require (
 	entgo.io/ent v0.14.5 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
 	github.com/alitto/pond/v2 v2.6.2 // indirect
-	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.5 // indirect
 	github.com/aws/smithy-go v1.24.2 // indirect
@@ -59,7 +60,6 @@ require (
 	github.com/hashicorp/hcl/v2 v2.18.1 // indirect
 	github.com/icholy/digest v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/leodido/go-urn v1.2.4 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect

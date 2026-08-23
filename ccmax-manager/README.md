@@ -125,9 +125,9 @@ OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system
 - 输入 Claude Session Key，服务端通过该账号绑定的独享代理完成组织查询、授权码申请和 Token 交换。
 - 获取 OAuth 链接，在浏览器完成授权后粘贴 `code#state`，由服务端换取并保存 Token。
 
-选择“Setup Token”时使用 inference-only scope；选择“OAuth”时使用完整配额 scope。Session Key、授权码和 Token 不会返回到账户列表，也不会以明文写入审计日志。
+选择“Setup Token”时使用 inference-only scope；选择“OAuth”时使用完整配额 scope。完整 Session Key、授权码和 Token 不会返回到账户列表，也不会以明文写入审计日志；系统仅保存不可逆的 Session Key 脱敏标识用于流水追踪。
 
-批量上号页面按行接收 Session Key。每次组织查询、授权码申请和 Token 交换都强制经过本次分配的代理；授权成功后才创建账号并占用该代理。失败项不会创建账号，结果与授权日志会保留失败原因和代理 IP，但不会记录 Session Key。
+批量上号页面按行接收 Session Key。每次组织查询、授权码申请和 Token 交换都强制经过本次分配的代理；授权成功后才创建账号并占用该代理。失败项不会创建账号，结果与授权日志会保留失败原因和代理 IP，但不会记录完整 Session Key。
 
 OAuth 账号可以在列表中主动刷新 5h/7d 配额。正常 API 调度也会解析 Anthropic 限流响应头，更新配额、刷新时间和账号授权状态。
 

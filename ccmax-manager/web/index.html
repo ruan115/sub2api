@@ -231,12 +231,12 @@
               </button>
             </div>
             <div class="table-wrap">
-              <table>
+              <table class="usage-table recent-usage-table">
                 <thead>
                   <tr>
                     <th>时间</th>
                     <th>用途 / 分组</th>
-                    <th>SK</th>
+                    <th>账号授权 SK</th>
                     <th>账号</th>
                     <th>模型</th>
                     <th class="num">Tokens</th>
@@ -419,7 +419,7 @@
               <span class="section-count">每个账号独享一个代理 IP</span>
             </div>
             <form id="batch-auth-form" class="batch-auth-grid">
-              <label class="span-2"><span>Claude Session Keys</span><textarea id="batch-session-keys" rows="12" spellcheck="false" placeholder="每行一个 sk-ant-sid..." required></textarea><small>成功后读取 Token 中的邮箱作为账号名称；Session Key 不会写入日志或数据库。</small></label>
+              <label class="span-2"><span>Claude Session Keys</span><textarea id="batch-session-keys" rows="12" spellcheck="false" placeholder="每行一个 sk-ant-sid..." required></textarea><small>成功后读取 Token 中的邮箱作为账号名称；完整 Session Key 不会写入日志或数据库，仅保存不可逆的脱敏标识用于流水追踪。</small></label>
               <label><span>代理池</span><select id="batch-proxy-pool" required></select></label>
               <label><span>授权类型</span><select id="batch-auth-type"><option value="oauth">OAuth · 完整配额</option><option value="setup_token">Setup Token · 推理权限</option></select></label>
               <label><span>账号价格 USD</span><input id="batch-account-price" type="number" min="0" step="0.01" value="0" /></label>
@@ -608,9 +608,9 @@
                 <option value="">全部用途</option>
               </select></label
             ><label
-              ><span>SK</span
+              ><span>调用 Key</span
               ><select id="billing-api-key">
-                <option value="">全部 SK</option>
+                <option value="">全部调用 Key</option>
               </select></label
             ><button class="button secondary" id="apply-billing-filters">
               查询
@@ -627,7 +627,7 @@
             <div class="tabs" id="breakdown-tabs">
               <button class="active" data-breakdown="group">按分组</button
               ><button data-breakdown="account">按账号</button
-              ><button data-breakdown="key">按 SK</button
+              ><button data-breakdown="key">按调用 Key</button
               ><button data-breakdown="purpose">按用途</button>
             </div>
             <div id="breakdown-list" class="breakdown-list"></div>
@@ -646,12 +646,12 @@
               </button>
             </div>
             <div class="table-wrap">
-              <table>
+              <table class="usage-table billing-usage-table">
                 <thead>
                   <tr>
                     <th>请求 / 时间</th>
                     <th>用途</th>
-                    <th>SK</th>
+                    <th>账号授权 SK</th>
                     <th>账号</th>
                     <th>模型</th>
                     <th class="num">输入</th>

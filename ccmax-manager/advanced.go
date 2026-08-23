@@ -100,6 +100,7 @@ func (a *app) migrateAdvancedFeatures() error {
 		}
 	}
 	accountColumns := []struct{ name, definition string }{
+		{"source_sk_hint", "TEXT NOT NULL DEFAULT ''"},
 		{"auth_status", "TEXT NOT NULL DEFAULT 'unknown'"},
 		{"auth_error", "TEXT NOT NULL DEFAULT ''"},
 		{"auth_checked_at", "TEXT"},
@@ -127,6 +128,7 @@ func (a *app) migrateAdvancedFeatures() error {
 	usageColumns := []struct{ name, definition string }{
 		{"user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"},
 		{"api_key_id", "INTEGER REFERENCES api_keys(id) ON DELETE SET NULL"},
+		{"account_sk_hint", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range usageColumns {
 		if err := addColumnIfMissing(a.db, "usage_logs", column.name, column.definition); err != nil {

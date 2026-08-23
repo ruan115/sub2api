@@ -233,6 +233,16 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	if accountCount != 2 || distinctProxyCount != 2 || authorizationCount != 3 {
 		t.Fatalf("account/proxy/auth counts = %d/%d/%d", accountCount, distinctProxyCount, authorizationCount)
 	}
+	var firstHint, secondHint string
+	if err := a.db.QueryRow(`SELECT source_sk_hint FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&firstHint); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT source_sk_hint FROM accounts WHERE id = ?`, result.Items[1].AccountID).Scan(&secondHint); err != nil {
+		t.Fatal(err)
+	}
+	if firstHint != sourceSKHint("first") || secondHint != sourceSKHint("second") {
+		t.Fatalf("source SK hints = %q/%q", firstHint, secondHint)
+	}
 }
 
 func TestVisiblePagesRestrictOrdinaryAndReadOnlyUsers(t *testing.T) {

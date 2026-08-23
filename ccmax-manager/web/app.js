@@ -1308,14 +1308,10 @@ function renderBreakdown() {
         .join("")
     : '<div class="empty-state"><strong>暂无拆分数据</strong></div>';
 }
-function usageKeyCell(item) {
-  if (!item.api_key_id)
-    return '<span class="muted" title="非网关调用，例如手动记录用量">手动记录</span>';
-  const name = item.api_key_name || `#${item.api_key_id}`;
-  const prefix = item.api_key_prefix
-    ? `<span class="row-subtitle mono">${escapeHTML(item.api_key_prefix)}••••</span>`
-    : "";
-  return `<span class="row-title" title="${escapeHTML(name)}">${escapeHTML(name)}</span>${prefix}`;
+function usageAccountSKCell(item) {
+  if (!item.account_sk_hint)
+    return '<span class="muted" title="OAuth 授权或该流水产生时尚未保存账号授权 SK 的脱敏标识">未记录</span>';
+  return `<span class="row-title mono" title="${escapeHTML(item.account_sk_hint)}">${escapeHTML(item.account_sk_hint)}</span>`;
 }
 function usageRows(items, compactMode) {
   if (!items?.length)
@@ -1330,8 +1326,8 @@ function usageRows(items, compactMode) {
         item.cache_creation_tokens +
         item.cache_read_tokens;
       if (compactMode)
-        return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageKeyCell(item)}</td><td>${escapeHTML(item.account_name)}</td><td class="mono">${escapeHTML(item.model)}</td><td class="num mono">${compact(total)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td></tr>`;
-      return `<tr><td><span class="mono">${escapeHTML(item.request_id)}</span><span class="row-subtitle">${dateTime(item.created_at)}</span></td><td><span class="row-title">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageKeyCell(item)}</td><td>${escapeHTML(item.account_name)}</td><td class="mono">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
+        return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(total)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td></tr>`;
+      return `<tr><td><span class="mono row-title" title="${escapeHTML(item.request_id)}">${escapeHTML(item.request_id)}</span><span class="row-subtitle">${dateTime(item.created_at)}</span></td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
     })
     .join("");
 }
@@ -1362,7 +1358,7 @@ function populateSelects() {
     `<option value="">全部用途</option>${purposeOptions}`;
   const keyFilter = $("#billing-api-key");
   const selectedKey = keyFilter.value;
-  keyFilter.innerHTML = `<option value="">全部 SK</option>${state.keys
+  keyFilter.innerHTML = `<option value="">全部调用 Key</option>${state.keys
     .map(
       (item) =>
         `<option value="${item.id}">${escapeHTML(item.name)}（${escapeHTML(item.username)}）</option>`,

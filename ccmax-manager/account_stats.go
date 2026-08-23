@@ -488,7 +488,7 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 			a.recordAuthorization(&existingID, proxyID, item.Name, "batch_session_key", true, item.Error, token.SubscriptionType, requestIP(r))
 			continue
 		}
-		accountID, createErr := a.createBatchAuthorizedAccount(input, authType, item.Name, token, *proxyID)
+		accountID, createErr := a.createBatchAuthorizedAccount(input, authType, item.Name, sessionKey, token, *proxyID)
 		if createErr != nil {
 			item.Error = createErr.Error()
 			response.Failed++
@@ -554,7 +554,7 @@ func uniqueSessionKeys(values []string) []string {
 	return result
 }
 
-func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authType, name string, token *claudeTokenInfo, proxyID int64) (int64, error) {
+func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authType, name, sessionKey string, token *claudeTokenInfo, proxyID int64) (int64, error) {
 	encoded, err := json.Marshal(token)
 	if err != nil {
 		return 0, err
@@ -565,8 +565,8 @@ func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authTy
 	}
 	defer tx.Rollback()
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, auth_status, auth_checked_at, token_expires_at, subscription_type, account_price, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, '{}', 'active', 1, ?, 50, 1, ?, ?, 1, ?, 'tiered', 0, 'off', 'valid', `+nowSQL+`, ?, ?, ?, `+nowSQL+`)`,
-		name, authType, string(encoded), credentialHint(string(encoded)), input.Concurrency, input.ProxyPoolID, proxyID, input.BaseRPM, expiresAt, token.SubscriptionType, input.AccountPrice)
+	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, auth_status, auth_checked_at, token_expires_at, subscription_type, account_price, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, ?, '{}', 'active', 1, ?, 50, 1, ?, ?, 1, ?, 'tiered', 0, 'off', 'valid', `+nowSQL+`, ?, ?, ?, `+nowSQL+`)`,
+		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), input.Concurrency, input.ProxyPoolID, proxyID, input.BaseRPM, expiresAt, token.SubscriptionType, input.AccountPrice)
 	if err != nil {
 		return 0, err
 	}

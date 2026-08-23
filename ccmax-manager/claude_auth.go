@@ -304,7 +304,7 @@ func (a *app) handleAccountSessionAuth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if err := a.saveClaudeToken(accountID, authType, token, false); err != nil {
+	if err := a.saveClaudeToken(accountID, authType, token, false, sourceSKHint(input.SessionKey)); err != nil {
 		a.recordAuthorization(&accountID, nil, "", "session_key", false, err.Error(), token.SubscriptionType, requestIP(r))
 		writeDBError(w, err)
 		return
@@ -428,7 +428,7 @@ func tokenMetadata(token *claudeTokenInfo) map[string]any {
 	return map[string]any{"expires_at": token.ExpiresAt, "scope": token.Scope, "org_uuid": token.OrgUUID, "account_uuid": token.AccountUUID, "email_address": token.EmailAddress, "subscription_type": token.SubscriptionType, "has_refresh_token": token.RefreshToken != ""}
 }
 
-func (a *app) saveClaudeToken(accountID int64, authType string, token *claudeTokenInfo, preserveRefresh bool) error {
+func (a *app) saveClaudeToken(accountID int64, authType string, token *claudeTokenInfo, preserveRefresh bool, sourceHints ...string) error {
 	credentials := map[string]any{}
 	var previousOnboarded, previousInvalidated sql.NullString
 	if preserveRefresh {
@@ -439,6 +439,10 @@ func (a *app) saveClaudeToken(accountID int64, authType string, token *claudeTok
 		credentials = decodeObject(raw)
 	} else if err := a.db.QueryRow(`SELECT onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&previousOnboarded, &previousInvalidated); err != nil {
 		return err
+	}
+	sourceHint := ""
+	if len(sourceHints) > 0 {
+		sourceHint = strings.TrimSpace(sourceHints[0])
 	}
 	encoded, _ := json.Marshal(token)
 	var fresh map[string]any
@@ -459,7 +463,7 @@ func (a *app) saveClaudeToken(accountID int64, authType string, token *claudeTok
 	if preserveRefresh {
 		schedulingUpdate = `status = CASE WHEN status = 'error' THEN 'active' ELSE status END,`
 	}
-	_, err := a.db.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', `+schedulingUpdate+` updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, authType, string(credentialsJSON), credentialHint(string(credentialsJSON)), expiresAt, subscription, accountID)
+	_, err := a.db.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = CASE WHEN ? = '' THEN source_sk_hint ELSE ? END, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', `+schedulingUpdate+` updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, authType, string(credentialsJSON), credentialHint(string(credentialsJSON)), sourceHint, sourceHint, expiresAt, subscription, accountID)
 	if err == nil && (!previousOnboarded.Valid || previousInvalidated.Valid) {
 		a.recordAccountLifecycle(accountID, "onboarded")
 	}

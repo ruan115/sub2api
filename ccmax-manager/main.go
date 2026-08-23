@@ -92,6 +92,7 @@ type account struct {
 	Platform         string         `json:"platform"`
 	AuthType         string         `json:"auth_type"`
 	CredentialHint   string         `json:"credential_hint"`
+	SourceSKHint     string         `json:"source_sk_hint"`
 	HasCredentials   bool           `json:"has_credentials"`
 	Credentials      map[string]any `json:"credentials,omitempty"`
 	Extra            map[string]any `json:"extra"`
@@ -215,6 +216,7 @@ type usageInput struct {
 	PurposeKey          string   `json:"purpose_key"`
 	GroupID             string   `json:"group_id"`
 	AccountID           int64    `json:"account_id"`
+	AccountSKHint       string   `json:"-"`
 	Model               string   `json:"model"`
 	InputTokens         int64    `json:"input_tokens"`
 	OutputTokens        int64    `json:"output_tokens"`
@@ -231,6 +233,7 @@ type usageLog struct {
 	APIKeyID              *int64  `json:"api_key_id,omitempty"`
 	APIKeyName            string  `json:"api_key_name"`
 	APIKeyPrefix          string  `json:"api_key_prefix"`
+	AccountSKHint         string  `json:"account_sk_hint"`
 	RequestID             string  `json:"request_id"`
 	PurposeKey            string  `json:"purpose_key"`
 	PurposeName           string  `json:"purpose_name"`
@@ -404,6 +407,7 @@ func (a *app) migrate() error {
 			auth_type TEXT NOT NULL DEFAULT 'oauth',
 			credentials_json TEXT NOT NULL DEFAULT '{}',
 			credential_hint TEXT NOT NULL DEFAULT '',
+			source_sk_hint TEXT NOT NULL DEFAULT '',
 			extra_json TEXT NOT NULL DEFAULT '{}',
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'error', 'disabled')),
 			schedulable INTEGER NOT NULL DEFAULT 1,
@@ -460,6 +464,7 @@ func (a *app) migrate() error {
 			group_id TEXT NOT NULL REFERENCES groups(id),
 			account_id INTEGER NOT NULL REFERENCES accounts(id),
 			account_name TEXT NOT NULL,
+			account_sk_hint TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL,
 			input_tokens INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -955,7 +960,7 @@ func (a *app) getPurpose(id int64) (purpose, error) {
 	return item, err
 }
 
-const accountSelect = `SELECT a.id, a.name, a.platform, a.auth_type, a.credential_hint, a.credentials_json != '{}',
+const accountSelect = `SELECT a.id, a.name, a.platform, a.auth_type, a.credential_hint, a.source_sk_hint, a.credentials_json != '{}',
 	a.status, a.schedulable, a.concurrency, a.priority, a.rate_multiplier, a.notes, a.error_message,
 	a.last_used_at, a.expires_at, a.rate_limit_reset_at, a.created_at, a.updated_at, a.credentials_json, a.extra_json,
 	a.proxy_pool_id, COALESCE(pp.name, ''), a.proxy_id, COALESCE(px.name, ''),
@@ -977,7 +982,7 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 	var proxyPoolID, proxyID sql.NullInt64
 	var lastUsed, expires, rateLimit, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, invalidated sql.NullString
 	var credentialsJSON, extraJSON string
-	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.AccountPrice, &onboarded, &invalidated, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
+	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.AccountPrice, &onboarded, &invalidated, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
 	if err != nil {
 		return item, err
 	}
@@ -1129,7 +1134,11 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, account_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, input.AccountPrice)
+	accountSourceSKHint := sourceSKHint(input.SessionKey)
+	if accountSourceSKHint == "" {
+		accountSourceSKHint = sourceSKHintFromCredentials(credentialsJSON)
+	}
+	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, account_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, input.AccountPrice)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1190,9 +1199,9 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var existingCredentials, existingExtra string
+	var existingCredentials, existingExtra, existingSourceSKHint string
 	var previousOnboarded, previousInvalidated sql.NullString
-	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &previousOnboarded, &previousInvalidated); err != nil {
+	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &existingSourceSKHint, &previousOnboarded, &previousInvalidated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found")
 			return
@@ -1228,7 +1237,13 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	_, err = tx.Exec(`UPDATE accounts SET name = ?, platform = ?, auth_type = ?, credentials_json = ?, credential_hint = ?, extra_json = ?, status = ?, schedulable = ?, concurrency = ?, priority = ?, rate_multiplier = ?, notes = ?, error_message = ?, expires_at = NULLIF(?, ''), rate_limit_reset_at = NULLIF(?, ''), proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, account_price = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, input.AccountPrice, id)
+	accountSourceSKHint := existingSourceSKHint
+	if next := sourceSKHint(input.SessionKey); next != "" {
+		accountSourceSKHint = next
+	} else if next := sourceSKHintFromCredentials(credentialsJSON); next != "" {
+		accountSourceSKHint = next
+	}
+	_, err = tx.Exec(`UPDATE accounts SET name = ?, platform = ?, auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, extra_json = ?, status = ?, schedulable = ?, concurrency = ?, priority = ?, rate_multiplier = ?, notes = ?, error_message = ?, expires_at = NULLIF(?, ''), rate_limit_reset_at = NULLIF(?, ''), proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, account_price = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, input.AccountPrice, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1714,15 +1729,18 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 		return usageLog{}, false, errors.New("invalid usage group")
 	}
 
-	var accountName string
+	var accountName, accountSourceSKHint string
 	var accountRate float64
 	if input.AccountID == 0 {
-		err = tx.QueryRow(`SELECT a.id, a.name, a.rate_multiplier FROM accounts a JOIN account_groups ag ON ag.account_id = a.id JOIN groups g ON g.id = ag.group_id WHERE ag.group_id = ? AND g.status = 'active' AND a.deleted_at IS NULL AND a.status = 'active' AND a.schedulable = 1 AND (a.expires_at IS NULL OR a.expires_at > `+nowSQL+`) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= `+nowSQL+`) ORDER BY ag.priority, a.priority, COALESCE(a.last_used_at, ''), a.id LIMIT 1`, input.GroupID).Scan(&input.AccountID, &accountName, &accountRate)
+		err = tx.QueryRow(`SELECT a.id, a.name, a.rate_multiplier, a.source_sk_hint FROM accounts a JOIN account_groups ag ON ag.account_id = a.id JOIN groups g ON g.id = ag.group_id WHERE ag.group_id = ? AND g.status = 'active' AND a.deleted_at IS NULL AND a.status = 'active' AND a.schedulable = 1 AND (a.expires_at IS NULL OR a.expires_at > `+nowSQL+`) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= `+nowSQL+`) ORDER BY ag.priority, a.priority, COALESCE(a.last_used_at, ''), a.id LIMIT 1`, input.GroupID).Scan(&input.AccountID, &accountName, &accountRate, &accountSourceSKHint)
 	} else {
-		err = tx.QueryRow(`SELECT a.name, a.rate_multiplier FROM accounts a JOIN account_groups ag ON ag.account_id = a.id WHERE a.id = ? AND ag.group_id = ? AND a.deleted_at IS NULL`, input.AccountID, input.GroupID).Scan(&accountName, &accountRate)
+		err = tx.QueryRow(`SELECT a.name, a.rate_multiplier, a.source_sk_hint FROM accounts a JOIN account_groups ag ON ag.account_id = a.id WHERE a.id = ? AND ag.group_id = ? AND a.deleted_at IS NULL`, input.AccountID, input.GroupID).Scan(&accountName, &accountRate, &accountSourceSKHint)
 	}
 	if err != nil {
 		return usageLog{}, false, err
+	}
+	if strings.TrimSpace(input.AccountSKHint) == "" {
+		input.AccountSKHint = accountSourceSKHint
 	}
 	var groupRate float64
 	if err := tx.QueryRow(`SELECT rate_multiplier FROM groups WHERE id = ?`, input.GroupID).Scan(&groupRate); err != nil {
@@ -1741,6 +1759,7 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 		GroupID:               input.GroupID,
 		AccountID:             input.AccountID,
 		AccountName:           accountName,
+		AccountSKHint:         input.AccountSKHint,
 		Model:                 input.Model,
 		InputTokens:           input.InputTokens,
 		OutputTokens:          input.OutputTokens,
@@ -1766,7 +1785,7 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 	}
 	item.UserID = optionalID(input.UserID)
 	item.APIKeyID = optionalID(input.APIKeyID)
-	result, err := tx.Exec(`INSERT INTO usage_logs (user_id, api_key_id, request_id, purpose_id, purpose_key, purpose_name, group_id, account_id, account_name, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.APIKeyID, item.RequestID, purposeID, item.PurposeKey, item.PurposeName, item.GroupID, item.AccountID, item.AccountName, item.Model, item.InputTokens, item.OutputTokens, item.CacheCreationTokens, item.CacheReadTokens, item.InputCost, item.OutputCost, item.CacheCreationCost, item.CacheReadCost, item.BaseCost, item.BilledCost, item.ActualCost, item.GroupRateMultiplier, item.AccountRateMultiplier, boolInt(item.Stream), item.DurationMS)
+	result, err := tx.Exec(`INSERT INTO usage_logs (user_id, api_key_id, request_id, purpose_id, purpose_key, purpose_name, group_id, account_id, account_name, account_sk_hint, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, input_cost, output_cost, cache_creation_cost, cache_read_cost, base_cost, billed_cost, actual_cost, group_rate_multiplier, account_rate_multiplier, stream, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.APIKeyID, item.RequestID, purposeID, item.PurposeKey, item.PurposeName, item.GroupID, item.AccountID, item.AccountName, item.AccountSKHint, item.Model, item.InputTokens, item.OutputTokens, item.CacheCreationTokens, item.CacheReadTokens, item.InputCost, item.OutputCost, item.CacheCreationCost, item.CacheReadCost, item.BaseCost, item.BilledCost, item.ActualCost, item.GroupRateMultiplier, item.AccountRateMultiplier, boolInt(item.Stream), item.DurationMS)
 	if err != nil {
 		return usageLog{}, false, err
 	}
@@ -1797,18 +1816,17 @@ func (a *app) getUsageByRequestID(requestID string) (usageLog, error) {
 	return scanUsage(a.db.QueryRow(usageSelect+` WHERE u.request_id = ?`, requestID))
 }
 
-// usageFrom joins the owning API key so every ledger row can be attributed to
-// the SK that produced it. The join is a LEFT JOIN because manually recorded
-// usage and deleted keys have no live api_keys row.
+// Keep the calling API key relation for tenant scoping and cost breakdowns.
+// The account authorization SK is stored separately as a masked snapshot.
 const usageFrom = ` FROM usage_logs u LEFT JOIN api_keys k ON k.id = u.api_key_id`
 
-const usageSelect = `SELECT u.id, u.user_id, u.api_key_id, COALESCE(k.name, ''), COALESCE(k.key_prefix, ''), u.request_id, u.purpose_key, u.purpose_name, u.group_id, u.account_id, u.account_name, u.model, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens, u.input_cost, u.output_cost, u.cache_creation_cost, u.cache_read_cost, u.base_cost, u.billed_cost, u.actual_cost, u.group_rate_multiplier, u.account_rate_multiplier, u.stream, u.duration_ms, u.created_at` + usageFrom
+const usageSelect = `SELECT u.id, u.user_id, u.api_key_id, COALESCE(k.name, ''), COALESCE(k.key_prefix, ''), u.account_sk_hint, u.request_id, u.purpose_key, u.purpose_name, u.group_id, u.account_id, u.account_name, u.model, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens, u.input_cost, u.output_cost, u.cache_creation_cost, u.cache_read_cost, u.base_cost, u.billed_cost, u.actual_cost, u.group_rate_multiplier, u.account_rate_multiplier, u.stream, u.duration_ms, u.created_at` + usageFrom
 
 func scanUsage(row scanner) (usageLog, error) {
 	var item usageLog
 	var stream int
 	var userID, apiKeyID sql.NullInt64
-	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.APIKeyName, &item.APIKeyPrefix, &item.RequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
+	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.APIKeyName, &item.APIKeyPrefix, &item.AccountSKHint, &item.RequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
 	item.UserID = nullIntPointer(userID)
 	item.APIKeyID = nullIntPointer(apiKeyID)
 	item.Stream = stream == 1
@@ -2142,6 +2160,32 @@ func credentialHint(raw string) string {
 	}
 	if len(value) > 0 {
 		return "JSON · " + strconv.Itoa(len(value)) + " fields"
+	}
+	return ""
+}
+
+func sourceSKHint(secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(secret))
+	fingerprint := hex.EncodeToString(digest[:4])
+	runes := []rune(secret)
+	if len(runes) <= 20 {
+		return "•••••• · " + fingerprint
+	}
+	return string(runes[:12]) + "…" + string(runes[len(runes)-6:]) + " · " + fingerprint
+}
+
+func sourceSKHintFromCredentials(raw string) string {
+	credentials := decodeObject(raw)
+	for _, key := range []string{"session_key", "api_key"} {
+		if secret, ok := credentials[key].(string); ok {
+			if hint := sourceSKHint(secret); hint != "" {
+				return hint
+			}
+		}
 	}
 	return ""
 }

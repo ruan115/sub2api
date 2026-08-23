@@ -45,6 +45,7 @@ type gatewayAccount struct {
 	Name             string
 	AuthType         string
 	CredentialsJSON  string
+	SourceSKHint     string
 	ExtraJSON        string
 	Concurrency      int
 	BaseRPM          int
@@ -914,7 +915,7 @@ func copyGatewayResponseHeaders(target, source http.Header) {
 
 func (a *app) recordGatewayUsage(key gatewayKey, account gatewayAccount, model string, stream bool, requestID string, usage tokenUsage, started time.Time) {
 	_, _, usageErr := a.recordUsage(usageInput{
-		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, Model: model,
+		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, AccountSKHint: account.SourceSKHint, Model: model,
 		InputTokens: usage.Input, OutputTokens: usage.Output, CacheCreationTokens: usage.CacheCreation,
 		CacheReadTokens: usage.CacheRead, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
 	})
@@ -1109,7 +1110,7 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 	} else {
 		orderClause += `, COALESCE(a.last_used_at, ''), a.id`
 	}
-	rows, err := tx.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id, ag.priority, a.priority,
+	rows, err := tx.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.source_sk_hint, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id, ag.priority, a.priority,
 		COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_rpm,
 		COALESCE((SELECT requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
@@ -1128,7 +1129,7 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 	candidates := []candidate{}
 	for rows.Next() {
 		var item candidate
-		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.rpm, &item.inflight); err != nil {
+		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.rpm, &item.inflight); err != nil {
 			rows.Close()
 			return gatewayAccount{}, err
 		}

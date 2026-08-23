@@ -1144,7 +1144,7 @@ func clientForProxy(proxyURL *url.URL) (*http.Client, error) {
 			return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 		}
 	}
-	return &http.Client{Transport: transport, Timeout: 5 * time.Minute}, nil
+	return &http.Client{Transport: decompressingRoundTripper{base: transport}, Timeout: 5 * time.Minute}, nil
 }
 
 func assignAccountProxy(tx *sql.Tx, accountID int64, poolID, requestedProxyID *int64, auto bool) (*int64, error) {
