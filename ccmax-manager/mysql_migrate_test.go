@@ -24,3 +24,12 @@ func TestScanMigrationKeyNormalizesDriverNumericTypes(t *testing.T) {
 		t.Fatalf("SQLite key %q does not match MySQL key %q", sqliteKey, mysqlKey)
 	}
 }
+
+func TestComparableMigrationValuePreservesIntegerTrailingZero(t *testing.T) {
+	if got := comparableMigrationValue([]byte("1923854870")); got != "1923854870" {
+		t.Fatalf("integer comparable value = %q", got)
+	}
+	if got := comparableMigrationValue([]byte("100.12000000")); got != "100.12" {
+		t.Fatalf("decimal comparable value = %q", got)
+	}
+}

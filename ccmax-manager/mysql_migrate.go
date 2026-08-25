@@ -635,14 +635,21 @@ func queryComparableRow(db *sql.DB, query string) ([]string, error) {
 	}
 	result := make([]string, len(values))
 	for index, value := range values {
-		switch typed := value.(type) {
-		case []byte:
-			result[index] = strings.TrimRight(strings.TrimRight(string(typed), "0"), ".")
-		default:
-			result[index] = fmt.Sprint(value)
-		}
+		result[index] = comparableMigrationValue(value)
 	}
 	return result, nil
+}
+
+func comparableMigrationValue(value any) string {
+	bytes, ok := value.([]byte)
+	if !ok {
+		return fmt.Sprint(value)
+	}
+	text := string(bytes)
+	if strings.Contains(text, ".") {
+		text = strings.TrimRight(strings.TrimRight(text, "0"), ".")
+	}
+	return text
 }
 
 func quoteIdentifier(identifier string) string {
