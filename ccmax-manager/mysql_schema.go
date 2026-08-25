@@ -164,7 +164,7 @@ func (a *app) migrateMySQL() error {
 			UNIQUE KEY idx_accounts_proxy_exclusive (active_proxy_id),
 			KEY idx_accounts_dispatch (status, schedulable, priority, last_used_at, deleted_at),
 			CONSTRAINT fk_accounts_proxy_pool FOREIGN KEY (proxy_pool_id) REFERENCES proxy_pools(id) ON DELETE SET NULL,
-			CONSTRAINT fk_accounts_proxy FOREIGN KEY (proxy_id) REFERENCES proxies(id) ON DELETE SET NULL,
+			CONSTRAINT fk_accounts_proxy FOREIGN KEY (proxy_id) REFERENCES proxies(id),
 			CONSTRAINT fk_accounts_archived_proxy FOREIGN KEY (archived_proxy_id) REFERENCES proxies(id) ON DELETE SET NULL,
 			CONSTRAINT fk_accounts_strategy FOREIGN KEY (strategy_id) REFERENCES dispatch_strategies(id) ON DELETE SET NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -456,9 +456,9 @@ func (a *app) migrateMySQL() error {
 			last_error TEXT NOT NULL DEFAULT ('')
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
-	for _, statement := range statements {
+	for index, statement := range statements {
 		if _, err := a.db.DB.Exec(statement); err != nil {
-			return fmt.Errorf("migrate MySQL schema: %w", err)
+			return fmt.Errorf("migrate MySQL schema statement %d: %w", index+1, err)
 		}
 	}
 
