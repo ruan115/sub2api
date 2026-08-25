@@ -23,14 +23,33 @@ func (a *app) acquireAccountTokenLease(ctx context.Context, accountID int64) (st
 	waitUntil := time.Now().Add(accountTokenLeaseWait)
 	for {
 		expiresAt := time.Now().Add(accountTokenLeaseTTL).Unix()
-		result, execErr := a.db.ExecContext(ctx, `INSERT INTO account_token_leases (account_id, owner, expires_at) VALUES (?, ?, ?)
+		if a.db.dialect == dialectMySQL {
+			result, updateErr := a.db.ExecContext(ctx, `UPDATE account_token_leases
+				SET owner = ?, expires_at = ?, updated_at = `+nowSQL+`
+				WHERE account_id = ? AND (expires_at <= UNIX_TIMESTAMP(UTC_TIMESTAMP(3)) OR owner = ?)`, owner, expiresAt, accountID, owner)
+			if updateErr != nil {
+				return "", fmt.Errorf("update MySQL account token lease: %w", updateErr)
+			}
+			if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected == 1 {
+				return owner, nil
+			}
+			result, insertErr := a.db.ExecContext(ctx, `INSERT IGNORE INTO account_token_leases (account_id, owner, expires_at) VALUES (?, ?, ?)`, accountID, owner, expiresAt)
+			if insertErr != nil {
+				return "", fmt.Errorf("insert MySQL account token lease: %w", insertErr)
+			}
+			if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected == 1 {
+				return owner, nil
+			}
+		} else {
+			result, execErr := a.db.ExecContext(ctx, `INSERT INTO account_token_leases (account_id, owner, expires_at) VALUES (?, ?, ?)
 			ON CONFLICT(account_id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at, updated_at = `+nowSQL+`
 			WHERE account_token_leases.expires_at <= CAST(strftime('%s','now') AS INTEGER) OR account_token_leases.owner = excluded.owner`, accountID, owner, expiresAt)
-		if execErr != nil {
-			return "", fmt.Errorf("acquire account token lease: %w", execErr)
-		}
-		if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected == 1 {
-			return owner, nil
+			if execErr != nil {
+				return "", fmt.Errorf("acquire account token lease: %w", execErr)
+			}
+			if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected == 1 {
+				return owner, nil
+			}
 		}
 		if time.Now().After(waitUntil) {
 			return "", errors.New("another token operation is still in progress for this account")

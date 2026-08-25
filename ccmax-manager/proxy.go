@@ -266,7 +266,7 @@ func (a *app) migrateProxyFeatures() error {
 	return nil
 }
 
-func ensureDeadProxyPool(tx *sql.Tx) (int64, error) {
+func ensureDeadProxyPool(tx *databaseTx) (int64, error) {
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM proxy_pools WHERE system_kind = ? ORDER BY id LIMIT 1`, deadProxyPoolKind).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -324,7 +324,7 @@ func (a *app) migrateDeadProxyAssignments() error {
 	return nil
 }
 
-func quarantineProxyIDs(tx *sql.Tx, proxyIDs []int64) error {
+func quarantineProxyIDs(tx *databaseTx, proxyIDs []int64) error {
 	if len(proxyIDs) == 0 {
 		return nil
 	}
@@ -386,7 +386,7 @@ func quarantineProxyIDs(tx *sql.Tx, proxyIDs []int64) error {
 	return nil
 }
 
-func addColumnIfMissing(db *sql.DB, table, name, definition string) error {
+func addColumnIfMissing(db *database, table, name, definition string) error {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return err
@@ -739,7 +739,7 @@ func (a *app) importProxyText(poolID int64, defaultProtocol, text string) (creat
 	return
 }
 
-func storeProxy(tx *sql.Tx, poolID int64, item parsedProxy) (int64, bool, error) {
+func storeProxy(tx *databaseTx, poolID int64, item parsedProxy) (int64, bool, error) {
 	var poolAvailable int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxy_pools
 		WHERE id = ? AND status = 'active' AND deleted_at IS NULL AND system_kind = ''`, poolID).Scan(&poolAvailable); err != nil {
@@ -1516,7 +1516,7 @@ func newClientForProxy(proxyURL *url.URL, responseHeaderTimeout, requestTimeout 
 	return &http.Client{Transport: decompressingRoundTripper{base: transport}, Timeout: requestTimeout}, nil
 }
 
-func assignAccountProxy(tx *sql.Tx, accountID int64, poolID, requestedProxyID *int64, auto bool) (*int64, error) {
+func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyID *int64, auto bool) (*int64, error) {
 	if poolID == nil {
 		return nil, nil
 	}

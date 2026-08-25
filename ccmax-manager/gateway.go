@@ -1567,6 +1567,18 @@ func (a *app) checkAndIncrementUserRPM(key gatewayKey) error {
 	if key.UserRPM <= 0 {
 		return nil
 	}
+	if a.redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		allowed, err := a.redis.allowUserRPM(ctx, key.UserID, key.UserRPM)
+		if err != nil {
+			return fmt.Errorf("user RPM limiter unavailable: %w", err)
+		}
+		if !allowed {
+			return errors.New("user RPM limit reached")
+		}
+		return nil
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		return nil
@@ -1675,6 +1687,15 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		dispatchLock := lockValue.(*sync.Mutex)
 		dispatchLock.Lock()
 		defer dispatchLock.Unlock()
+		if a.redis != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			release, err := a.redis.acquireDispatchLock(ctx, key.GroupID)
+			if err != nil {
+				return gatewayAccount{}, err
+			}
+			defer release()
+		}
 	}
 
 	tx, err := a.db.Begin()

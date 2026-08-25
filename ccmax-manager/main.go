@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -39,7 +41,7 @@ type scanner interface {
 }
 
 type app struct {
-	db            *sql.DB
+	db            *database
 	adminUser     string
 	adminPassword string
 	authDisabled  bool
@@ -56,6 +58,7 @@ type app struct {
 	// (group id -> *int64) so a saturated group cannot pile up unbounded waiters.
 	capacityWaiters sync.Map
 	streamHedges    *gatewayHedgeController
+	redis           *redisRuntime
 	batchAuthMu     sync.Mutex
 	reserveMu       sync.Mutex
 }
@@ -376,6 +379,19 @@ func main() {
 		log.Fatal(err)
 	}
 	defer a.db.Close()
+	defer a.redis.Close()
+	if source := strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_FROM_SQLITE")); source != "" {
+		if a.db.dialect != dialectMySQL {
+			log.Fatal("CCMAX_MIGRATE_FROM_SQLITE requires CCMAX_MYSQL_DSN")
+		}
+		report, err := migrateSQLiteToMySQL(source, a.db, strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_RESET_TARGET")) == "1")
+		if err != nil {
+			log.Fatal(err)
+		}
+		encoded, _ := json.Marshal(report)
+		log.Printf("SQLite to MySQL migration completed: %s", encoded)
+		return
+	}
 	stopPricing := a.startPriceSyncScheduler()
 	defer stopPricing()
 	stopTokenRefresh := a.startTokenRefreshScheduler()
@@ -403,22 +419,51 @@ func envOr(key, fallback string) string {
 }
 
 func newApp(dataPath string) (*app, error) {
-	if dataPath != ":memory:" {
+	dialect := dialectSQLite
+	driver := "sqlite3"
+	dsn := ""
+	if mysqlDSN := strings.TrimSpace(os.Getenv("CCMAX_MYSQL_DSN")); mysqlDSN != "" {
+		dialect = dialectMySQL
+		driver = "mysql"
+		config, err := mysql.ParseDSN(mysqlDSN)
+		if err != nil {
+			return nil, fmt.Errorf("parse MySQL DSN: %w", err)
+		}
+		config.ParseTime = true
+		config.Loc = time.UTC
+		if config.Params == nil {
+			config.Params = map[string]string{}
+		}
+		config.Params["time_zone"] = "'+00:00'"
+		dsn = config.FormatDSN()
+	}
+
+	if dialect == dialectSQLite && dataPath != ":memory:" {
 		if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil && filepath.Dir(dataPath) != "." {
 			return nil, fmt.Errorf("create data directory: %w", err)
 		}
 	}
-	dsn := "file:" + filepath.ToSlash(dataPath) + "?_foreign_keys=on&_busy_timeout=5000"
-	if dataPath == ":memory:" {
-		dsn = "file:ccmax-manager-memory?mode=memory&cache=shared&_foreign_keys=on"
-	} else {
-		dsn += "&_journal_mode=WAL"
+	if dialect == dialectSQLite {
+		dsn = "file:" + filepath.ToSlash(dataPath) + "?_foreign_keys=on&_busy_timeout=5000"
+		if dataPath == ":memory:" {
+			dsn = "file:ccmax-manager-memory?mode=memory&cache=shared&_foreign_keys=on"
+		} else {
+			dsn += "&_journal_mode=WAL"
+		}
 	}
-	db, err := sql.Open("sqlite3", dsn)
+	rawDB, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	db.SetMaxOpenConns(5)
+	db := &database{DB: rawDB, dialect: dialect}
+	if dialect == dialectMySQL {
+		db.SetMaxOpenConns(envInt("CCMAX_DB_MAX_OPEN_CONNS", 100))
+		db.SetMaxIdleConns(envInt("CCMAX_DB_MAX_IDLE_CONNS", 25))
+		db.SetConnMaxLifetime(30 * time.Minute)
+		db.SetConnMaxIdleTime(5 * time.Minute)
+	} else {
+		db.SetMaxOpenConns(5)
+	}
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
@@ -433,19 +478,39 @@ func newApp(dataPath string) (*app, error) {
 		accountHealth: newAccountHealthController(),
 		streamHedges:  newGatewayHedgeController(),
 	}
-	if err := a.migrate(); err != nil {
+	a.redis, err = newRedisRuntime()
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	if err := a.migrateFeatures(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := a.migrateAdvancedFeatures(); err != nil {
-		db.Close()
-		return nil, err
+	if dialect == dialectMySQL {
+		if err := a.migrateMySQL(); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} else {
+		if err := a.migrate(); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if err := a.migrateFeatures(); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if err := a.migrateAdvancedFeatures(); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return a, nil
+}
+
+func envInt(key string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func (a *app) migrate() error {
@@ -732,8 +797,14 @@ func (a *app) securityHeaders(next http.Handler) http.Handler {
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	if err := a.db.Ping(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.db.PingContext(ctx); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "database unavailable")
+		return
+	}
+	if err := a.redis.Ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime store unavailable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1851,7 +1922,7 @@ func (a *app) validateAccountGroupIDs(groupIDs []string) error {
 	return nil
 }
 
-func setAccountGroups(tx *sql.Tx, accountID int64, groups []string, priority int) error {
+func setAccountGroups(tx *databaseTx, accountID int64, groups []string, priority int) error {
 	if _, err := tx.Exec(`DELETE FROM account_groups WHERE account_id = ?`, accountID); err != nil {
 		return err
 	}

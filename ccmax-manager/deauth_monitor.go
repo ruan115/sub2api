@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Buckets for why an account lost its authorization. The reason text is written
@@ -121,13 +122,14 @@ func deauthWindowMinutes(value string) int {
 func (a *app) handleAuthorizationDeauth(w http.ResponseWriter, r *http.Request) {
 	window := deauthWindowMinutes(r.URL.Query().Get("window"))
 	scope, scopeArgs := scopedAccountCondition(currentUser(r), "a")
-	args := append([]any{"-" + strconv.Itoa(window) + " minutes"}, scopeArgs...)
+	cutoff := time.Now().UTC().Add(-time.Duration(window) * time.Minute).Format(time.RFC3339Nano)
+	args := append([]any{cutoff}, scopeArgs...)
 	rows, err := a.db.Query(`SELECT e.account_id, a.name, e.reason, e.created_at,
 		CASE WHEN a.invalidated_at IS NULL THEN 1 ELSE 0 END AS recovered,
 		COALESCE((SELECT GROUP_CONCAT(ag.group_id, ',') FROM account_groups ag WHERE ag.account_id = a.id), '') AS group_ids
 		FROM account_lifecycle_events e JOIN accounts a ON a.id = e.account_id
 		WHERE e.event_type = 'invalidated' AND a.deleted_at IS NULL
-		AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now', ?)
+			AND e.created_at >= ?
 		AND `+scope+`
 		ORDER BY e.created_at DESC, e.id DESC`, args...)
 	if err != nil {
