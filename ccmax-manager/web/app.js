@@ -1503,10 +1503,23 @@ function accountStatus(account) {
   }
   if (account.rate_limit_reason === "429_backoff") {
     const strikes = Number(account.consecutive_429 || 0);
+    const until = account.rate_limit_downweight_until
+      ? `，等待配额窗口于 ${dateTime(account.rate_limit_downweight_until)} 刷新`
+      : "";
     return [
       `429 降权 ${strikes}/3`,
       "warn",
-      `账号仍可调度，但因连续 ${strikes} 次 429 已降低选号优先级；成功请求后自动清零`,
+      `账号仍可调度，但因本配额窗口内已触发 ${strikes} 次 429 而降低选号优先级${until}；成功请求不会解除，可手动恢复`,
+    ];
+  }
+  if (
+    account.quota_refreshed_at &&
+    Date.now() - Date.parse(account.quota_refreshed_at) < 30 * 60 * 1000
+  ) {
+    return [
+      "额度刷新",
+      "ok",
+      `配额窗口已于 ${dateTime(account.quota_refreshed_at)} 刷新，30 分钟内优先调度`,
     ];
   }
   return ["正常", "ok", "账号可参与调度"];
