@@ -144,6 +144,7 @@ func sqliteTableExists(source *sql.DB, table string) (bool, error) {
 
 func commonMigrationColumns(source *sql.DB, target *sql.DB, table string) ([]string, error) {
 	sourceColumns := map[string]bool{}
+	sourceColumnOrder := []string{}
 	rows, err := source.Query("PRAGMA table_info(" + quoteIdentifier(table) + ")")
 	if err != nil {
 		return nil, fmt.Errorf("inspect SQLite columns for %s: %w", table, err)
@@ -157,6 +158,7 @@ func commonMigrationColumns(source *sql.DB, target *sql.DB, table string) ([]str
 			return nil, fmt.Errorf("scan SQLite columns for %s: %w", table, err)
 		}
 		sourceColumns[name] = true
+		sourceColumnOrder = append(sourceColumnOrder, name)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close SQLite columns for %s: %w", table, err)
@@ -164,23 +166,37 @@ func commonMigrationColumns(source *sql.DB, target *sql.DB, table string) ([]str
 
 	targetRows, err := target.Query(`SELECT COLUMN_NAME
 		FROM information_schema.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND EXTRA NOT LIKE '%GENERATED%'
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COALESCE(GENERATION_EXPRESSION, '') = ''
 		ORDER BY ORDINAL_POSITION`, table)
 	if err != nil {
 		return nil, fmt.Errorf("inspect MySQL columns for %s: %w", table, err)
 	}
 	defer targetRows.Close()
 	columns := []string{}
+	targetColumns := map[string]bool{}
 	for targetRows.Next() {
 		var name string
 		if err := targetRows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("scan MySQL columns for %s: %w", table, err)
 		}
+		targetColumns[name] = true
 		if sourceColumns[name] {
 			columns = append(columns, name)
 		}
 	}
-	return columns, targetRows.Err()
+	if err := targetRows.Err(); err != nil {
+		return nil, err
+	}
+	missing := []string{}
+	for _, name := range sourceColumnOrder {
+		if !targetColumns[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("MySQL migration table %s is missing SQLite columns: %s", table, strings.Join(missing, ", "))
+	}
+	return columns, nil
 }
 
 func copyMigrationTable(source *sql.DB, target *database, table string, columns []string) (int64, int64, error) {
