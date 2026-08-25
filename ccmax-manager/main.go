@@ -456,7 +456,7 @@ func newApp(dataPath string) (*app, error) {
 		}
 	}
 	if dialect == dialectSQLite {
-		dsn = "file:" + filepath.ToSlash(dataPath) + "?_foreign_keys=on&_busy_timeout=5000"
+		dsn = "file:" + filepath.ToSlash(dataPath) + "?_foreign_keys=on&_busy_timeout=5000&_txlock=immediate"
 		if dataPath == ":memory:" {
 			dsn = "file:ccmax-manager-memory?mode=memory&cache=shared&_foreign_keys=on"
 		} else {
@@ -1409,7 +1409,7 @@ func (a *app) getPurpose(id int64) (purpose, error) {
 	return item, err
 }
 
-const accountSelect = `SELECT a.id, a.name, a.platform, a.auth_type, a.credential_hint, a.source_sk_hint, a.credentials_json != '{}',
+const accountSelectBase = `SELECT a.id, a.name, a.platform, a.auth_type, a.credential_hint, a.source_sk_hint, a.credentials_json != '{}',
 	a.status, a.schedulable, a.concurrency, a.priority, a.rate_multiplier, a.notes, a.error_message,
 	a.last_used_at, a.expires_at, a.rate_limit_reset_at, a.rate_limit_window, a.created_at, a.updated_at, a.credentials_json, a.extra_json,
 	a.proxy_pool_id, COALESCE(pp.name, ''), a.proxy_id, COALESCE(px.name, archived_px.name, ''),
@@ -1418,13 +1418,20 @@ const accountSelect = `SELECT a.id, a.name, a.platform, a.auth_type, a.credentia
 	a.auto_proxy, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.strategy_id,
 	a.auth_status, a.auth_error, a.auth_checked_at, a.token_expires_at,
 	a.quota_5h_utilization, a.quota_5h_reset_at, a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_sampled_at,
-	a.subscription_type, a.rate_limit_tier, a.account_price, a.onboarded_at, a.invalidated_at, a.archived_at, a.survival_seconds_total, COALESCE(px.status, archived_px.status, ''),
+	a.subscription_type, a.rate_limit_tier, a.account_price, a.onboarded_at, a.invalidated_at, a.archived_at, a.survival_seconds_total, COALESCE(px.status, archived_px.status, ''), `
+
+const accountUsageCorrelatedFields = `
 	(SELECT COUNT(*) FROM usage_logs u WHERE u.account_id = a.id),
 	COALESCE((SELECT SUM(u.input_tokens) FROM usage_logs u WHERE u.account_id = a.id), 0),
 	COALESCE((SELECT SUM(u.output_tokens) FROM usage_logs u WHERE u.account_id = a.id), 0),
 	COALESCE((SELECT SUM(u.billed_cost) FROM usage_logs u WHERE u.account_id = a.id), 0),
-	COALESCE((SELECT SUM(u.actual_cost) FROM usage_logs u WHERE u.account_id = a.id), 0)
+	COALESCE((SELECT SUM(u.actual_cost) FROM usage_logs u WHERE u.account_id = a.id), 0)`
+
+const accountSelectFrom = `
 	FROM accounts a LEFT JOIN proxy_pools pp ON pp.id = a.proxy_pool_id LEFT JOIN proxies px ON px.id = a.proxy_id LEFT JOIN proxies archived_px ON archived_px.id = a.archived_proxy_id`
+
+const accountSelect = accountSelectBase + accountUsageCorrelatedFields + accountSelectFrom
+const accountListSelect = accountSelectBase + `0, 0, 0, 0, 0` + accountSelectFrom
 
 func scanAccount(row scanner, reveal bool) (account, error) {
 	var item account
@@ -1463,7 +1470,7 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 }
 
 func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	query := accountSelect + ` WHERE a.deleted_at IS NULL`
+	query := accountListSelect + ` WHERE a.deleted_at IS NULL`
 	args := []any{}
 	archived := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("archived")))
 	switch archived {
@@ -1525,13 +1532,18 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
+	if err := a.loadAccountUsageStats(items); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	groupIDs, err := a.accountGroupIDsBulk(items)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
 	for index := range items {
 		item := &items[index]
-		item.GroupIDs, err = a.accountGroupIDs(item.ID)
-		if err != nil {
-			writeDBError(w, err)
-			return
-		}
+		item.GroupIDs = groupIDs[item.ID]
 		if user.Role == "user" {
 			visibleGroups := make([]string, 0, len(item.GroupIDs))
 			for _, groupID := range item.GroupIDs {
@@ -1635,14 +1647,23 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		credentials := decodeObject(credentialsJSON)
 		subscription := subscriptionTypeFromCredentials(credentials)
 		rateLimitTier := rateLimitTierFromCredentials(credentials)
-		_, _ = tx.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = `+nowSQL+`, invalidated_at = NULL WHERE id = ?`, tokenExpiresAt, subscription, rateLimitTier, id)
+		if _, err := tx.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = `+nowSQL+`, invalidated_at = NULL WHERE id = ?`, tokenExpiresAt, subscription, rateLimitTier, id); err != nil {
+			writeDBError(w, err)
+			return
+		}
 	} else if deferredAuthorization {
-		_, _ = tx.Exec(`UPDATE accounts SET auth_status = 'reauth_required', auth_error = '等待授权' WHERE id = ?`, id)
+		if _, err := tx.Exec(`UPDATE accounts SET auth_status = 'reauth_required', auth_error = '等待授权' WHERE id = ?`, id); err != nil {
+			writeDBError(w, err)
+			return
+		}
 	} else if credentialsJSON != "{}" {
 		credentials := decodeObject(credentialsJSON)
 		subscription := subscriptionTypeFromCredentials(credentials)
 		rateLimitTier := rateLimitTierFromCredentials(credentials)
-		_, _ = tx.Exec(`UPDATE accounts SET auth_status = 'valid', auth_checked_at = `+nowSQL+`, subscription_type = ?, rate_limit_tier = ?, onboarded_at = `+nowSQL+`, invalidated_at = NULL WHERE id = ?`, subscription, rateLimitTier, id)
+		if _, err := tx.Exec(`UPDATE accounts SET auth_status = 'valid', auth_checked_at = `+nowSQL+`, subscription_type = ?, rate_limit_tier = ?, onboarded_at = `+nowSQL+`, invalidated_at = NULL WHERE id = ?`, subscription, rateLimitTier, id); err != nil {
+			writeDBError(w, err)
+			return
+		}
 	}
 	requestedProxyID, assignAutomatically := input.ProxyID, input.AutoProxy
 	if sessionAuthorized && authorizedProxyID != nil {
@@ -1988,6 +2009,97 @@ func (a *app) accountGroupIDs(id int64) ([]string, error) {
 		groups = append(groups, groupID)
 	}
 	return groups, rows.Err()
+}
+
+func (a *app) accountGroupIDsBulk(accounts []account) (map[int64][]string, error) {
+	result := make(map[int64][]string, len(accounts))
+	if len(accounts) == 0 {
+		return result, nil
+	}
+	const batchSize = 500
+	for start := 0; start < len(accounts); start += batchSize {
+		end := min(start+batchSize, len(accounts))
+		args := make([]any, 0, end-start)
+		for _, item := range accounts[start:end] {
+			args = append(args, item.ID)
+			result[item.ID] = []string{}
+		}
+		rows, err := a.db.Query(`SELECT account_id, group_id FROM account_groups WHERE account_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`) ORDER BY account_id, group_id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var accountID int64
+			var groupID string
+			if err := rows.Scan(&accountID, &groupID); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[accountID] = append(result[accountID], groupID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (a *app) loadAccountUsageStats(accounts []account) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*account, len(accounts))
+	for index := range accounts {
+		item := &accounts[index]
+		byID[item.ID] = item
+	}
+	const batchSize = 500
+	for start := 0; start < len(accounts); start += batchSize {
+		end := min(start+batchSize, len(accounts))
+		args := make([]any, 0, end-start)
+		for _, item := range accounts[start:end] {
+			args = append(args, item.ID)
+		}
+		rows, err := a.db.Query(`SELECT account_id, COUNT(*),
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(billed_cost), 0),
+			COALESCE(SUM(actual_cost), 0)
+			FROM usage_logs
+			WHERE account_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)
+			GROUP BY account_id`, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var accountID int64
+			var requestCount, inputTokens, outputTokens int64
+			var billedCost, actualCost float64
+			if err := rows.Scan(&accountID, &requestCount, &inputTokens, &outputTokens, &billedCost, &actualCost); err != nil {
+				rows.Close()
+				return err
+			}
+			if item := byID[accountID]; item != nil {
+				item.RequestCount = requestCount
+				item.InputTokens = inputTokens
+				item.OutputTokens = outputTokens
+				item.TotalBilledCost = billedCost
+				item.TotalActualCost = actualCost
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *app) handleAccountDelete(w http.ResponseWriter, r *http.Request) {

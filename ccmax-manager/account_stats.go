@@ -209,7 +209,8 @@ func (a *app) recordAccountLifecycle(accountID int64, eventType string) {
 	if eventType != "onboarded" && eventType != "invalidated" {
 		return
 	}
-	_, _ = a.db.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type) VALUES (?, ?)`, accountID, eventType)
+	_, err := a.db.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type) VALUES (?, ?)`, accountID, eventType)
+	logDatabaseWriteError("insert account lifecycle event", err)
 }
 
 func normalizeSubscriptionType(value string) string {
@@ -314,8 +315,9 @@ func (a *app) recordAuthorization(accountID, proxyID *int64, accountName, method
 	if proxyID != nil {
 		_ = a.db.QueryRow(`SELECT COALESCE(NULLIF(exit_ip, ''), host) FROM proxies WHERE id = ?`, *proxyID).Scan(&proxyIP)
 	}
-	_, _ = a.db.Exec(`INSERT INTO authorization_logs (account_id, account_name, proxy_id, proxy_ip, method, success, status_message, subscription_type, client_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := a.db.Exec(`INSERT INTO authorization_logs (account_id, account_name, proxy_id, proxy_ip, method, success, status_message, subscription_type, client_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		accountID, accountName, proxyID, proxyIP, method, boolInt(success), message, subscription, clientIP)
+	logDatabaseWriteError("insert authorization log", err)
 }
 
 func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {

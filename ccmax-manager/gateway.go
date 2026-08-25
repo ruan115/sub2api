@@ -523,7 +523,8 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				if forwardErr != nil {
 					return
 				}
-				_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+				_, writeErr := a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+				logDatabaseWriteError("update API key last-used time", writeErr)
 				return
 			}
 			if forwardErr == nil || usage.hasUsage() {
@@ -575,8 +576,9 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 func (a *app) captureGatewayStreamIdle(accountID int64, idle time.Duration) {
 	until := time.Now().UTC().Add(gatewayStreamIdleCooldown).Format(time.RFC3339Nano)
 	message := fmt.Sprintf("上游 %s 未产出流式事件，已临时下线 %s", idle, gatewayStreamIdleCooldown)
-	_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, updated_at = `+nowSQL+`
+	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, updated_at = `+nowSQL+`
 		WHERE id = ? AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at < ?)`, until, message, accountID, until)
+	logDatabaseWriteError("record stream idle cooldown", err)
 }
 
 func recordGatewayContextFailure(w http.ResponseWriter, r *http.Request, err error) bool {
@@ -1452,7 +1454,8 @@ func (a *app) recordGatewayUsage(ctx context.Context, key gatewayKey, account ga
 	if usageErr == nil {
 		return
 	}
-	_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+	_, writeErr := a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+	logDatabaseWriteError("update API key last-used fallback", writeErr)
 }
 
 func (a *app) recordGatewayRejectedDowngradeUsage(ctx context.Context, key gatewayKey, account gatewayAccount, actualModel string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) {
@@ -1467,7 +1470,8 @@ func (a *app) recordGatewayRejectedDowngradeUsage(ctx context.Context, key gatew
 	if usageErr == nil {
 		return
 	}
-	_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+	_, writeErr := a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+	logDatabaseWriteError("update rejected-downgrade API key last-used fallback", writeErr)
 }
 
 func bearerOrAPIKey(r *http.Request) string {
@@ -1615,21 +1619,27 @@ func (a *app) checkAndIncrementUserRPM(key gatewayKey) error {
 	}
 	tx, err := a.db.Begin()
 	if err != nil {
+		logDatabaseWriteError("begin user RPM transaction", err)
 		return nil
 	}
 	defer tx.Rollback()
-	_, _ = tx.Exec(`DELETE FROM user_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`)
+	if _, err := tx.Exec(`DELETE FROM user_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`); err != nil {
+		logDatabaseWriteError("prune user RPM events", err)
+	}
 	var current int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM user_rpm_events WHERE user_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, key.UserID).Scan(&current); err != nil {
+		logDatabaseWriteError("read user RPM events", err)
 		return nil
 	}
 	if current >= key.UserRPM {
 		return errors.New("user RPM limit reached")
 	}
 	if _, err := tx.Exec(`INSERT INTO user_rpm_events (user_id) VALUES (?)`, key.UserID); err != nil {
+		logDatabaseWriteError("insert user RPM event", err)
 		return nil
 	}
 	if err := tx.Commit(); err != nil {
+		logDatabaseWriteError("commit user RPM transaction", err)
 		return nil
 	}
 	return nil
@@ -1737,10 +1747,18 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		return gatewayAccount{}, err
 	}
 	defer tx.Rollback()
-	_, _ = tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`)
-	_, _ = tx.Exec(`DELETE FROM dispatch_sessions WHERE expires_at <= ` + nowSQL)
-	_, _ = tx.Exec(`DELETE FROM account_model_cooldowns WHERE reset_at <= ` + nowSQL)
-	_, _ = tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL)
+	if _, err := tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`); err != nil {
+		return gatewayAccount{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM dispatch_sessions WHERE expires_at <= ` + nowSQL); err != nil {
+		return gatewayAccount{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM account_model_cooldowns WHERE reset_at <= ` + nowSQL); err != nil {
+		return gatewayAccount{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL); err != nil {
+		return gatewayAccount{}, err
+	}
 	var stickyID int64
 	if sessionHash != "" {
 		_ = tx.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ? AND expires_at > `+nowSQL, sessionHash, key.ID).Scan(&stickyID)
@@ -2024,7 +2042,8 @@ func (a *app) groupHasDispatchMode(groupID string, modes []string) bool {
 }
 
 func (a *app) recordGatewayAccountRPM(accountID int64) {
-	_, _ = a.db.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, accountID)
+	_, err := a.db.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, accountID)
+	logDatabaseWriteError("insert account RPM event", err)
 }
 
 func (a *app) gatewayStickyAccountID(apiKeyID int64, sessionHash string) int64 {
@@ -2041,7 +2060,8 @@ func (a *app) bindGatewayStickySession(apiKeyID int64, sessionHash string, accou
 		return
 	}
 	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
-	_, _ = a.db.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_hash, api_key_id) DO UPDATE SET account_id = excluded.account_id, expires_at = excluded.expires_at`, sessionHash, apiKeyID, accountID, expires)
+	_, err := a.db.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_hash, api_key_id) DO UPDATE SET account_id = excluded.account_id, expires_at = excluded.expires_at`, sessionHash, apiKeyID, accountID, expires)
+	logDatabaseWriteError("bind gateway sticky session", err)
 }
 
 func rpmSchedulable(account gatewayAccount, current int, sticky bool) bool {
@@ -2054,7 +2074,8 @@ func rpmSchedulable(account gatewayAccount, current int, sticky bool) bool {
 }
 
 func (a *app) releaseGatewayAccount(accountID int64) {
-	_, _ = a.db.Exec(`UPDATE account_inflight SET requests = CASE WHEN requests > 0 THEN requests - 1 ELSE 0 END WHERE account_id = ?`, accountID)
+	_, err := a.db.Exec(`UPDATE account_inflight SET requests = CASE WHEN requests > 0 THEN requests - 1 ELSE 0 END WHERE account_id = ?`, accountID)
+	logDatabaseWriteError("release gateway account", err)
 }
 
 func upstreamClaudeURL(extraJSON, endpointPath string) (string, error) {

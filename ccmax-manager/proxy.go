@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -1064,7 +1065,10 @@ func (a *app) handleProxyPoolSync(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	_, _ = a.db.Exec(`UPDATE proxy_pools SET last_sync_at = `+nowSQL+`, last_error = '', updated_at = `+nowSQL+` WHERE id = ?`, id)
+	if _, err := a.db.Exec(`UPDATE proxy_pools SET last_sync_at = `+nowSQL+`, last_error = '', updated_at = `+nowSQL+` WHERE id = ?`, id); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]int{"created": created, "skipped": skipped, "invalid": invalid})
 }
 
@@ -1116,7 +1120,9 @@ func proxyTextFromAPI(body []byte) string {
 }
 
 func (a *app) proxySyncFailed(id int64, err error) {
-	_, _ = a.db.Exec(`UPDATE proxy_pools SET last_sync_at = `+nowSQL+`, last_error = ?, updated_at = `+nowSQL+` WHERE id = ?`, err.Error(), id)
+	if _, updateErr := a.db.Exec(`UPDATE proxy_pools SET last_sync_at = `+nowSQL+`, last_error = ?, updated_at = `+nowSQL+` WHERE id = ?`, err.Error(), id); updateErr != nil {
+		log.Printf("record proxy sync failure for pool %d: %v", id, updateErr)
+	}
 }
 
 func (a *app) handleProxyUpdate(w http.ResponseWriter, r *http.Request) {
@@ -1137,12 +1143,22 @@ func (a *app) handleProxyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid proxy status")
 		return
 	}
+	var result sql.Result
+	var err error
 	if input.Password == "" {
-		_, _ = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		result, err = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 			AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), id)
 	} else {
-		_, _ = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, password = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		result, err = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, password = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 			AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), input.Password, id)
+	}
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		writeError(w, http.StatusNotFound, "proxy not found")
+		return
 	}
 	item, err := scanProxy(a.db.QueryRow(proxySelect+` WHERE x.id = ? AND x.deleted_at IS NULL AND p.system_kind = ''`, id))
 	if err != nil {
@@ -1264,7 +1280,13 @@ func (a *app) handleProxyTest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result := a.testProxy(r.Context(), id, "")
+	result := a.probeProxy(r.Context(), id, "")
+	if result.Error != "proxy not found or disabled" {
+		if err := a.persistProxyTestResults([]proxyTestResult{result}); err != nil {
+			writeDBError(w, err)
+			return
+		}
+	}
 	if !result.Success {
 		status := http.StatusBadGateway
 		if result.Error == "proxy not found or disabled" {
@@ -1347,7 +1369,7 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				items[index] = a.testProxy(r.Context(), targets[index].ID, targets[index].Name)
+				items[index] = a.probeProxy(r.Context(), targets[index].ID, targets[index].Name)
 			}
 		}()
 	}
@@ -1356,6 +1378,10 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 	}
 	close(jobs)
 	workers.Wait()
+	if err := a.persistProxyTestResults(items); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	response := proxyBatchTestResponse{Total: len(items), Items: items}
 	for _, item := range items {
 		if item.Success {
@@ -1367,7 +1393,7 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (a *app) testProxy(parent context.Context, id int64, name string) proxyTestResult {
+func (a *app) probeProxy(parent context.Context, id int64, name string) proxyTestResult {
 	result := proxyTestResult{ID: id, Name: name}
 	proxyURL, err := a.proxyURLForTest(id)
 	if err != nil {
@@ -1377,7 +1403,6 @@ func (a *app) testProxy(parent context.Context, id int64, name string) proxyTest
 	client, err := clientForProxy(proxyURL)
 	if err != nil {
 		result.Error = err.Error()
-		a.markProxyTestFailed(id, result.Error)
 		return result
 	}
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
@@ -1388,7 +1413,6 @@ func (a *app) testProxy(parent context.Context, id int64, name string) proxyTest
 	result.LatencyMS = time.Since(started).Milliseconds()
 	if err != nil {
 		result.Error = "proxy test failed: " + err.Error()
-		a.markProxyTestFailed(id, result.Error)
 		return result
 	}
 	defer resp.Body.Close()
@@ -1397,17 +1421,37 @@ func (a *app) testProxy(parent context.Context, id int64, name string) proxyTest
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || strings.TrimSpace(payload.IP) == "" {
 		result.Error = "proxy test returned an invalid response"
-		a.markProxyTestFailed(id, result.Error)
 		return result
 	}
 	result.Success = true
 	result.IP = strings.TrimSpace(payload.IP)
-	_, _ = a.db.Exec(`UPDATE proxies SET status = 'active', exit_ip = ?, latency_ms = ?, last_test_at = `+nowSQL+`, last_error = '', updated_at = `+nowSQL+` WHERE id = ?`, result.IP, result.LatencyMS, id)
 	return result
 }
 
-func (a *app) markProxyTestFailed(id int64, message string) {
-	_, _ = a.db.Exec(`UPDATE proxies SET status = 'error', last_test_at = `+nowSQL+`, last_error = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, sanitizeErrorMessage(message), id)
+func (a *app) persistProxyTestResults(items []proxyTestResult) error {
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, item := range items {
+		if item.Error == "proxy not found or disabled" {
+			continue
+		}
+		if item.Success {
+			if _, err := tx.Exec(`UPDATE proxies SET status = 'active', exit_ip = ?, latency_ms = ?, last_test_at = `+nowSQL+`, last_error = '', updated_at = `+nowSQL+` WHERE id = ? AND status != 'disabled' AND deleted_at IS NULL`, item.IP, item.LatencyMS, item.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE proxies SET status = 'error', last_test_at = `+nowSQL+`, last_error = ?, updated_at = `+nowSQL+` WHERE id = ? AND status != 'disabled' AND deleted_at IS NULL`, sanitizeErrorMessage(item.Error), item.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (a *app) proxyURLForTest(id int64) (*url.URL, error) {

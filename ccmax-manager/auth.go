@@ -431,7 +431,10 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		_, _ = a.db.Exec(`DELETE FROM panel_sessions WHERE token_hash = ?`, hashToken(cookie.Value))
+		if _, err := a.db.Exec(`DELETE FROM panel_sessions WHERE token_hash = ?`, hashToken(cookie.Value)); err != nil {
+			writeDBError(w, err)
+			return
+		}
 	}
 	http.SetCookie(w, expiredSessionCookie())
 	w.WriteHeader(http.StatusNoContent)
@@ -573,7 +576,9 @@ func (a *app) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.Password != "" {
 		hash, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, password_hash = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), input.Balance, input.RPM, id)
-		_, _ = a.db.Exec(`DELETE FROM panel_sessions WHERE user_id = ?`, id)
+		if err == nil {
+			_, err = a.db.Exec(`DELETE FROM panel_sessions WHERE user_id = ?`, id)
+		}
 	} else {
 		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, input.Role, input.Status, string(allowed), string(visible), input.Balance, input.RPM, id)
 	}

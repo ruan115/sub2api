@@ -155,6 +155,47 @@ func TestProxyPoolUpdateSynchronizesExistingProxyProtocols(t *testing.T) {
 	}
 }
 
+func TestPersistProxyTestResultsWritesBatchAndPreservesDisabled(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	ids := make([]int64, 0, 3)
+	for index, status := range []string{"active", "active", "disabled"} {
+		result, err := a.db.Exec(`INSERT INTO proxies (pool_id, name, protocol, host, port, status) VALUES (1, ?, 'http', ?, ?, ?)`, fmt.Sprintf("batch-%d", index), fmt.Sprintf("192.0.2.%d", index+20), 8000+index, status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		ids = append(ids, id)
+	}
+	if err := a.persistProxyTestResults([]proxyTestResult{
+		{ID: ids[0], Success: true, IP: "203.0.113.10", LatencyMS: 42},
+		{ID: ids[1], Error: "connection refused"},
+		{ID: ids[2], Success: true, IP: "203.0.113.12", LatencyMS: 21},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := a.db.Query(`SELECT status, exit_ip, last_error FROM proxies WHERE id IN (?, ?, ?) ORDER BY id`, ids[0], ids[1], ids[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := [][3]string{}
+	for rows.Next() {
+		var status, exitIP, lastError string
+		if err := rows.Scan(&status, &exitIP, &lastError); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, [3]string{status, exitIP, lastError})
+	}
+	if len(got) != 3 || got[0] != [3]string{"active", "203.0.113.10", ""} || got[1] != [3]string{"error", "", "connection refused"} || got[2][0] != "disabled" {
+		t.Fatalf("persisted proxy results = %#v", got)
+	}
+}
+
 func TestProxyPoolUpdateRejectsProtocolMergeCollision(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

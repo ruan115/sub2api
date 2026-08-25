@@ -123,7 +123,9 @@ func (a *app) syncModelPrices(parent context.Context, force bool) (pricingSyncSt
 	if !validPricingSyncURL(state.RemoteURL) || (state.HashURL != "" && !validPricingSyncURL(state.HashURL)) {
 		return state, errors.New("pricing sync URLs must use HTTPS")
 	}
-	_, _ = a.db.Exec(`UPDATE pricing_sync_state SET status = 'syncing', last_checked_at = ` + nowSQL + `, last_error = '' WHERE id = 1`)
+	if _, err := a.db.Exec(`UPDATE pricing_sync_state SET status = 'syncing', last_checked_at = ` + nowSQL + `, last_error = '' WHERE id = 1`); err != nil {
+		return state, err
+	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	remoteHash := ""
@@ -135,7 +137,9 @@ func (a *app) syncModelPrices(parent context.Context, force bool) (pricingSyncSt
 		}
 	}
 	if !force && remoteHash != "" && strings.EqualFold(remoteHash, state.RemoteHash) {
-		_, _ = a.db.Exec(`UPDATE pricing_sync_state SET status = 'current', remote_url = ?, hash_url = ?, last_checked_at = `+nowSQL+`, last_error = '' WHERE id = 1`, state.RemoteURL, state.HashURL)
+		if _, err := a.db.Exec(`UPDATE pricing_sync_state SET status = 'current', remote_url = ?, hash_url = ?, last_checked_at = `+nowSQL+`, last_error = '' WHERE id = 1`, state.RemoteURL, state.HashURL); err != nil {
+			return state, err
+		}
 		return a.getPriceSyncState()
 	}
 	body, err := fetchPricingResource(ctx, state.RemoteURL, 32<<20)
@@ -217,7 +221,8 @@ func (a *app) setPriceSyncError(err error) {
 	if len(message) > 800 {
 		message = message[:800]
 	}
-	_, _ = a.db.Exec(`UPDATE pricing_sync_state SET status = 'error', last_checked_at = `+nowSQL+`, last_error = ? WHERE id = 1`, message)
+	_, writeErr := a.db.Exec(`UPDATE pricing_sync_state SET status = 'error', last_checked_at = `+nowSQL+`, last_error = ? WHERE id = 1`, message)
+	logDatabaseWriteError("record pricing sync error", writeErr)
 }
 
 func fetchPricingResource(ctx context.Context, resourceURL string, limit int64) ([]byte, error) {

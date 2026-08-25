@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -22,6 +24,16 @@ import (
 // needs from a real SSH proxy.
 func startTestSSHProxy(t *testing.T, username, password string) string {
 	t.Helper()
+	return startTestSSHProxyWithPasswordCallback(t, func(conn ssh.ConnMetadata, secret []byte) (*ssh.Permissions, error) {
+		if conn.User() != username || string(secret) != password {
+			return nil, fmt.Errorf("invalid credentials")
+		}
+		return nil, nil
+	})
+}
+
+func startTestSSHProxyWithPasswordCallback(t *testing.T, callback func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error)) string {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -30,14 +42,7 @@ func startTestSSHProxy(t *testing.T, username, password string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := &ssh.ServerConfig{
-		PasswordCallback: func(conn ssh.ConnMetadata, secret []byte) (*ssh.Permissions, error) {
-			if conn.User() != username || string(secret) != password {
-				return nil, fmt.Errorf("invalid credentials")
-			}
-			return nil, nil
-		},
-	}
+	config := &ssh.ServerConfig{PasswordCallback: callback}
 	config.AddHostKey(signer)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -166,6 +171,55 @@ func TestSSHProxyRejectsWrongPassword(t *testing.T) {
 	defer sshTunnels.Delete(proxyURL.String())
 	if _, err := tunnel.DialContext(context.Background(), "tcp", "127.0.0.1:1"); err == nil {
 		t.Fatal("expected authentication failure")
+	}
+}
+
+func TestSSHDifferentEndpointsHandshakeConcurrently(t *testing.T) {
+	ready := make(chan struct{})
+	var callbacks atomic.Int32
+	callback := func(_ ssh.ConnMetadata, _ []byte) (*ssh.Permissions, error) {
+		if callbacks.Add(1) == 2 {
+			close(ready)
+		}
+		select {
+		case <-ready:
+			return nil, nil
+		case <-time.After(2 * time.Second):
+			return nil, fmt.Errorf("other SSH endpoint did not handshake concurrently")
+		}
+	}
+	addresses := []string{
+		startTestSSHProxyWithPasswordCallback(t, callback),
+		startTestSSHProxyWithPasswordCallback(t, callback),
+	}
+	results := make(chan error, len(addresses))
+	for _, address := range addresses {
+		proxyURL, err := url.Parse("ssh://root:secret@" + address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tunnel, err := sshTunnelFor(proxyURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			sshTunnels.Delete(proxyURL.String())
+			tunnel.mu.Lock()
+			client := tunnel.client
+			tunnel.mu.Unlock()
+			tunnel.discard(client)
+		})
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err := tunnel.ensureClient(ctx)
+			results <- err
+		}()
+	}
+	for range addresses {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

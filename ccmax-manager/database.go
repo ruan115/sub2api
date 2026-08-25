@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -27,11 +28,15 @@ type databaseTx struct {
 }
 
 func (db *database) Exec(query string, args ...any) (sql.Result, error) {
-	return db.DB.Exec(db.query(query), db.args(args)...)
+	return retryDatabaseWrite(context.Background(), db.dialect, func() (sql.Result, error) {
+		return db.DB.Exec(db.query(query), db.args(args)...)
+	})
 }
 
 func (db *database) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return db.DB.ExecContext(ctx, db.query(query), db.args(args)...)
+	return retryDatabaseWrite(ctx, db.dialect, func() (sql.Result, error) {
+		return db.DB.ExecContext(ctx, db.query(query), db.args(args)...)
+	})
 }
 
 func (db *database) Query(query string, args ...any) (*sql.Rows, error) {
@@ -51,7 +56,9 @@ func (db *database) QueryRowContext(ctx context.Context, query string, args ...a
 }
 
 func (db *database) Begin() (*databaseTx, error) {
-	tx, err := db.DB.Begin()
+	tx, err := retryDatabaseBegin(context.Background(), db.dialect, func() (*sql.Tx, error) {
+		return db.DB.Begin()
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +66,9 @@ func (db *database) Begin() (*databaseTx, error) {
 }
 
 func (db *database) BeginTx(ctx context.Context, opts *sql.TxOptions) (*databaseTx, error) {
-	tx, err := db.DB.BeginTx(ctx, opts)
+	tx, err := retryDatabaseBegin(ctx, db.dialect, func() (*sql.Tx, error) {
+		return db.DB.BeginTx(ctx, opts)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -67,11 +76,15 @@ func (db *database) BeginTx(ctx context.Context, opts *sql.TxOptions) (*database
 }
 
 func (tx *databaseTx) Exec(query string, args ...any) (sql.Result, error) {
-	return tx.Tx.Exec(rewriteQuery(tx.dialect, query), normalizeQueryArgs(tx.dialect, args)...)
+	return retryDatabaseWrite(context.Background(), tx.dialect, func() (sql.Result, error) {
+		return tx.Tx.Exec(rewriteQuery(tx.dialect, query), normalizeQueryArgs(tx.dialect, args)...)
+	})
 }
 
 func (tx *databaseTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return tx.Tx.ExecContext(ctx, rewriteQuery(tx.dialect, query), normalizeQueryArgs(tx.dialect, args)...)
+	return retryDatabaseWrite(ctx, tx.dialect, func() (sql.Result, error) {
+		return tx.Tx.ExecContext(ctx, rewriteQuery(tx.dialect, query), normalizeQueryArgs(tx.dialect, args)...)
+	})
 }
 
 func (tx *databaseTx) Query(query string, args ...any) (*sql.Rows, error) {
@@ -96,6 +109,66 @@ func (db *database) query(query string) string {
 
 func (db *database) args(args []any) []any {
 	return normalizeQueryArgs(db.dialect, args)
+}
+
+const sqliteWriteRetryAttempts = 6
+
+func retryDatabaseWrite(ctx context.Context, dialect databaseDialect, operation func() (sql.Result, error)) (sql.Result, error) {
+	var result sql.Result
+	var err error
+	for attempt := 0; attempt < sqliteWriteRetryAttempts; attempt++ {
+		result, err = operation()
+		if dialect != dialectSQLite || !isSQLiteLockError(err) {
+			return result, err
+		}
+		if waitErr := waitDatabaseRetry(ctx, attempt); waitErr != nil {
+			return result, waitErr
+		}
+	}
+	return result, err
+}
+
+func retryDatabaseBegin(ctx context.Context, dialect databaseDialect, operation func() (*sql.Tx, error)) (*sql.Tx, error) {
+	var tx *sql.Tx
+	var err error
+	for attempt := 0; attempt < sqliteWriteRetryAttempts; attempt++ {
+		tx, err = operation()
+		if dialect != dialectSQLite || !isSQLiteLockError(err) {
+			return tx, err
+		}
+		if waitErr := waitDatabaseRetry(ctx, attempt); waitErr != nil {
+			return nil, waitErr
+		}
+	}
+	return nil, err
+}
+
+func isSQLiteLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database table is locked") ||
+		strings.Contains(message, "database is busy")
+}
+
+func waitDatabaseRetry(ctx context.Context, attempt int) error {
+	delay := 20 * time.Millisecond * time.Duration(1<<attempt)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func logDatabaseWriteError(operation string, err error) {
+	if err != nil {
+		log.Printf("database write %s: %v", operation, err)
+	}
 }
 
 func normalizeQueryArgs(dialect databaseDialect, args []any) []any {

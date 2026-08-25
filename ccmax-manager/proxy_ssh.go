@@ -20,8 +20,7 @@ const sshProxyScheme = "ssh"
 const proxyProtocolCheckList = `'socks5', 'http', 'https', 'ssh'`
 
 var (
-	sshTunnels   sync.Map // proxy URL string -> *sshTunnel
-	sshTunnelsMu sync.Mutex
+	sshTunnels sync.Map // proxy URL string -> *sshTunnel
 )
 
 // sshTunnel turns an SSH server into an outbound proxy. One SSH connection is
@@ -213,25 +212,13 @@ func (t *sshTunnel) DialContext(ctx context.Context, network, address string) (n
 }
 
 func (t *sshTunnel) ensureClient(ctx context.Context) (*ssh.Client, error) {
+	// A tunnel serializes its own cold handshake. Different endpoints keep
+	// independent locks so a batch probe can establish SSH sessions in parallel.
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.client != nil {
-		client := t.client
-		t.mu.Unlock()
-		return client, nil
+		return t.client, nil
 	}
-	t.mu.Unlock()
-
-	// Serialize handshakes across tunnels so a burst on a cold pool does not
-	// open one SSH connection per in-flight request.
-	sshTunnelsMu.Lock()
-	defer sshTunnelsMu.Unlock()
-	t.mu.Lock()
-	if t.client != nil {
-		client := t.client
-		t.mu.Unlock()
-		return client, nil
-	}
-	t.mu.Unlock()
 
 	dialer := &net.Dialer{Timeout: t.config.Timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", t.address)
@@ -250,9 +237,7 @@ func (t *sshTunnel) ensureClient(ctx context.Context) (*ssh.Client, error) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 	client := ssh.NewClient(clientConn, channels, requests)
-	t.mu.Lock()
 	t.client = client
-	t.mu.Unlock()
 	go func() {
 		// Drop the cached session as soon as the server hangs up so the next
 		// dial reconnects instead of failing.

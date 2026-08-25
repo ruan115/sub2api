@@ -3635,28 +3635,24 @@ label small {
   min-height: 180px;
 }
 #strategy-accordion {
-  overflow: hidden;
+  overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
 }
-.strategy-accordion-scroll {
-  width: 100%;
-  overflow-x: auto;
-}
 .strategy-accordion-table {
   width: 100%;
-  min-width: 1080px;
+  min-width: 760px;
   table-layout: fixed;
 }
 .strategy-accordion-table .strategy-col-name {
-  width: 24%;
+  width: 34%;
 }
 .strategy-accordion-table .strategy-col-status {
-  width: 12%;
+  width: 16%;
 }
 .strategy-accordion-table .strategy-col-binding {
-  width: 15%;
+  width: 22%;
 }
 .strategy-accordion-table > thead th {
   height: 40px;
@@ -3667,7 +3663,7 @@ label small {
   white-space: nowrap;
 }
 .strategy-summary-row td {
-  height: 62px;
+  height: 58px;
   padding: 8px 14px;
   overflow: hidden;
   background: var(--panel);
@@ -3722,109 +3718,90 @@ label small {
   transform: rotate(90deg);
 }
 .strategy-trigger-copy,
-.strategy-mode {
+.strategy-summary-row td,
+.strategy-account-detail-row td {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strategy-trigger-copy {
   display: block;
   min-width: 0;
   overflow: hidden;
 }
 .strategy-trigger-copy strong,
-.strategy-trigger-copy small,
-.strategy-mode strong,
-.strategy-mode small {
+.strategy-trigger-copy small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.strategy-trigger-copy strong,
-.strategy-mode strong {
+.strategy-trigger-copy strong {
   font-size: 12px;
   font-weight: 700;
 }
-.strategy-trigger-copy small,
-.strategy-mode small {
+.strategy-trigger-copy small {
   margin-top: 4px;
   color: var(--muted);
   font-size: 9px;
   font-weight: 500;
 }
-.strategy-detail-row[hidden] {
-  display: none;
+.strategy-summary-row td.num,
+.strategy-account-detail-row td.num {
+  text-align: right;
 }
-.strategy-detail-row > td {
-  height: auto;
-  padding: 0;
-  border-bottom: 1px solid var(--line);
-  background: #f5f7f6;
-}
-.strategy-detail-panel {
-  padding: 12px 14px 16px 52px;
-  animation: strategy-accordion-reveal 180ms ease-out;
-}
-.strategy-detail-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
+.strategy-summary-row td > small {
   color: var(--muted);
-  font-size: 10px;
-}
-.strategy-detail-head strong {
-  color: var(--ink);
-  font-size: 11px;
-}
-.strategy-detail-head span {
-  white-space: nowrap;
-}
-.strategy-account-table-wrap {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-}
-.strategy-account-table {
-  min-width: 820px;
-  table-layout: fixed;
-}
-.strategy-account-table th {
-  height: 32px;
-  padding: 0 12px;
   font-size: 9px;
 }
-.strategy-account-table td {
-  height: 44px;
-  padding: 7px 12px;
-  overflow: hidden;
-  font-size: 11px;
-  text-overflow: ellipsis;
+.strategy-survival {
+  margin-left: 8px;
   white-space: nowrap;
 }
-.strategy-account-table th:nth-child(1) {
-  width: 24%;
+.strategy-account-detail-row[hidden] {
+  display: none;
 }
-.strategy-account-table th:nth-child(2) {
-  width: 16%;
+.strategy-account-detail-row td {
+  height: 46px;
+  padding: 7px 14px;
+  border-bottom: 1px solid #e9edea;
+  background: #f8faf9;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  animation: strategy-accordion-reveal 180ms ease-out;
 }
-.strategy-account-table th:nth-child(3),
-.strategy-account-table th:nth-child(4),
-.strategy-account-table th:nth-child(5) {
-  width: 13%;
+.strategy-account-detail-row:hover td {
+  background: #f3f7f5;
 }
-.strategy-account-table th:nth-child(6) {
-  width: 12%;
+.strategy-account-detail-row td:first-child {
+  padding-left: 28px;
+}
+.strategy-account-indent {
+  display: inline-block;
+  width: 16px;
+  height: 13px;
+  margin-right: 9px;
+  border-bottom: 1px solid #bdc8c2;
+  border-left: 1px solid #bdc8c2;
+  vertical-align: 3px;
 }
 .strategy-account-name,
-.strategy-account-groups,
-.strategy-binding-source {
-  display: block;
+.strategy-account-groups {
+  display: inline-block;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  vertical-align: middle;
   white-space: nowrap;
 }
+.strategy-account-name {
+  max-width: calc(100% - 30px);
+  vertical-align: middle;
+}
 .strategy-account-empty td {
-  height: 82px;
+  height: 64px;
   color: var(--muted);
   text-align: center;
 }
@@ -3835,17 +3812,16 @@ label small {
   vertical-align: -3px;
 }
 .strategy-accordion-placeholder {
-  display: grid;
-  min-height: 180px;
-  place-items: center;
-  align-content: center;
-  gap: 8px;
+  height: 150px;
   color: var(--muted);
   font-size: 12px;
+  text-align: center;
 }
 .strategy-accordion-placeholder svg {
   width: 18px;
   height: 18px;
+  margin-right: 8px;
+  vertical-align: -4px;
 }
 @keyframes strategy-accordion-reveal {
   from {
@@ -3855,10 +3831,5 @@ label small {
   to {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-@media (max-width: 720px) {
-  .strategy-detail-panel {
-    padding-left: 14px;
   }
 }

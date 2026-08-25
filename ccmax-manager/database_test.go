@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +35,38 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 				t.Fatalf("MySQL query still contains %q:\n%s", forbidden, rewritten)
 			}
 		}
+	}
+}
+
+func TestSQLiteLockErrorsAreRetryable(t *testing.T) {
+	for _, message := range []string{
+		"database is locked",
+		"database table is locked: proxies",
+		"database is busy",
+	} {
+		if !isSQLiteLockError(errors.New(message)) {
+			t.Fatalf("%q was not classified as a SQLite lock error", message)
+		}
+	}
+	if isSQLiteLockError(errors.New("constraint failed")) {
+		t.Fatal("non-lock database error was classified as retryable")
+	}
+}
+
+func TestSQLiteWriteRetriesUntilLockClears(t *testing.T) {
+	attempts := 0
+	_, err := retryDatabaseWrite(t.Context(), dialectSQLite, func() (sql.Result, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New("database is locked")
+		}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("write attempts = %d, want 3", attempts)
 	}
 }
 

@@ -136,7 +136,8 @@ func (a *app) refreshExpiringTokens(parent context.Context) {
 				if refreshErr != nil {
 					until := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
 					reason := "token refresh retry exhausted: " + refreshErr.Error()
-					_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND auth_status != 'reauth_required'`, until, reason, account.ID)
+					_, writeErr := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND auth_status != 'reauth_required'`, until, reason, account.ID)
+					logDatabaseWriteError("record token refresh cooldown", writeErr)
 					log.Printf("token refresh account %d: %v", account.ID, refreshErr)
 				}
 			}

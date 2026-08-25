@@ -807,8 +807,9 @@ func (a *app) recordGatewayError(r *http.Request, response *gatewayErrorResponse
 		message = string(runes[:1000])
 	}
 	rpmSnapshot, tpmSnapshot, totalRequests := a.accountLoadSnapshot(response.accountID)
-	_, _ = a.db.Exec(`INSERT INTO gateway_error_logs (request_id, client_request_id, trace_id, upstream_request_id, api_key_id, user_id, account_id, group_id, status_code, category, method, path, message, client_ip, dispatch_diagnostics, duration_ms, rpm_snapshot, tpm_snapshot, total_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = a.db.Exec(`INSERT INTO gateway_error_logs (request_id, client_request_id, trace_id, upstream_request_id, api_key_id, user_id, account_id, group_id, status_code, category, method, path, message, client_ip, dispatch_diagnostics, duration_ms, rpm_snapshot, tpm_snapshot, total_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		requestID, clientRequestID, traceID, upstreamRequestID, key.ID, key.UserID, optionalID(response.accountID), key.GroupID, status, category, r.Method, r.URL.Path, message, requestIP(r), response.dispatchDiagnostics, response.durationMS, rpmSnapshot, tpmSnapshot, totalRequests)
+	logDatabaseWriteError("insert gateway error log", err)
 	_ = a.pruneGatewayErrorLogs(false)
 }
 

@@ -228,7 +228,7 @@ type strategyObservation struct {
 }
 
 // handleStrategyObserve returns every strategy with its live per-account load
-// so the observation page can render cards and the tree table.
+// so the observation page can render cards and the accordion table.
 func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 	strategies, err := a.listDispatchStrategies()
 	if err != nil {

@@ -68,5 +68,6 @@ func (a *app) releaseAccountTokenLease(accountID int64, owner string) {
 	if accountID <= 0 || owner == "" {
 		return
 	}
-	_, _ = a.db.Exec(`DELETE FROM account_token_leases WHERE account_id = ? AND owner = ?`, accountID, owner)
+	_, err := a.db.Exec(`DELETE FROM account_token_leases WHERE account_id = ? AND owner = ?`, accountID, owner)
+	logDatabaseWriteError("release account token lease", err)
 }

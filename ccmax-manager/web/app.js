@@ -5,6 +5,7 @@ const state = {
   groups: [],
   strategies: [],
   strategiesLoaded: false,
+  strategiesLoading: null,
   accounts: [],
   archivedAccounts: [],
   accountSummary: null,
@@ -634,16 +635,12 @@ async function loadCore() {
     if (state.groups.length) hydrateGroupControls();
     if (canView("billing") && !canView("overview"))
       state.purposes = await api("/api/purposes");
-    if (canView("accounts") || canView("dead") || canView("onboarding")) {
-      await loadAccounts();
-    }
-    if (canView("proxies") || canView("onboarding")) {
-      [state.proxyPools, state.proxies] = await Promise.all([
-        api("/api/proxy-pools"),
-        api("/api/proxies"),
-      ]);
-      if (canView("proxies")) renderProxies();
-    }
+    const inventoryLoads = [];
+    if (canView("accounts") || canView("dead") || canView("onboarding"))
+      inventoryLoads.push(loadAccounts());
+    if (canView("proxies") || canView("onboarding"))
+      inventoryLoads.push(loadProxyInventory());
+    await Promise.all(inventoryLoads);
     if (canView("pricing")) {
       [state.prices, state.pricingSync] = await Promise.all([
         api("/api/prices"),
@@ -708,6 +705,14 @@ async function loadAccounts() {
   } finally {
     state.accountsLoading = null;
   }
+}
+
+async function loadProxyInventory() {
+  [state.proxyPools, state.proxies] = await Promise.all([
+    api("/api/proxy-pools"),
+    api("/api/proxies"),
+  ]);
+  if (canView("proxies")) renderProxies();
 }
 
 async function loadRealtime() {
@@ -1058,13 +1063,34 @@ let strategyAccordionInitialized = false;
 
 async function loadStrategies() {
   if (!canView("strategies")) return;
-  try {
+  if (state.strategiesLoading) return state.strategiesLoading;
+  state.strategiesLoading = (async () => {
     state.strategies = await api("/api/strategies/observe");
     state.strategiesLoaded = true;
     renderStrategies();
+  })();
+  try {
+    return await state.strategiesLoading;
   } catch (error) {
     toast(error.message, "error");
+  } finally {
+    state.strategiesLoading = null;
   }
+}
+
+function initializeStrategyRefresh() {
+  window.setInterval(() => {
+    if (
+      !state.me ||
+      state.view !== "strategies" ||
+      document.hidden ||
+      $("dialog[open]") ||
+      state.strategiesLoading ||
+      !canView("strategies")
+    )
+      return;
+    loadStrategies();
+  }, realtimeRefreshInterval);
 }
 
 function strategyLimitText(value, unit = "") {
@@ -1205,11 +1231,11 @@ function strategySummaryStatus(item) {
   return { label: "运行正常", className: "ok" };
 }
 
-function strategyAccountRows(item) {
+function strategyAccountRows(item, open) {
   const accounts = item.accounts || [];
   if (!accounts.length) {
-    return `<tr class="strategy-account-empty">
-      <td colspan="7"><i data-lucide="inbox"></i><span>该策略暂未绑定账号</span></td>
+    return `<tr class="strategy-account-detail-row strategy-account-empty" ${open ? "" : "hidden"}>
+      <td colspan="5"><i data-lucide="inbox"></i><span>该策略暂未绑定账号</span></td>
     </tr>`;
   }
   return accounts
@@ -1229,26 +1255,12 @@ function strategyAccountRows(item) {
       const groups = account.group_ids?.length
         ? account.group_ids.join("、")
         : "未分组";
-      const bindingSource = account.direct_binding ? "账号直绑" : "分组继承";
-      const rpmLimit =
-        item.rpm_limit > 0
-          ? item.rpm_limit
-          : account.base_rpm > 0
-            ? account.base_rpm
-            : 0;
-      const accountConcurrency = Number(account.concurrency || 0);
-      const concurrencyLimit =
-        item.concurrency_limit > 0
-          ? Math.min(accountConcurrency, item.concurrency_limit)
-          : accountConcurrency;
-      return `<tr>
-        <td><strong class="strategy-account-name" title="${escapeHTML(account.name)}">${escapeHTML(account.name)}</strong></td>
-        <td><span class="strategy-account-groups" title="${escapeHTML(groups)}">${escapeHTML(groups)}</span></td>
-        <td>${Number(account.rpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(rpmLimit)}</td>
-        <td>${Number(account.tpm || 0).toLocaleString("zh-CN")}</td>
-        <td>${Number(account.inflight || 0).toLocaleString("zh-CN")} / ${strategyLimitText(concurrencyLimit)}</td>
+      return `<tr class="strategy-account-detail-row" ${open ? "" : "hidden"}>
+        <td><span class="strategy-account-indent" aria-hidden="true"></span><strong class="strategy-account-name" title="${escapeHTML(account.name)}">${escapeHTML(account.name)}</strong></td>
+        <td class="num" title="当前 RPM ${Number(account.rpm || 0).toLocaleString("zh-CN")}">${Number(account.rpm || 0).toLocaleString("zh-CN")}</td>
+        <td class="num" title="当前 TPM ${Number(account.tpm || 0).toLocaleString("zh-CN")}">${Number(account.tpm || 0).toLocaleString("zh-CN")}</td>
         <td><span class="pill ${dispatchClass}" title="${escapeHTML(account.status || dispatchLabel)}">${dispatchLabel}</span></td>
-        <td><span class="strategy-binding-source" title="${escapeHTML(`${bindingSource} · ${groups}`)}">${bindingSource}</span></td>
+        <td><span class="strategy-account-groups" title="${escapeHTML(groups)}">${escapeHTML(groups)}</span></td>
       </tr>`;
     })
     .join("");
@@ -1260,29 +1272,23 @@ function renderStrategyAccordion(strategies) {
   if (!strategies.length) {
     expandedStrategyID = "";
     strategyAccordionInitialized = false;
-    root.innerHTML = `<div class="strategy-accordion-placeholder">
-      <i data-lucide="list-tree"></i>
-      <span>暂无策略数据</span>
-    </div>`;
+    root.innerHTML = `<table class="strategy-accordion-table"><tbody><tr class="strategy-accordion-placeholder"><td colspan="5"><i data-lucide="list-tree"></i><span>暂无策略数据</span></td></tr></tbody></table>`;
     return;
   }
 
   if (!strategyAccordionInitialized) {
-    expandedStrategyID = String(strategies[0].id);
+    expandedStrategyID = "";
     strategyAccordionInitialized = true;
   } else if (
     expandedStrategyID &&
     !strategies.some((item) => String(item.id) === expandedStrategyID)
   ) {
-    expandedStrategyID = String(strategies[0].id);
+    expandedStrategyID = "";
   }
 
-  root.innerHTML = `<div class="strategy-accordion-scroll">
-    <table class="strategy-accordion-table">
+  root.innerHTML = `<table class="strategy-accordion-table">
       <colgroup>
         <col class="strategy-col-name" />
-        <col />
-        <col />
         <col />
         <col />
         <col class="strategy-col-status" />
@@ -1290,13 +1296,11 @@ function renderStrategyAccordion(strategies) {
       </colgroup>
       <thead>
         <tr>
-          <th>策略</th>
-          <th>RPM（当前 / 限制）</th>
-          <th>TPM（当前 / 限制）</th>
-          <th>在途 / 并发</th>
-          <th>存活 / 绑定</th>
-          <th>状态</th>
-          <th>算法 / 绑定</th>
+          <th>策略 / 账号</th>
+          <th class="num">当前 RPM</th>
+          <th class="num">当前 TPM</th>
+          <th>存活状态</th>
+          <th>分组</th>
         </tr>
       </thead>
       ${strategies
@@ -1304,16 +1308,13 @@ function renderStrategyAccordion(strategies) {
           const strategyID = String(item.id);
           const open = expandedStrategyID === strategyID;
           const status = strategySummaryStatus(item);
-          const rpmMode =
-            strategyRPMModeLabels[item.rpm_strategy] || item.rpm_strategy;
           const dispatchMode =
             strategyModeLabels[item.dispatch_mode] ?? item.dispatch_mode;
           const description = item.description || dispatchMode || "未填写说明";
-          const accountCount = (item.accounts || []).length;
           return `<tbody class="strategy-accordion-group ${open ? "is-open" : ""}">
             <tr class="strategy-summary-row">
               <td>
-                <button class="strategy-accordion-trigger" type="button" data-strategy-toggle="${item.id}" aria-expanded="${open}" aria-controls="strategy-detail-${item.id}" title="${open ? "收起账号详情" : "展开账号详情"}">
+                <button class="strategy-accordion-trigger" type="button" data-strategy-toggle="${item.id}" aria-expanded="${open}" title="${open ? "收起账号详情" : "展开账号详情"}">
                   <span class="strategy-trigger-icon"><i data-lucide="chevron-right"></i></span>
                   <span class="strategy-trigger-copy">
                     <strong title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</strong>
@@ -1321,49 +1322,16 @@ function renderStrategyAccordion(strategies) {
                   </span>
                 </button>
               </td>
-              <td title="${item.current_rpm} / ${strategyLimitText(item.rpm_limit)}">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.rpm_limit)}</td>
-              <td title="${Number(item.current_tpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}">${Number(item.current_tpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}</td>
-              <td>${Number(item.current_inflight || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.concurrency_limit)}</td>
-              <td title="${item.accounts_alive} 个存活，${item.bound_accounts} 个已绑定">${item.accounts_alive} / ${item.bound_accounts}</td>
-              <td><span class="pill ${status.className}" title="${escapeHTML(status.label)}">${escapeHTML(status.label)}</span></td>
-              <td>
-                <span class="strategy-mode" title="${escapeHTML(`${rpmMode} / ${dispatchMode} / ${item.bound_groups} 个分组`)}">
-                  <strong>${escapeHTML(dispatchMode)}</strong>
-                  <small>${escapeHTML(rpmMode)} · ${item.bound_groups} 组</small>
-                </span>
-              </td>
+              <td class="num" title="当前 ${item.current_rpm}，限制 ${strategyLimitText(item.rpm_limit)}">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyLimitText(item.rpm_limit)}</small></td>
+              <td class="num" title="当前 ${Number(item.current_tpm || 0).toLocaleString("zh-CN")}，限制 ${strategyLimitText(item.tpm_limit)}">${Number(item.current_tpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyLimitText(item.tpm_limit)}</small></td>
+              <td><span class="pill ${status.className}" title="${escapeHTML(status.label)}">${escapeHTML(status.label)}</span><small class="strategy-survival" title="${item.accounts_alive} 个存活，${item.bound_accounts} 个已绑定">${item.accounts_alive} / ${item.bound_accounts}</small></td>
+              <td><span class="strategy-account-groups" title="${escapeHTML(`${item.bound_groups} 个分组 · ${dispatchMode}`)}">${item.bound_groups} 个分组 · ${escapeHTML(dispatchMode)}</span></td>
             </tr>
-            <tr class="strategy-detail-row" id="strategy-detail-${item.id}" ${open ? "" : "hidden"}>
-              <td colspan="7">
-                <div class="strategy-detail-panel">
-                  <div class="strategy-detail-head">
-                    <strong>账号明细</strong>
-                    <span>${accountCount} 个账号</span>
-                  </div>
-                  <div class="strategy-account-table-wrap">
-                    <table class="strategy-account-table">
-                      <thead>
-                        <tr>
-                          <th>账号</th>
-                          <th>分组</th>
-                          <th>RPM</th>
-                          <th>TPM</th>
-                          <th>在途 / 并发</th>
-                          <th>调度状态</th>
-                          <th>绑定来源</th>
-                        </tr>
-                      </thead>
-                      <tbody>${strategyAccountRows(item)}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </td>
-            </tr>
+            ${strategyAccountRows(item, open)}
           </tbody>`;
         })
         .join("")}
-    </table>
-  </div>`;
+    </table>`;
 }
 
 function openStrategy(item = null) {
@@ -4426,6 +4394,7 @@ function initializeDates() {
 }
 initializeAccountAutoRefresh();
 initializeRealtimeRefresh();
+initializeStrategyRefresh();
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeAccountActionMenu();
 });

@@ -209,7 +209,8 @@ func (a *app) insertAudit(user panelUser, action, method, path, targetType, targ
 	if user.ID > 0 {
 		actorID = user.ID
 	}
-	_, _ = a.db.Exec(`INSERT INTO audit_logs (actor_user_id, actor_username, actor_role, action, method, path, target_type, target_id, request_body, client_ip, user_agent, status_code, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, actorID, user.Username, user.Role, action, method, path, targetType, targetID, body, clientIP, userAgent, status, durationMS)
+	_, err := a.db.Exec(`INSERT INTO audit_logs (actor_user_id, actor_username, actor_role, action, method, path, target_type, target_id, request_body, client_ip, user_agent, status_code, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, actorID, user.Username, user.Role, action, method, path, targetType, targetID, body, clientIP, userAgent, status, durationMS)
+	logDatabaseWriteError("insert audit log", err)
 }
 
 func (a *app) recordLoginAudit(r *http.Request, user panelUser, username string, status int, started time.Time) {

@@ -280,7 +280,8 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 		return
 	}
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		_, _ = a.db.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, accountID)
+		_, err := a.db.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, accountID)
+		logDatabaseWriteError("record valid upstream account", err)
 	}
 	if quota, ok := quotaFromHeaders(response.Header); ok {
 		_ = a.persistAccountQuota(accountID, quota, false)
@@ -288,7 +289,8 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 	if resetAt, window, ok := sub2service.ResolveCCMaxCompatibilityCooldownWindow(response.StatusCode, response.Header); ok {
 		// The cooldown itself only carries a reset time, so record which window
 		// caused it while the response headers are still at hand.
-		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), window, accountID)
+		_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), window, accountID)
+		logDatabaseWriteError("record account quota cooldown", err)
 	}
 }
 
@@ -312,8 +314,9 @@ func (a *app) captureAccountModelOverload(accountID int64, model string, seconds
 		return
 	}
 	resetAt := time.Now().UTC().Add(time.Duration(normalizeOverloadCooldownSeconds(seconds)) * time.Second).Format(time.RFC3339Nano)
-	_, _ = a.db.Exec(`INSERT INTO account_model_cooldowns (account_id, model, reset_at) VALUES (?, ?, ?)
+	_, err := a.db.Exec(`INSERT INTO account_model_cooldowns (account_id, model, reset_at) VALUES (?, ?, ?)
 		ON CONFLICT(account_id, model) DO UPDATE SET reset_at = excluded.reset_at, updated_at = `+nowSQL, accountID, model, resetAt)
+	logDatabaseWriteError("record account model cooldown", err)
 }
 
 func (a *app) captureGatewayUpstreamState(accountID int64, model string, overloadCooldownSeconds int, response *http.Response) {
@@ -338,8 +341,14 @@ func (a *app) captureAccountRPMThreshold(groupID string, accountID int64) {
 		return
 	}
 	defer tx.Rollback()
-	_, _ = tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`)
-	_, _ = tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL)
+	if _, err := tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`); err != nil {
+		logDatabaseWriteError("prune account RPM events", err)
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL); err != nil {
+		logDatabaseWriteError("prune account RPM thresholds", err)
+		return
+	}
 	var observedRPM int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, accountID).Scan(&observedRPM); err != nil || observedRPM <= 0 {
 		return
@@ -352,7 +361,7 @@ func (a *app) captureAccountRPMThreshold(groupID string, accountID int64) {
 			updated_at = `+nowSQL, accountID, observedRPM, resetAt); err != nil {
 		return
 	}
-	_ = tx.Commit()
+	logDatabaseWriteError("commit account RPM threshold", tx.Commit())
 }
 
 func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, body []byte) {
@@ -379,7 +388,8 @@ func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, 
 			return
 		}
 		until := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
-		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, reason, reason, account.ID)
+		_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, reason, reason, account.ID)
+		logDatabaseWriteError("record account authentication cooldown", err)
 	case http.StatusForbidden:
 		a.markAccountReauth(account.ID, "upstream access forbidden: "+message)
 	}
