@@ -21,6 +21,7 @@ func TestParseProxyLineFormats(t *testing.T) {
 	}{
 		{name: "host port", line: "proxy.example.com:8080", protocol: "socks5", host: "proxy.example.com", port: 8080},
 		{name: "host first colon", line: "proxy.example.com:8080:alice:secret", protocol: "socks5", host: "proxy.example.com", port: 8080, username: "alice", password: "secret"},
+		{name: "host first ip colon", line: "192.0.2.10:22:root:test-password", protocol: "socks5", host: "192.0.2.10", port: 22, username: "root", password: "test-password"},
 		{name: "user first colon", line: "alice:secret:proxy.example.com:8080", protocol: "socks5", host: "proxy.example.com", port: 8080, username: "alice", password: "secret"},
 		{name: "user first at", line: "alice:pa:ss@proxy.example.com:8080", protocol: "socks5", host: "proxy.example.com", port: 8080, username: "alice", password: "pa:ss"},
 		{name: "host first at", line: "proxy.example.com:8080@alice:pa:ss", protocol: "socks5", host: "proxy.example.com", port: 8080, username: "alice", password: "pa:ss"},

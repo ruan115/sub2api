@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
@@ -85,6 +86,9 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 	if err != nil {
 		return accountQuota{}, errors.New("CCMAX account proxy is unavailable")
 	}
+	// Keep plan metadata current whenever an administrator explicitly refreshes
+	// account quota. Quota remains available even if profile metadata is down.
+	_ = a.syncClaudeAccountProfile(ctx, accountID, account.CredentialsJSON, proxy.String())
 	client, err := clientForProxy(proxy)
 	if err != nil {
 		return accountQuota{}, err
@@ -117,6 +121,7 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 				account = refreshed
 				continue
 			}
+			return accountQuota{}, refreshErr
 		}
 		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			a.captureAccountUpstreamFailure(account, response.StatusCode, body)
@@ -222,6 +227,33 @@ func quotaFromHeaders(headers http.Header) (accountQuota, bool) {
 	return quota, found
 }
 
+// exhaustedQuotaWindow reports which unified rate-limit window the upstream says
+// is exhausted. It mirrors the shared adapter's precedence (7d outranks 5h)
+// because a weekly exhaustion is the more restrictive of the two.
+func exhaustedQuotaWindow(headers http.Header) string {
+	if quotaWindowExceeded(headers, "7d") {
+		return "7d"
+	}
+	if quotaWindowExceeded(headers, "5h") {
+		return "5h"
+	}
+	return ""
+}
+
+func quotaWindowExceeded(headers http.Header, window string) bool {
+	prefix := "anthropic-ratelimit-unified-" + window + "-"
+	if strings.EqualFold(strings.TrimSpace(headers.Get(prefix+"status")), "rejected") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(headers.Get(prefix+"surpassed-threshold")), "true") {
+		return true
+	}
+	if value, err := strconv.ParseFloat(strings.TrimSpace(headers.Get(prefix+"utilization")), 64); err == nil {
+		return value >= 1.0-1e-9
+	}
+	return false
+}
+
 func resetHeaderTime(raw string) string {
 	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil || value <= 0 {
@@ -244,8 +276,73 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 		_ = a.persistAccountQuota(accountID, quota, false)
 	}
 	if resetAt, ok := sub2service.ResolveCCMaxCompatibilityCooldown(response.StatusCode, response.Header); ok {
-		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), accountID)
+		// The cooldown itself only carries a reset time, so record which window
+		// caused it while the response headers are still at hand.
+		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), exhaustedQuotaWindow(response.Header), accountID)
 	}
+}
+
+func modelCooldownKey(model string) string {
+	return strings.ToLower(strings.TrimSpace(model))
+}
+
+func normalizeOverloadCooldownSeconds(seconds int) int {
+	if seconds <= 0 {
+		return 10
+	}
+	if seconds > 600 {
+		return 600
+	}
+	return seconds
+}
+
+func (a *app) captureAccountModelOverload(accountID int64, model string, seconds int) {
+	model = modelCooldownKey(model)
+	if accountID <= 0 || model == "" {
+		return
+	}
+	resetAt := time.Now().UTC().Add(time.Duration(normalizeOverloadCooldownSeconds(seconds)) * time.Second).Format(time.RFC3339Nano)
+	_, _ = a.db.Exec(`INSERT INTO account_model_cooldowns (account_id, model, reset_at) VALUES (?, ?, ?)
+		ON CONFLICT(account_id, model) DO UPDATE SET reset_at = excluded.reset_at, updated_at = `+nowSQL, accountID, model, resetAt)
+}
+
+func (a *app) captureGatewayUpstreamState(accountID int64, model string, overloadCooldownSeconds int, response *http.Response) {
+	a.captureAccountUpstreamState(accountID, response)
+	if response != nil && response.StatusCode == 529 {
+		a.captureAccountModelOverload(accountID, model, overloadCooldownSeconds)
+	}
+}
+
+func (a *app) captureAccountRPMThreshold(groupID string, accountID int64) {
+	if accountID <= 0 {
+		return
+	}
+	if groupID != "" {
+		lockValue, _ := a.dispatchLocks.LoadOrStore(groupID, &sync.Mutex{})
+		dispatchLock := lockValue.(*sync.Mutex)
+		dispatchLock.Lock()
+		defer dispatchLock.Unlock()
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	_, _ = tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`)
+	_, _ = tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL)
+	var observedRPM int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, accountID).Scan(&observedRPM); err != nil || observedRPM <= 0 {
+		return
+	}
+	resetAt := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	if _, err := tx.Exec(`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, ?, ?)
+		ON CONFLICT(account_id) DO UPDATE SET
+			rpm_limit = MIN(account_rpm_thresholds.rpm_limit, excluded.rpm_limit),
+			reset_at = MAX(account_rpm_thresholds.reset_at, excluded.reset_at),
+			updated_at = `+nowSQL, accountID, observedRPM, resetAt); err != nil {
+		return
+	}
+	_ = tx.Commit()
 }
 
 func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, body []byte) {
@@ -257,17 +354,60 @@ func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, 
 		message = message[:500]
 	}
 	switch status {
+	case http.StatusBadRequest:
+		if accountRequiresUpstreamAction(message) {
+			a.markAccountReauth(account.ID, "upstream account action required: "+message)
+		}
 	case http.StatusUnauthorized:
+		reason := "OAuth 401: " + message
+		if accountAuthenticationFailureIsTerminal(message) {
+			a.markAccountReauth(account.ID, reason)
+			return
+		}
 		if !gatewayAccountHasRefreshToken(account) {
 			a.markAccountReauth(account.ID, "upstream authentication failed: "+message)
 			return
 		}
 		until := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
-		reason := "OAuth 401: " + message
 		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, until, reason, reason, account.ID)
 	case http.StatusForbidden:
 		a.markAccountReauth(account.ID, "upstream access forbidden: "+message)
 	}
+}
+
+func accountAuthenticationFailureIsTerminal(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(message, "access token has been revoked") ||
+		strings.Contains(message, "access token was revoked")
+}
+
+func (a *app) reclassifyRevokedOAuthAccounts() error {
+	_, err := a.db.Exec(`UPDATE accounts SET
+		` + accumulateAccountSurvivalSQL + `,
+		auth_status = 'reauth_required',
+		invalidated_at = COALESCE(invalidated_at, ` + nowSQL + `),
+		error_message = auth_error,
+		status = 'error',
+		rate_limit_reset_at = NULL,
+		updated_at = ` + nowSQL + `
+		WHERE deleted_at IS NULL
+			AND status != 'disabled'
+			AND (LOWER(auth_error) LIKE '%access token has been revoked%'
+				OR LOWER(auth_error) LIKE '%access token was revoked%')
+			AND (status != 'error' OR auth_status != 'reauth_required' OR invalidated_at IS NULL)`)
+	if err != nil {
+		return fmt.Errorf("reclassify revoked OAuth accounts: %w", err)
+	}
+	return nil
+}
+
+func accountRequiresUpstreamAction(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(message, "identity verification is required") {
+		return true
+	}
+	return strings.Contains(message, "consumer terms") &&
+		(strings.Contains(message, "accept") || strings.Contains(message, "agreement"))
 }
 
 func upstreamErrorMessage(body []byte) string {

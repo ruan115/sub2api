@@ -9,14 +9,16 @@ import (
 const realtimeWindowSeconds = 60
 
 type accountRealtimeLoad struct {
-	AccountID int64  `json:"account_id"`
-	Name      string `json:"name"`
-	RPM       int64  `json:"rpm"`
-	TPM       int64  `json:"tpm"`
-	Inflight  int64  `json:"inflight"`
-	BaseRPM   int    `json:"base_rpm"`
-	Eligible  bool   `json:"eligible"`
-	Active    bool   `json:"active"`
+	AccountID    int64  `json:"account_id"`
+	Name         string `json:"name"`
+	RPM          int64  `json:"rpm"`
+	TPM          int64  `json:"tpm"`
+	Inflight     int64  `json:"inflight"`
+	BaseRPM      int    `json:"base_rpm"`
+	EffectiveRPM int    `json:"effective_rpm"`
+	TemporaryRPM int    `json:"temporary_rpm"`
+	Eligible     bool   `json:"eligible"`
+	Active       bool   `json:"active"`
 }
 
 type realtimeLoad struct {
@@ -33,7 +35,7 @@ type realtimeLoad struct {
 }
 
 func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
-	where := []string{"a.deleted_at IS NULL"}
+	where := []string{"a.deleted_at IS NULL", "a.archived_at IS NULL"}
 	args := []any{}
 	user := currentUser(r)
 	if user.Role == "user" {
@@ -41,7 +43,7 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		where = append(where, condition)
 		args = append(args, scopeArgs...)
 	}
-	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupID == "a" || groupID == "b" {
+	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupIDPattern.MatchString(groupID) {
 		where = append(where, `EXISTS (SELECT 1 FROM account_groups filter_ag WHERE filter_ag.account_id = a.id AND filter_ag.group_id = ?)`)
 		args = append(args, groupID)
 	}
@@ -58,7 +60,8 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		GROUP BY account_id
 	)
 	SELECT a.id, a.name, a.base_rpm, COALESCE(rr.rpm, 0), COALESCE(rt.tpm, 0), COALESCE(ai.requests, 0),
-		CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN 1 ELSE 0 END
+		CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN 1 ELSE 0 END,
+		COALESCE((SELECT rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > ` + nowSQL + `), 0)
 	FROM accounts a
 	LEFT JOIN recent_rpm rr ON rr.account_id = a.id
 	LEFT JOIN recent_tokens rt ON rt.account_id = a.id
@@ -80,11 +83,16 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var item accountRealtimeLoad
 		var eligible int
-		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.Inflight, &eligible); err != nil {
+		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.Inflight, &eligible, &item.TemporaryRPM); err != nil {
 			writeDBError(w, err)
 			return
 		}
-		item.Eligible = eligible == 1
+		item.EffectiveRPM = item.BaseRPM
+		if item.TemporaryRPM > 0 && (item.EffectiveRPM <= 0 || item.TemporaryRPM < item.EffectiveRPM) {
+			item.EffectiveRPM = item.TemporaryRPM
+		}
+		temporaryThresholdReached := item.TemporaryRPM > 0 && item.RPM >= int64(item.TemporaryRPM)
+		item.Eligible = eligible == 1 && !temporaryThresholdReached
 		item.Active = item.RPM > 0 || item.Inflight > 0
 		result.RPM += item.RPM
 		result.TPM += item.TPM
@@ -94,8 +102,8 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		}
 		if item.Eligible {
 			result.EligibleAccounts++
-			if item.BaseRPM > 0 {
-				result.RPMCapacity += int64(item.BaseRPM)
+			if item.EffectiveRPM > 0 {
+				result.RPMCapacity += int64(item.EffectiveRPM)
 			} else {
 				result.Unlimited = true
 			}

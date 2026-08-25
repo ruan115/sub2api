@@ -16,17 +16,19 @@ const (
 )
 
 type claudePreparedRequest struct {
-	Body        []byte
-	Model       string
-	AuthType    string
-	OAuth       bool
-	Mimic       bool
-	ClaudeCode  bool
-	Passthrough bool
-	Stream      bool
-	CountTokens bool
-	Compat      *sub2service.CCMaxCompatibilityPrepared
-	Credentials map[string]any
+	Body                     []byte
+	Model                    string
+	AuthType                 string
+	OAuth                    bool
+	Mimic                    bool
+	ClaudeCode               bool
+	Passthrough              bool
+	Stream                   bool
+	NonStreamBridge          bool
+	CountTokens              bool
+	RejectAnthropicDowngrade bool
+	Compat                   *sub2service.CCMaxCompatibilityPrepared
+	Credentials              map[string]any
 }
 
 func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, requestedModel string, countTokens bool) (claudePreparedRequest, error) {
@@ -67,6 +69,7 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		mappedModel = mappedAccountModel(account, requestedModel)
 	}
 	fingerprint := accountCompatibilityFingerprint(account)
+	fieldPassthrough := gatewayFieldPassthroughConfig(r.Context())
 	compat, err := sub2service.PrepareCCMaxCompatibilityRequest(sub2service.CCMaxCompatibilityInput{
 		Body: body, ClientHeaders: r.Header, Model: requestedModel, Stream: stream,
 		CountTokens: countTokens, OAuth: oauth, AccessToken: accessToken,
@@ -74,17 +77,30 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		ClaudeUserID: claudeUserID, ClientIP: gatewayClientIP(r),
 		ClientUserAgent: r.UserAgent(), APIKeyID: gatewayAPIKeyID(r.Context()),
 		MappedModel: mappedModel, Fingerprint: fingerprint,
-		ForceNonClaudeCode: gatewayOpenAIChatRequest(r.Context()),
-		NormalRequestMode:  gatewayNormalRequestMode(r.Context()),
-		MCPToolNames:       accountMCPToolNames(account, gatewayMCPToolNames(r.Context())),
+		ForceNonClaudeCode:        gatewayOpenAIChatRequest(r.Context()),
+		NormalRequestMode:         gatewayNormalRequestMode(r.Context()),
+		ClaudeCodeIdentityEnabled: gatewayClaudeCodeIdentity(r.Context()),
+		MCPToolNames:              accountMCPToolNames(account, gatewayMCPToolNames(r.Context())),
+		ServiceTierPassthrough:    fieldPassthrough.ServiceTier,
+		InferenceGeoPassthrough:   fieldPassthrough.InferenceGeo,
+		SpeedPassthrough:          fieldPassthrough.Speed,
+		AnthropicBetaPassthrough:  fieldPassthrough.AnthropicBeta,
 	})
 	if err != nil {
 		return claudePreparedRequest{}, err
 	}
+	if gatewayAnthropicNonStreamBridge(r.Context()) && !countTokens {
+		compat, err = sub2service.ForceCCMaxCompatibilityStream(compat)
+		if err != nil {
+			return claudePreparedRequest{}, err
+		}
+		stream = true
+	}
 	return claudePreparedRequest{
 		Body: compat.Body, Model: compat.Model, AuthType: account.AuthType, OAuth: oauth,
 		Mimic: compat.Mimic, ClaudeCode: compat.ClaudeCode, Stream: stream,
-		CountTokens: countTokens, Compat: compat,
+		NonStreamBridge: gatewayAnthropicNonStreamBridge(r.Context()),
+		CountTokens:     countTokens, Compat: compat,
 		Credentials: credentials,
 	}, nil
 }

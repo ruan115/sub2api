@@ -1125,6 +1125,52 @@ func injectAnthropicCacheControlTTL1h(body []byte) []byte {
 }
 
 func forceEphemeralCacheControlTTL(body []byte, ttl string) []byte {
+	return setEphemeralCacheControlTTL(body, ttl, true)
+}
+
+// defaultEphemeralCacheControlTTL fills only missing ephemeral TTL values.
+// Explicit client values are preserved and remain subject to upstream validation.
+func defaultEphemeralCacheControlTTL(body []byte, ttl string) []byte {
+	return setEphemeralCacheControlTTL(body, ttl, false)
+}
+
+// normalizeEphemeralCacheControlTTLOrder keeps Anthropic's cache TTL sequence
+// valid in its processing order: tools, system, then messages. A 1h breakpoint
+// cannot follow a 5m breakpoint, so earlier 5m blocks are promoted when a later
+// 1h block exists. Complete passthrough requests never call this normalizer.
+func normalizeEphemeralCacheControlTTLOrder(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	_, messagePaths, toolPaths, systemPaths := collectCacheControlPaths(body)
+	paths := make([]string, 0, len(toolPaths)+len(systemPaths)+len(messagePaths))
+	paths = append(paths, toolPaths...)
+	paths = append(paths, systemPaths...)
+	paths = append(paths, messagePaths...)
+
+	out := body
+	oneHourFollows := false
+	for index := len(paths) - 1; index >= 0; index-- {
+		cacheControl := gjson.GetBytes(out, paths[index])
+		if cacheControl.Get("type").String() != "ephemeral" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(cacheControl.Get("ttl").String())) {
+		case cacheTTLTarget1h:
+			oneHourFollows = true
+		case cacheTTLTarget5m:
+			if !oneHourFollows {
+				continue
+			}
+			if next, err := sjson.SetBytes(out, paths[index]+".ttl", cacheTTLTarget1h); err == nil {
+				out = next
+			}
+		}
+	}
+	return out
+}
+
+func setEphemeralCacheControlTTL(body []byte, ttl string, overwrite bool) []byte {
 	if len(body) == 0 || ttl == "" {
 		return body
 	}
@@ -1135,14 +1181,18 @@ func forceEphemeralCacheControlTTL(body []byte, ttl string) []byte {
 		if !cc.Exists() || cc.Get("type").String() != "ephemeral" {
 			return
 		}
-		if cc.Get("ttl").String() == ttl {
+		existingTTL := cc.Get("ttl").String()
+		if existingTTL == ttl || (!overwrite && existingTTL != "") {
 			return
 		}
 		paths = append(paths, path+".cache_control.ttl")
 	}
 
-	if topCC := gjson.GetBytes(body, "cache_control"); topCC.Exists() && topCC.Get("type").String() == "ephemeral" && topCC.Get("ttl").String() != ttl {
-		paths = append(paths, "cache_control.ttl")
+	if topCC := gjson.GetBytes(body, "cache_control"); topCC.Exists() && topCC.Get("type").String() == "ephemeral" {
+		existingTTL := topCC.Get("ttl").String()
+		if existingTTL != ttl && (overwrite || existingTTL == "") {
+			paths = append(paths, "cache_control.ttl")
+		}
 	}
 
 	system := gjson.GetBytes(body, "system")

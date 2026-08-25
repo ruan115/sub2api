@@ -7,19 +7,23 @@
 - CCMAX 账号池：A/B 分组、用途切换、状态、优先级、并发、过期时间、账号价格和计费倍率。
 - 账号代理：选择代理池、手动指定代理、自动匹配代理；自动匹配模式保证一个账号独占一个代理 IP。
 - 强制代理：CCMAX 授权、Token 刷新、配额查询和消息网关只使用账号绑定的有效代理；未绑定或代理异常时拒绝请求，不回退直连。
-- 代理池：支持批量导入 `socks5/http/https`，或通过代理 API 拉取纯文本、JSON 数组及常见对象格式。
+- 代理池：支持批量导入 `socks5/http/https`，或通过代理 API 拉取纯文本、JSON 数组及常见对象格式；每个代理同时展示当前占用账号和历史使用过的不同账号数。
 - RPM：原版 `tiered` 三区模型、`sticky_exempt` 粘性豁免、粘性缓冲区和用户消息队列配置。
+- 过载保护：分组可配置 529 的账号+模型短熔断，默认 10 秒；429 配额耗尽仍使用账号级冷却。
 - 用户权限：管理员、只读管理员、普通用户；管理员可逐个配置普通用户和只读管理员的可见页面，普通用户按 A/B 分组隔离且只能管理自己的 SK。
 - API 调度：每个用户独立生成、禁用 `sk-` 密钥，支持 `/v1/messages`、`/v1/messages/count_tokens`、`/v1/models` 和 `/v1/models/{id}`；同时提供 `/models` 兼容别名。
 - CCMAX 全链路：复用 Sub2API 的 Claude Code 客户端识别、OAuth 请求转换、计费指纹、CLI 请求头、beta 合并、缓存断点限制、模型映射、粘性调度、账号故障切换和实时 SSE 转发。
 - 双支线请求：分组可在 Sub2API 原版完整链路与蒸馏兼容链路间切换；蒸馏兼容链路不注入 Sub2API 扩展提示词，仅保留直连 Anthropic OAuth 必需的两个身份块，并复现目标渠道的参数过滤、工具调用和响应 usage。账号仍可单独开启“原始请求完整透传”，保留客户端请求体的原始字节和全部参数。
+- 分组级反蒸馏探测：可识别用户消息中高置信度的系统提示词、隐藏指令、工具定义和内部参数提取行为，在额度预留与账号调度前返回 HTTP 588 `Not allowed`；命中事件只记录 API Key、分组和错误分类，不保存请求正文。
 - CCMAX 授权：可使用 Claude Session Key 自动换取 Access Token 与 Refresh Token，也可发起 OAuth / Setup Token 浏览器授权；临近过期时自动刷新，失效后标记为“需要重新授权”。
-- 批量上号：最多一次提交 200 个 Session Key，每个成功账号分配独享代理，并读取授权 Token 中的邮箱作为账号名称和订阅类型。
+- 批量上号：最多一次提交 200 个 Session Key，每个成功账号分配独享代理，并读取授权 Token 中的邮箱作为账号名称和订阅类型；邮箱已存在时更新原账号的 OAuth 凭证与授权代理，不创建重复账号。
+- 批量编辑：账号池可对已选账号统一修改并发、RPM 策略、优先级、计费参数和分组；名称、凭证与独享代理不会被覆盖。
 - 配额：记录每个账号的 5 小时、7 天使用率和刷新时间，支持主动刷新，也会从上游响应头被动更新。
 - 账号统计：展示订阅类型、上号时间、存活时间、最近使用、累计请求、Token、账号总计费，并按正常、暂不可调度和错误统一筛选。
 - 计费：自动同步 Sub2API 同源的 Anthropic 模型价格，同时保留手动价格；支持账号价格、分组收入倍率、账号成本倍率、筛选区间汇总和用量流水。
-- 运营统计：独立展示死亡账户、每日请求/Token/计费/账号生命周期，以及包含账号、代理 IP 和成功状态的授权日志。
+- 运营统计：独立展示死亡账户、每日请求/Token/计费/账号生命周期，以及包含账号、代理 IP 和成功状态的授权日志；死亡账户可单个或批量归档，归档保留历史数据并立即释放独享 IP。
 - 操作审计：记录登录、创建、编辑、状态变更、删除、授权及同步操作，密码、Token、Session Key 和凭证内容自动脱敏。
+- 报错信息：统一汇总 API 请求失败、账号授权与刷新异常、授权失败、代理检测/同步异常、价格同步异常和后台失败操作，支持来源、分组、关键词、时间筛选及分页；网关错误保留 90 天且不记录请求正文或用户 SK。
 - 管理界面：分组复用 Sub2API 的 Claude 图标；桌面侧栏支持展开、收缩和状态记忆，移动端使用横向底部导航。
 
 只读管理员只能查看管理员分配的页面，所有写接口都会在服务端返回 `403`。普通用户同样只能读取分配页面，只有本人 API Key 的创建、编辑、禁用和删除接口例外。
@@ -56,8 +60,12 @@ go run .
 | `CCMAX_AUTH_DISABLED`        | `false`            | 仅用于本机测试；设为 `1` 会关闭管理端认证     |
 | `CCMAX_PRICING_AUTO_SYNC`    | `true`             | 启动后和定时自动同步模型价格；设为 `0` 可关闭 |
 | `CCMAX_PRICING_SYNC_MINUTES` | `10`               | 自动检查模型价格的间隔分钟数                  |
+| `CCMAX_TOKEN_REFRESH_ENABLED` | `true` | 后台 OAuth Token 自动刷新；蓝绿预热实例可设为 `0` |
 | `CCMAX_PRICING_REMOTE_URL`   | Sub2API 同源地址   | 自定义 HTTPS 模型价格 JSON 地址               |
 | `CCMAX_PRICING_HASH_URL`     | Sub2API 同源地址   | 自定义 HTTPS 价格文件哈希地址，可留空         |
+| `CCMAX_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `15m` | 等待上游响应头的最长时间，覆盖长非流请求      |
+| `CCMAX_UPSTREAM_REQUEST_TIMEOUT` | `0` | 上游请求总时限；`0` 表示由请求上下文控制      |
+| `CCMAX_STREAM_HEARTBEAT_INTERVAL` | `10s` | 流式首事件和事件间隔期间发送 SSE 注释心跳，避免客户端误判超时 |
 
 ## API 调度
 
@@ -91,7 +99,7 @@ OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system
 
 账号默认关闭“原始请求完整透传”，此时直接复用 Sub2API 原版 CCMAX 的请求变换、指纹、metadata、模型映射、beta、缓存控制和响应还原链路。开启后 `/v1/messages` 与 `/v1/messages/count_tokens` 都保留请求体原始字节和客户端参数，不再执行任何 body 变换；客户端请求头也会原样转发，但下游鉴权、Cookie、Host、Content-Length 和逐跳头会被剔除，用户 SK 始终替换为账号上游凭证。
 
-分组的“蒸馏兼容模式”与账号的“原始请求完整透传”互相独立。蒸馏兼容模式关闭时保持 Sub2API 原版 CCMAX 行为；开启后保留客户端 `system`、消息、工具、工具选择、停止序列和流式设置，过滤目标渠道不接受的未知顶层参数，并按 Fable 5 的实测行为忽略客户端采样与 thinking 配置。直连 OAuth 会使用服务端 adaptive thinking，响应中的 thinking signature 原样保留，最终 usage 会包含 `iterations`。原始透传优先级更高，开启原始透传的账号不执行上述兼容变换。
+分组的“蒸馏兼容模式”与账号的“原始请求完整透传”互相独立。蒸馏兼容模式关闭时保持 Sub2API 原版 CCMAX 行为；开启后保留客户端 `system`、消息、工具、工具选择、停止序列和流式设置，过滤目标渠道不接受的未知顶层参数，并按 Fable 5 的实测行为忽略客户端采样与 thinking 配置。缓存断点未提供 `ttl` 时默认使用 `5m`，客户端显式提供 `5m` 或 `1h` 时原样保留。蒸馏兼容模式始终保留 billing attribution；独立的“Claude Code 身份句”开关默认关闭，只有显式开启后才注入 `You are Claude Code, Anthropic's official CLI for Claude.`。每个 A/B 分组还能分别允许 `service_tier`、`inference_geo`、`speed` 与客户端 `anthropic-beta` 透传，四项默认关闭；启用 beta 透传时仍会保留 OAuth 必需标记。直连 OAuth 会使用服务端 adaptive thinking，响应中的 thinking signature 原样保留，最终 usage 会包含 `iterations`。原始透传优先级更高，开启原始透传的账号不执行上述兼容变换。
 
 账号凭证 JSON 支持：
 
@@ -129,7 +137,7 @@ OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system
 
 选择“Setup Token”时使用 inference-only scope；选择“OAuth”时使用完整配额 scope。完整 Session Key、授权码和 Token 不会返回到账户列表，也不会以明文写入审计日志；系统仅保存不可逆的 Session Key 脱敏标识用于流水追踪。
 
-批量上号页面按行接收 Session Key。每次组织查询、授权码申请和 Token 交换都强制经过本次分配的代理；授权成功后才创建账号并占用该代理。失败项不会创建账号，结果与授权日志会保留失败原因和代理 IP，但不会记录完整 Session Key。
+批量上号页面按行接收 Session Key。每次组织查询、授权码申请和 Token 交换都强制经过本次分配的代理；授权成功后才创建或更新账号并占用该代理。若 Token 邮箱已存在，系统会在原账号记录上替换 OAuth 凭证、恢复授权与调度，并绑定本次授权所用代理，原代理自动释放。失败项不会创建或修改账号，结果与授权日志会保留失败原因和代理 IP，但不会记录完整 Session Key。
 
 OAuth 账号可以在列表中主动刷新 5h/7d 配额。正常 API 调度也会解析 Anthropic 限流响应头，更新配额、刷新时间和账号授权状态。
 

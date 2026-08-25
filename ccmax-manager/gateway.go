@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sub2claude "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -23,22 +24,45 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const defaultGatewayStreamHeartbeatInterval = 10 * time.Second
+
+// defaultGatewayUpstreamStreamIdleTimeout bounds how long a streaming request
+// may sit without a single upstream event. Our own heartbeat keeps the socket
+// alive indefinitely, so without this bound a stalled upstream is only noticed
+// when the client gives up minutes later.
+const defaultGatewayUpstreamStreamIdleTimeout = 90 * time.Second
+
+// gatewayStreamIdleCooldown keeps a stalled account out of the pool briefly so
+// the next request does not immediately pick it again.
+const gatewayStreamIdleCooldown = 2 * time.Minute
+
 type gatewayKey struct {
-	ID                   int64
-	UserID               int64
-	GroupID              string
-	Quota                float64
-	QuotaUsed            float64
-	UserBalance          sql.NullFloat64
-	UserRPM              int
-	Allowed              string
-	UserRole             string
-	ExpiresAt            sql.NullString
-	NormalRequestMode    bool
-	StreamHedgeEnabled   bool
-	AdaptiveHedgeEnabled bool
-	RPMDispatchEnabled   bool
-	MCPToolNamesEnabled  bool
+	ID                        int64
+	UserID                    int64
+	GroupID                   string
+	Quota                     float64
+	QuotaUsed                 float64
+	UserBalance               sql.NullFloat64
+	UserRPM                   int
+	Allowed                   string
+	UserRole                  string
+	ExpiresAt                 sql.NullString
+	NormalRequestMode         bool
+	ClaudeCodeIdentityEnabled bool
+	StreamHedgeEnabled        bool
+	AdaptiveHedgeEnabled      bool
+	RPMDispatchEnabled        bool
+	MCPToolNamesEnabled       bool
+	ServiceTierPassthrough    bool
+	InferenceGeoPassthrough   bool
+	SpeedPassthrough          bool
+	AnthropicBetaPassthrough  bool
+	RejectAnthropicDowngrade  bool
+	RejectDistillation        bool
+	OverloadCooldownSeconds   int
+	CapacityQueueEnabled      bool
+	CapacityQueueTimeout      int
+	StrategyRequiredEnabled   bool
 }
 
 type gatewayAccount struct {
@@ -55,13 +79,30 @@ type gatewayAccount struct {
 	UserMsgQueueMode string
 	ProxyID          sql.NullInt64
 	Fingerprint      *sub2service.Fingerprint
+	// RPMReserved is true when the RPM event was already inserted inside the
+	// selection transaction, so the caller must not record it again.
+	RPMReserved bool
 }
 
 type messageEnvelope struct {
-	Model    string         `json:"model"`
-	Stream   bool           `json:"stream"`
-	Metadata map[string]any `json:"metadata"`
+	Model     string         `json:"model"`
+	Stream    bool           `json:"stream"`
+	MaxTokens int64          `json:"max_tokens"`
+	Metadata  map[string]any `json:"metadata"`
 }
+
+type gatewaySpendState struct {
+	mu      sync.Mutex
+	pending float64
+}
+
+type gatewaySpendError struct {
+	status    int
+	errorType string
+	message   string
+}
+
+func (e *gatewaySpendError) Error() string { return e.message }
 
 type gatewayAPIKeyContextKey struct{}
 
@@ -69,11 +110,23 @@ type gatewayProtocolContextKey struct{}
 
 type gatewayNormalRequestModeContextKey struct{}
 
+type gatewayClaudeCodeIdentityContextKey struct{}
+
 type gatewayMCPToolNamesContextKey struct{}
 
+type gatewayFieldPassthroughContextKey struct{}
+
 type gatewayProtocolContext struct {
-	openAIChat   bool
-	clientStream bool
+	openAIChat               bool
+	clientStream             bool
+	anthropicNonStreamBridge bool
+}
+
+type gatewayFieldPassthrough struct {
+	ServiceTier   bool
+	InferenceGeo  bool
+	Speed         bool
+	AnthropicBeta bool
 }
 
 type tokenUsage struct {
@@ -96,10 +149,11 @@ func (a *app) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 type gatewayUpstreamFailure struct {
-	status  int
-	header  http.Header
-	body    []byte
-	account gatewayAccount
+	status    int
+	header    http.Header
+	body      []byte
+	account   gatewayAccount
+	preOutput bool
 }
 
 type gatewayPreOutputStreamError struct {
@@ -107,8 +161,48 @@ type gatewayPreOutputStreamError struct {
 	body   []byte
 }
 
+type gatewayModelDowngradeError struct {
+	requested string
+	actual    string
+	committed bool
+}
+
+// gatewayStreamIdleError reports that the upstream stopped producing stream
+// events. streamed tells the caller whether real SSE events already reached the
+// client: if they did the response cannot be retried on another account, since
+// the partial output is already on the wire.
+type gatewayStreamIdleError struct {
+	idle     time.Duration
+	streamed bool
+}
+
+func (e *gatewayStreamIdleError) Error() string {
+	return fmt.Sprintf("upstream sent no stream events for %s", e.idle)
+}
+
+func (e *gatewayModelDowngradeError) Error() string {
+	return fmt.Sprintf("upstream silently downgraded model from %s to %s", e.requested, e.actual)
+}
+
 func (e *gatewayPreOutputStreamError) Error() string {
 	return "upstream stream returned an error before output"
+}
+
+func gatewaySSEErrorStatus(body []byte) int {
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String())) {
+	case "authentication_error":
+		return http.StatusUnauthorized
+	case "permission_error":
+		return http.StatusForbidden
+	case "rate_limit_error":
+		return http.StatusTooManyRequests
+	case "overloaded_error":
+		return 529
+	case "api_error":
+		return http.StatusBadGateway
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countTokens bool) {
@@ -122,39 +216,9 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		writeError(w, http.StatusUnauthorized, "invalid or unavailable API key")
 		return
 	}
-	quotaRelease := func() {}
-	if key.Quota > 0 {
-		quotaRelease = a.acquireGatewayQuotaLock(key.ID)
-		defer quotaRelease()
-		key, err = a.authenticateGatewayKey(secret)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid or unavailable API key")
-			return
-		}
-	}
-	if key.Quota > 0 && key.QuotaUsed >= key.Quota {
-		writeAnthropicGatewayError(w, http.StatusForbidden, "permission_error", "API key quota exhausted")
-		return
-	}
-	if key.UserBalance.Valid && key.UserBalance.Float64 <= 0 {
-		writeAnthropicGatewayError(w, http.StatusPaymentRequired, "billing_error", "User balance exhausted")
-		return
-	}
 	if ok := groupAllowedJSON(key.UserRole, key.Allowed, key.GroupID); !ok {
 		writeError(w, http.StatusForbidden, "API key group is no longer allowed")
 		return
-	}
-	if !countTokens {
-		budgetRelease, lockErr := a.acquireGatewayBudgetLock(key.GroupID)
-		if lockErr != nil {
-			writeError(w, http.StatusForbidden, lockErr.Error())
-			return
-		}
-		defer budgetRelease()
-		if err := a.checkGatewayGroupBudget(key.GroupID); err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
-			return
-		}
 	}
 	var body []byte
 	if gatewayOpenAIChatRequest(r.Context()) {
@@ -174,13 +238,43 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		writeError(w, http.StatusBadRequest, "invalid Anthropic message request")
 		return
 	}
+	if key.RejectDistillation && isDistillationProbeRequest(body) {
+		attributeGatewayErrorEvent(w, "distillation_blocked", distillationRejectedStatus, "Not allowed")
+		writeAnthropicGatewayError(w, distillationRejectedStatus, "permission_error", "Not allowed")
+		return
+	}
+	if !countTokens && !envelope.Stream && !gatewayOpenAIChatRequest(r.Context()) {
+		adapter := newAnthropicNonStreamResponseWriter(w)
+		w = adapter
+		r = r.WithContext(context.WithValue(r.Context(), gatewayProtocolContextKey{}, gatewayProtocolContext{
+			clientStream: false, anthropicNonStreamBridge: true,
+		}))
+		defer adapter.finish()
+	}
+	spendRelease, spendErr := a.reserveGatewaySpend(key, envelope, len(body), countTokens)
+	if spendErr != nil {
+		if spendErr.errorType != "" {
+			writeAnthropicGatewayError(w, spendErr.status, spendErr.errorType, spendErr.message)
+		} else {
+			writeError(w, spendErr.status, spendErr.message)
+		}
+		return
+	}
+	defer spendRelease()
 	if err := a.checkAndIncrementUserRPM(key); err != nil {
 		writeError(w, http.StatusTooManyRequests, err.Error())
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), gatewayAPIKeyContextKey{}, key.ID))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayNormalRequestModeContextKey{}, key.NormalRequestMode))
+	r = r.WithContext(context.WithValue(r.Context(), gatewayClaudeCodeIdentityContextKey{}, key.ClaudeCodeIdentityEnabled))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayMCPToolNamesContextKey{}, key.MCPToolNamesEnabled))
+	r = r.WithContext(context.WithValue(r.Context(), gatewayFieldPassthroughContextKey{}, gatewayFieldPassthrough{
+		ServiceTier:   key.ServiceTierPassthrough,
+		InferenceGeo:  key.InferenceGeoPassthrough,
+		Speed:         key.SpeedPassthrough,
+		AnthropicBeta: key.AnthropicBetaPassthrough,
+	}))
 	session := sub2service.GenerateCCMaxCompatibilitySessionHash(body, gatewayClientIP(r), r.UserAgent(), key.ID)
 	excluded := map[int64]bool{}
 	var lastFailure *gatewayUpstreamFailure
@@ -193,6 +287,10 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		lastFailure = hedgeFailure
 		lastDispatchError = hedgeErr
 	}
+	forbiddenFailures := 0
+	if lastFailure != nil && lastFailure.status == http.StatusForbidden {
+		forbiddenFailures = 1
+	}
 	maxAccountAttempts := gatewayMaxAttempts(key.RPMDispatchEnabled)
 	if countTokens {
 		// Sub2API count_tokens selects one account and returns that upstream result.
@@ -200,14 +298,24 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	}
 	for attempt := 0; attempt < maxAccountAttempts; attempt++ {
 		account, acquireErr := a.acquireGatewayAccount(key, session, envelope.Model, excluded)
+		if acquireErr != nil && !countTokens && errors.Is(acquireErr, errNoGatewayAccountCapacity) && a.gatewayShouldQueue(key) {
+			account, acquireErr = a.waitForGatewayCapacity(r.Context(), key, session, envelope.Model, excluded, acquireErr)
+			if acquireErr != nil && recordGatewayContextFailure(w, r, acquireErr) {
+				return
+			}
+		}
 		if acquireErr != nil {
 			lastDispatchError = acquireErr
 			break
 		}
 		excluded[account.ID] = true
+		attributeGatewayErrorAccount(w, account.ID)
 		account, err = a.ensureGatewayAccountToken(r.Context(), account)
 		if err != nil {
 			a.releaseGatewayAccount(account.ID)
+			if recordGatewayContextFailure(w, r, err) {
+				return
+			}
 			message := "Upstream request failed"
 			if countTokens {
 				message = "Failed to get access token"
@@ -237,6 +345,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			writeError(w, http.StatusBadRequest, prepareErr.Error())
 			return
 		}
+		prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
 		path := "/v1/messages"
 		if countTokens {
 			path = "/v1/messages/count_tokens"
@@ -286,13 +395,16 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			queueRelease = func() {}
 		}
 		started := time.Now()
-		if !key.RPMDispatchEnabled {
+		if !account.RPMReserved {
 			a.recordGatewayAccountRPM(account.ID)
 		}
 		response, requestErr := doGatewayUpstreamRequest(r, client, upstreamRequest, prepared)
 		if requestErr != nil {
 			queueRelease()
 			a.releaseGatewayAccount(account.ID)
+			if recordGatewayContextFailure(w, r, requestErr) {
+				return
+			}
 			if !prepared.Passthrough {
 				message := "Upstream request failed"
 				if countTokens {
@@ -306,7 +418,13 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		response = retryGatewayCompatibility400(client, upstreamRequest, response, prepared, started)
 		if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
-			a.captureAccountUpstreamState(account.ID, response)
+			if key.RPMDispatchEnabled && response.StatusCode == http.StatusTooManyRequests {
+				a.captureAccountRPMThreshold(key.GroupID, account.ID)
+			}
+			if response.StatusCode == http.StatusTooManyRequests {
+				_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
+			}
+			a.captureGatewayUpstreamState(account.ID, envelope.Model, key.OverloadCooldownSeconds, response)
 		}
 		if retryableGatewayStatus(response.StatusCode) {
 			queueRelease()
@@ -317,6 +435,12 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 			}
 			lastFailure = &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}
+			if response.StatusCode == http.StatusForbidden {
+				forbiddenFailures++
+				if forbiddenFailures >= gatewayForbiddenFailoverAttempts {
+					break
+				}
+			}
 			continue
 		}
 		if response.StatusCode >= 400 && !prepared.Passthrough {
@@ -327,6 +451,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 				a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 			}
+			attributeGatewayUpstreamError(w, response.StatusCode, failureBody, countTokens)
 			writeSub2CompatibilityError(w, response.StatusCode, failureBody, countTokens)
 			return
 		}
@@ -336,11 +461,48 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		a.releaseGatewayAccount(account.ID)
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(forwardErr, &preOutputErr) {
-			if preOutputErr.status == 529 && !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
-				a.captureAccountUpstreamState(account.ID, &http.Response{StatusCode: 529, Header: response.Header.Clone()})
+			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
+				if key.RPMDispatchEnabled && preOutputErr.status == http.StatusTooManyRequests {
+					a.captureAccountRPMThreshold(key.GroupID, account.ID)
+				}
+				if preOutputErr.status == http.StatusTooManyRequests {
+					_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
+				}
+				a.captureGatewayUpstreamState(account.ID, envelope.Model, key.OverloadCooldownSeconds, &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
+				a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
 			}
-			lastFailure = &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account}
+			lastFailure = &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account, preOutput: true}
+			if preOutputErr.status == http.StatusForbidden {
+				forbiddenFailures++
+				if forbiddenFailures >= gatewayForbiddenFailoverAttempts {
+					break
+				}
+			}
 			continue
+		}
+		var idleErr *gatewayStreamIdleError
+		if errors.As(forwardErr, &idleErr) {
+			a.captureGatewayStreamIdle(account.ID, idleErr.idle)
+			if idleErr.streamed {
+				// The client already holds part of this answer; it was told the
+				// stream failed and must retry the request itself.
+				attributeGatewayErrorEvent(w, "upstream_stream_idle", http.StatusGatewayTimeout, idleErr.Error())
+				return
+			}
+			attributeGatewayErrorEvent(w, "upstream_stream_idle", http.StatusGatewayTimeout, idleErr.Error())
+			lastDispatchError = idleErr
+			continue
+		}
+		var downgradeErr *gatewayModelDowngradeError
+		if errors.As(forwardErr, &downgradeErr) {
+			if usage.hasUsage() {
+				a.recordGatewayRejectedDowngradeUsage(r.Context(), key, account, downgradeErr.actual, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
+			}
+			if !downgradeErr.committed {
+				copyGatewayRequestID(w.Header(), response.Header)
+				writeAnthropicGatewayError(w, http.StatusBadGateway, "api_error", downgradeErr.Error())
+			}
+			return
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			if countTokens {
@@ -351,16 +513,26 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				return
 			}
 			if forwardErr == nil || usage.hasUsage() {
-				a.recordGatewayUsage(key, account, envelope.Model, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
+				a.recordGatewayUsage(r.Context(), key, account, envelope.Model, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
 			}
 		}
 		if forwardErr != nil {
+			recordGatewayContextFailure(w, r, forwardErr)
 			return
 		}
 		return
 	}
 	if lastFailure != nil {
-		if !accountRequestPassthrough(lastFailure.account) {
+		attributeGatewayUpstreamError(w, lastFailure.status, lastFailure.body, countTokens)
+		if gatewayResponseStatus(w) != 0 {
+			// A previous attempt already sent the status line (stream heartbeat),
+			// so the only way left to report the failure is an SSE error event.
+			_, errorType, message := sub2CompatibilityError(lastFailure.status)
+			flusher, _ := w.(http.Flusher)
+			writeGatewaySSEError(w, flusher, errorType, message)
+			return
+		}
+		if !accountRequestPassthrough(lastFailure.account) || lastFailure.preOutput {
 			writeSub2CompatibilityError(w, lastFailure.status, lastFailure.body, countTokens)
 			return
 		}
@@ -372,7 +544,46 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		return
 	}
 	status, errorType, message := a.classifyGatewayNoAccount(key.GroupID, envelope.Model, lastDispatchError)
+	attributeGatewayCapacityDiagnostics(w, lastDispatchError)
+	if _, ok := gatewayCapacityDiagnosticsFromError(lastDispatchError); ok {
+		attributeGatewayErrorEvent(w, "gateway_capacity", status, message)
+	}
+	if gatewayResponseStatus(w) != 0 {
+		flusher, _ := w.(http.Flusher)
+		writeGatewaySSEError(w, flusher, errorType, message)
+		return
+	}
 	writeAnthropicGatewayError(w, status, errorType, message)
+}
+
+// captureGatewayStreamIdle parks an account that accepted a stream but produced
+// no events, so the retry lands on a different one.
+func (a *app) captureGatewayStreamIdle(accountID int64, idle time.Duration) {
+	until := time.Now().UTC().Add(gatewayStreamIdleCooldown).Format(time.RFC3339Nano)
+	message := fmt.Sprintf("上游 %s 未产出流式事件，已临时下线 %s", idle, gatewayStreamIdleCooldown)
+	_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, updated_at = `+nowSQL+`
+		WHERE id = ? AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at < ?)`, until, message, accountID, until)
+}
+
+func recordGatewayContextFailure(w http.ResponseWriter, r *http.Request, err error) bool {
+	requestErr := r.Context().Err()
+	if errors.Is(requestErr, context.Canceled) || errors.Is(err, context.Canceled) {
+		attributeGatewayErrorEvent(w, "client_canceled", 499, "Client canceled request before completion")
+		return true
+	}
+	if errors.Is(requestErr, context.DeadlineExceeded) {
+		attributeGatewayErrorEvent(w, "timeout", http.StatusRequestTimeout, "Client request timed out before completion")
+		return true
+	}
+	var networkErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkErr) && networkErr.Timeout()) {
+		attributeGatewayErrorEvent(w, "timeout", http.StatusGatewayTimeout, "Upstream request timed out before completion")
+		if gatewayResponseStatus(w) == 0 {
+			writeAnthropicGatewayError(w, http.StatusGatewayTimeout, "timeout_error", "Upstream request timed out before completion")
+		}
+		return true
+	}
+	return false
 }
 
 func (a *app) classifyGatewayNoAccount(groupID, model string, cause error) (int, string, string) {
@@ -438,6 +649,11 @@ func writeSub2CompatibilityError(w http.ResponseWriter, upstreamStatus int, body
 		_, _ = w.Write(body)
 		return
 	}
+	status, errorType, message := sub2CompatibilityError(upstreamStatus)
+	writeAnthropicGatewayError(w, status, errorType, message)
+}
+
+func sub2CompatibilityError(upstreamStatus int) (int, string, string) {
 	status, errorType, message := http.StatusBadGateway, "upstream_error", "Upstream request failed"
 	switch upstreamStatus {
 	case http.StatusUnauthorized:
@@ -451,7 +667,7 @@ func writeSub2CompatibilityError(w http.ResponseWriter, upstreamStatus int, body
 	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		message = "Upstream service temporarily unavailable"
 	}
-	writeAnthropicGatewayError(w, status, errorType, message)
+	return status, errorType, message
 }
 
 func writeAnthropicGatewayError(w http.ResponseWriter, status int, errorType, message string) {
@@ -476,64 +692,169 @@ func gatewayNormalRequestMode(ctx context.Context) bool {
 	return value
 }
 
+func gatewayClaudeCodeIdentity(ctx context.Context) bool {
+	value, _ := ctx.Value(gatewayClaudeCodeIdentityContextKey{}).(bool)
+	return value
+}
+
 func gatewayMCPToolNames(ctx context.Context) bool {
 	value, _ := ctx.Value(gatewayMCPToolNamesContextKey{}).(bool)
 	return value
 }
 
+func gatewayFieldPassthroughConfig(ctx context.Context) gatewayFieldPassthrough {
+	value, _ := ctx.Value(gatewayFieldPassthroughContextKey{}).(gatewayFieldPassthrough)
+	return value
+}
+
 func gatewayRecordedStream(ctx context.Context, upstreamStream bool) bool {
 	protocol, ok := ctx.Value(gatewayProtocolContextKey{}).(gatewayProtocolContext)
-	if ok && protocol.openAIChat {
+	if ok && (protocol.openAIChat || protocol.anthropicNonStreamBridge) {
 		return protocol.clientStream
 	}
 	return upstreamStream
 }
 
-func (a *app) acquireGatewayQuotaLock(keyID int64) func() {
-	value, _ := a.quotaLocks.LoadOrStore(keyID, &sync.Mutex{})
-	lock := value.(*sync.Mutex)
-	lock.Lock()
-	return lock.Unlock
+func gatewayAnthropicNonStreamBridge(ctx context.Context) bool {
+	protocol, _ := ctx.Value(gatewayProtocolContextKey{}).(gatewayProtocolContext)
+	return protocol.anthropicNonStreamBridge
 }
 
-func (a *app) acquireGatewayBudgetLock(groupID string) (func(), error) {
-	var dailyLimit, monthlyLimit sql.NullFloat64
-	if err := a.db.QueryRow(`SELECT daily_limit_usd, monthly_limit_usd FROM groups WHERE id = ? AND status = 'active'`, groupID).Scan(&dailyLimit, &monthlyLimit); err != nil {
-		return nil, errors.New("API key group is unavailable")
-	}
-	if (!dailyLimit.Valid || dailyLimit.Float64 <= 0) && (!monthlyLimit.Valid || monthlyLimit.Float64 <= 0) {
-		return func() {}, nil
-	}
-	value, _ := a.budgetLocks.LoadOrStore(groupID, &sync.Mutex{})
-	lock := value.(*sync.Mutex)
-	lock.Lock()
-	return lock.Unlock, nil
+func gatewaySpendStateFor(store *sync.Map, key any) *gatewaySpendState {
+	value, _ := store.LoadOrStore(key, &gatewaySpendState{})
+	return value.(*gatewaySpendState)
 }
 
-func (a *app) checkGatewayGroupBudget(groupID string) error {
+func gatewaySpendReservation(limit, spent, pending, estimate float64) (float64, bool) {
+	if limit <= 0 {
+		return 0, true
+	}
+	remaining := money(limit - spent - pending)
+	if remaining <= 0 {
+		return 0, false
+	}
+	if estimate <= 0 {
+		return 0, true
+	}
+	if estimate > remaining {
+		return remaining, true
+	}
+	return estimate, true
+}
+
+func (a *app) estimateGatewayBilledCost(groupRate float64, envelope messageEnvelope, bodyBytes int) float64 {
+	if groupRate <= 0 {
+		return 0
+	}
+	var inputRate, outputRate, cacheCreateRate, cacheReadRate float64
+	err := a.db.QueryRow(`SELECT input_per_million, output_per_million, cache_creation_per_million, cache_read_per_million
+		FROM model_prices WHERE model IN (?, '*') ORDER BY CASE WHEN model = ? THEN 0 ELSE 1 END LIMIT 1`, envelope.Model, envelope.Model).
+		Scan(&inputRate, &outputRate, &cacheCreateRate, &cacheReadRate)
+	if err != nil {
+		inputRate, outputRate, cacheCreateRate, cacheReadRate = 3, 15, 3.75, 0.3
+	}
+	maxTokens := envelope.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 8192
+	}
+	inputTokens := int64(max(bodyBytes, 1))
+	inputRate = max(inputRate, cacheCreateRate, cacheReadRate)
+	estimate := (float64(inputTokens)*inputRate + float64(maxTokens)*outputRate) / 1_000_000
+	return money(estimate * groupRate)
+}
+
+func (a *app) reserveGatewaySpend(key gatewayKey, envelope messageEnvelope, bodyBytes int, countTokens bool) (func(), *gatewaySpendError) {
+	quotaState := gatewaySpendStateFor(&a.quotaLocks, key.ID)
+	balanceState := gatewaySpendStateFor(&a.balanceLocks, key.UserID)
+	budgetState := gatewaySpendStateFor(&a.budgetLocks, key.GroupID)
+	quotaState.mu.Lock()
+	defer quotaState.mu.Unlock()
+	balanceState.mu.Lock()
+	defer balanceState.mu.Unlock()
+	budgetState.mu.Lock()
+	defer budgetState.mu.Unlock()
+
+	var quota, quotaUsed float64
+	var balance sql.NullFloat64
+	if err := a.db.QueryRow(`SELECT k.quota, k.quota_used, u.balance FROM api_keys k JOIN users u ON u.id = k.user_id
+		WHERE k.id = ? AND k.user_id = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL`, key.ID, key.UserID).
+		Scan(&quota, &quotaUsed, &balance); err != nil {
+		return nil, &gatewaySpendError{status: http.StatusUnauthorized, message: "invalid or unavailable API key"}
+	}
+	var groupRate float64
 	var dailyLimit, monthlyLimit sql.NullFloat64
-	if err := a.db.QueryRow(`SELECT daily_limit_usd, monthly_limit_usd FROM groups WHERE id = ? AND status = 'active'`, groupID).Scan(&dailyLimit, &monthlyLimit); err != nil {
-		return errors.New("API key group is unavailable")
+	if err := a.db.QueryRow(`SELECT rate_multiplier, daily_limit_usd, monthly_limit_usd FROM groups WHERE id = ? AND status = 'active'`, key.GroupID).
+		Scan(&groupRate, &dailyLimit, &monthlyLimit); err != nil {
+		return nil, &gatewaySpendError{status: http.StatusForbidden, message: "API key group is unavailable"}
 	}
-	if dailyLimit.Valid && dailyLimit.Float64 > 0 {
-		var spent float64
-		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, groupID, startOfTodayUTC()).Scan(&spent); err != nil {
-			return err
+
+	estimate := 0.0
+	if !countTokens {
+		estimate = a.estimateGatewayBilledCost(groupRate, envelope, bodyBytes)
+	}
+	quotaReservation, ok := gatewaySpendReservation(quota, quotaUsed, quotaState.pending, estimate)
+	if !ok {
+		return nil, &gatewaySpendError{status: http.StatusForbidden, errorType: "permission_error", message: "API key quota exhausted"}
+	}
+	balanceReservation := 0.0
+	if balance.Valid {
+		remainingBalance := money(balance.Float64 - balanceState.pending)
+		if remainingBalance <= 0 {
+			return nil, &gatewaySpendError{status: http.StatusPaymentRequired, errorType: "billing_error", message: "User balance exhausted"}
 		}
-		if spent >= dailyLimit.Float64 {
-			return errors.New("group daily billing limit reached")
+		if estimate > 0 {
+			balanceReservation = min(estimate, remainingBalance)
 		}
 	}
-	if monthlyLimit.Valid && monthlyLimit.Float64 > 0 {
-		var spent float64
-		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, groupID, startOfMonthUTC()).Scan(&spent); err != nil {
-			return err
+
+	dailySpent, monthlySpent := 0.0, 0.0
+	if !countTokens && dailyLimit.Valid && dailyLimit.Float64 > 0 {
+		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, key.GroupID, startOfTodayUTC()).Scan(&dailySpent); err != nil {
+			return nil, &gatewaySpendError{status: http.StatusInternalServerError, message: "failed to check group daily billing limit"}
 		}
-		if spent >= monthlyLimit.Float64 {
-			return errors.New("group monthly billing limit reached")
+		if _, ok = gatewaySpendReservation(dailyLimit.Float64, dailySpent, budgetState.pending, estimate); !ok {
+			return nil, &gatewaySpendError{status: http.StatusForbidden, message: "group daily billing limit reached"}
 		}
 	}
-	return nil
+	if !countTokens && monthlyLimit.Valid && monthlyLimit.Float64 > 0 {
+		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, key.GroupID, startOfMonthUTC()).Scan(&monthlySpent); err != nil {
+			return nil, &gatewaySpendError{status: http.StatusInternalServerError, message: "failed to check group monthly billing limit"}
+		}
+		if _, ok = gatewaySpendReservation(monthlyLimit.Float64, monthlySpent, budgetState.pending, estimate); !ok {
+			return nil, &gatewaySpendError{status: http.StatusForbidden, message: "group monthly billing limit reached"}
+		}
+	}
+	budgetReservation := 0.0
+	if !countTokens {
+		budgetReservation = estimate
+		if dailyLimit.Valid && dailyLimit.Float64 > 0 {
+			budgetReservation = min(budgetReservation, money(dailyLimit.Float64-dailySpent-budgetState.pending))
+		}
+		if monthlyLimit.Valid && monthlyLimit.Float64 > 0 {
+			budgetReservation = min(budgetReservation, money(monthlyLimit.Float64-monthlySpent-budgetState.pending))
+		}
+		if budgetReservation < 0 {
+			budgetReservation = 0
+		}
+	}
+	quotaState.pending = money(quotaState.pending + quotaReservation)
+	balanceState.pending = money(balanceState.pending + balanceReservation)
+	budgetState.pending = money(budgetState.pending + budgetReservation)
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			quotaState.mu.Lock()
+			quotaState.pending = max(0, money(quotaState.pending-quotaReservation))
+			quotaState.mu.Unlock()
+			balanceState.mu.Lock()
+			balanceState.pending = max(0, money(balanceState.pending-balanceReservation))
+			balanceState.mu.Unlock()
+			budgetState.mu.Lock()
+			budgetState.pending = max(0, money(budgetState.pending-budgetReservation))
+			budgetState.mu.Unlock()
+		})
+	}, nil
 }
 
 func gatewayMaxAttempts(rpmDispatchEnabled bool) int {
@@ -544,6 +865,11 @@ func gatewayMaxAttempts(rpmDispatchEnabled bool) int {
 	// The compatibility lane preserves Sub2API's initial account plus ten switches.
 	return 11
 }
+
+// A forbidden response usually identifies an account, organization, or proxy
+// policy problem. Trying the entire pool only amplifies one client request into
+// a long chain of identical upstream failures.
+const gatewayForbiddenFailoverAttempts = 2
 
 func retryableGatewayStatus(status int) bool {
 	switch status {
@@ -582,9 +908,10 @@ func doGatewayUpstreamRequest(r *http.Request, client *http.Client, request *htt
 
 func doGatewayUpstreamForward(r *http.Request, client *http.Client, request *http.Request, prepared claudePreparedRequest) (*http.Response, error) {
 	maxAttempts := 1
-	if !prepared.Passthrough && !prepared.CountTokens {
-		// The actual status is evaluated below. OAuth retries only 403; API-key
-		// custom policies may enable retries for other statuses.
+	authType := gatewayPreparedAuthType(prepared)
+	if !prepared.Passthrough && !prepared.CountTokens && authType != "oauth" && authType != "setup_token" && authType != "setup-token" {
+		// OAuth 403s are account or proxy policy failures and immediately fail
+		// over. API-key custom policies may still retry the same account.
 		maxAttempts = 5
 	}
 	started := time.Now()
@@ -720,15 +1047,24 @@ func sendGatewayCompatibilityRetry(client *http.Client, base *http.Request, prep
 }
 
 func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stream bool, account gatewayAccount, groupID string, prepared claudePreparedRequest) (tokenUsage, error) {
-	if !stream || response.StatusCode < 200 || response.StatusCode >= 300 {
+	upstreamSSE := strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
+	if !stream || response.StatusCode < 200 || response.StatusCode >= 300 || (prepared.NonStreamBridge && !upstreamSSE) {
+		body, err := io.ReadAll(io.LimitReader(response.Body, 64<<20))
+		if err != nil {
+			var networkErr net.Error
+			if !errors.Is(err, context.DeadlineExceeded) && !(errors.As(err, &networkErr) && networkErr.Timeout()) {
+				writeError(w, http.StatusBadGateway, "failed to read upstream response")
+			}
+			return tokenUsage{}, err
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			if downgrade := detectGatewayAnthropicModelDowngrade(body, prepared); downgrade != nil {
+				return parseAnthropicUsage(body, false), downgrade
+			}
+		}
 		copyGatewayResponseHeaders(w.Header(), response.Header)
 		w.Header().Set("X-CCMAX-Account", account.Name)
 		w.Header().Set("X-CCMAX-Group", groupID)
-		body, err := io.ReadAll(io.LimitReader(response.Body, 64<<20))
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to read upstream response")
-			return tokenUsage{}, err
-		}
 		body = restoreGatewayResponse(body, prepared)
 		w.WriteHeader(response.StatusCode)
 		_, err = w.Write(body)
@@ -738,72 +1074,183 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 	usage := tokenUsage{}
 	terminalSeen := false
 	var clientWriteErr error
-	committed := false
+	// A retry on another account reuses this writer, so the status line may
+	// already be on the wire from the previous attempt's heartbeat.
+	committed := gatewayResponseStatus(w) != 0
+	streamedEvent := false
 	flusher, _ := w.(http.Flusher)
+	commitResponse := func() {
+		if committed {
+			return
+		}
+		copyGatewayResponseHeaders(w.Header(), response.Header)
+		w.Header().Set("X-CCMAX-Account", account.Name)
+		w.Header().Set("X-CCMAX-Group", groupID)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(response.StatusCode)
+		committed = true
+	}
+
+	readContext := context.Background()
+	if response.Request != nil {
+		readContext = response.Request.Context()
+	}
+	readContext, cancelRead := context.WithCancel(readContext)
+	defer cancelRead()
+	type streamReadResult struct {
+		block []byte
+		err   error
+	}
+	readResults := make(chan streamReadResult, 1)
+	go func() {
+		for {
+			block, err := readGatewaySSEBlock(reader)
+			select {
+			case readResults <- streamReadResult{block: block, err: err}:
+			case <-readContext.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	heartbeatInterval := durationFromEnv("CCMAX_STREAM_HEARTBEAT_INTERVAL", defaultGatewayStreamHeartbeatInterval)
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = defaultGatewayStreamHeartbeatInterval
+	}
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
+	idleTimeout := durationFromEnv("CCMAX_UPSTREAM_STREAM_IDLE_TIMEOUT", defaultGatewayUpstreamStreamIdleTimeout)
+	if idleTimeout <= 0 {
+		idleTimeout = defaultGatewayUpstreamStreamIdleTimeout
+	}
+	idle := time.NewTimer(idleTimeout)
+	defer idle.Stop()
 	for {
-		block, err := readGatewaySSEBlock(reader)
-		if len(block) > 0 {
-			eventType, eventBody := gatewaySSEEvent(block)
-			if !committed && !prepared.Passthrough && eventType == "error" {
-				status := http.StatusForbidden
-				if gjson.GetBytes(eventBody, "error.type").String() == "overloaded_error" {
-					status = 529
-				}
-				return tokenUsage{}, &gatewayPreOutputStreamError{status: status, body: eventBody}
-			}
-			if !committed {
-				copyGatewayResponseHeaders(w.Header(), response.Header)
-				w.Header().Set("X-CCMAX-Account", account.Name)
-				w.Header().Set("X-CCMAX-Group", groupID)
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("Cache-Control", "no-cache")
-				w.Header().Set("X-Accel-Buffering", "no")
-				w.WriteHeader(response.StatusCode)
-				committed = true
-			}
-			usage = mergeTokenUsage(usage, parseAnthropicUsage(block, true))
-			if eventType == "message_stop" {
-				terminalSeen = true
-			}
-			if eventType == "error" && !prepared.Passthrough {
-				writeGatewaySSEError(w, flusher, "upstream_error", "Upstream access forbidden, please contact administrator")
-				return usage, errors.New("upstream stream returned an error event")
-			}
-			if clientWriteErr == nil {
-				if _, writeErr := w.Write(restoreGatewaySSEBlock(block, prepared, usage)); writeErr != nil {
-					clientWriteErr = writeErr
+		select {
+		case result := <-readResults:
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
 				}
 			}
-			if clientWriteErr == nil && flusher != nil {
+			idle.Reset(idleTimeout)
+			block, err := result.block, result.err
+			if len(block) > 0 {
+				eventType, eventBody := gatewaySSEEvent(block)
+				if !committed && eventType == "error" {
+					return tokenUsage{}, &gatewayPreOutputStreamError{status: gatewaySSEErrorStatus(eventBody), body: eventBody}
+				}
+				usage = mergeTokenUsage(usage, parseAnthropicUsage(block, true))
+				if downgrade := detectGatewayAnthropicModelDowngrade(eventBody, prepared); downgrade != nil {
+					downgrade.committed = committed
+					if committed {
+						writeGatewaySSEError(w, flusher, "api_error", downgrade.Error())
+					}
+					return usage, downgrade
+				}
+				commitResponse()
+				if eventType == "message_stop" {
+					terminalSeen = true
+				}
+				if eventType == "error" && !prepared.Passthrough {
+					writeGatewaySSEError(w, flusher, "upstream_error", "Upstream access forbidden, please contact administrator")
+					return usage, errors.New("upstream stream returned an error event")
+				}
+				if clientWriteErr == nil {
+					if _, writeErr := w.Write(restoreGatewaySSEBlock(block, prepared, usage)); writeErr != nil {
+						clientWriteErr = writeErr
+					} else {
+						streamedEvent = true
+					}
+				}
+				if clientWriteErr == nil && flusher != nil {
+					flusher.Flush()
+				}
+				if eventType == "error" {
+					return usage, errors.New("upstream stream returned an error event")
+				}
+			}
+			if err != nil {
+				if clientWriteErr != nil {
+					return usage, fmt.Errorf("client disconnected during streaming: %w", clientWriteErr)
+				}
+				if errors.Is(err, io.EOF) {
+					if terminalSeen {
+						return usage, nil
+					}
+					commitResponse()
+					writeGatewaySSEError(w, flusher, "upstream_disconnected", "upstream stream ended before message_stop")
+					return usage, errors.New("upstream stream ended before message_stop")
+				}
+				writeGatewaySSEError(w, flusher, "stream_read_error", "upstream stream disconnected")
+				return usage, fmt.Errorf("upstream stream read failed: %w", err)
+			}
+		case <-heartbeat.C:
+			// The heartbeat deliberately does not reset the idle timer: it only
+			// proves our own liveness, not the upstream's.
+			commitResponse()
+			if _, writeErr := io.WriteString(w, ": ping\n\n"); writeErr != nil {
+				return usage, fmt.Errorf("client disconnected during streaming heartbeat: %w", writeErr)
+			}
+			if flusher != nil {
 				flusher.Flush()
 			}
-			if eventType == "error" {
-				return usage, errors.New("upstream stream returned an error event")
+		case <-idle.C:
+			cancelRead()
+			if streamedEvent {
+				// Partial output already reached the client, so failing over
+				// would splice a second answer onto the first one.
+				writeGatewaySSEError(w, flusher, "upstream_stream_idle", fmt.Sprintf("upstream sent no stream events for %s", idleTimeout))
+				return usage, &gatewayStreamIdleError{idle: idleTimeout, streamed: true}
 			}
-		}
-		if err != nil {
-			if clientWriteErr != nil {
-				return usage, fmt.Errorf("client disconnected during streaming: %w", clientWriteErr)
-			}
-			if errors.Is(err, io.EOF) {
-				if terminalSeen {
-					return usage, nil
-				}
-				if !committed {
-					copyGatewayResponseHeaders(w.Header(), response.Header)
-					w.Header().Set("X-CCMAX-Account", account.Name)
-					w.Header().Set("X-CCMAX-Group", groupID)
-					w.Header().Set("Content-Type", "text/event-stream")
-					w.WriteHeader(response.StatusCode)
-					committed = true
-				}
-				writeGatewaySSEError(w, flusher, "upstream_disconnected", "upstream stream ended before message_stop")
-				return usage, errors.New("upstream stream ended before message_stop")
-			}
-			writeGatewaySSEError(w, flusher, "stream_read_error", "upstream stream disconnected")
-			return usage, fmt.Errorf("upstream stream read failed: %w", err)
+			return usage, &gatewayStreamIdleError{idle: idleTimeout, streamed: false}
+		case <-readContext.Done():
+			return usage, fmt.Errorf("stream request canceled: %w", readContext.Err())
 		}
 	}
+}
+
+func detectGatewayAnthropicModelDowngrade(body []byte, prepared claudePreparedRequest) *gatewayModelDowngradeError {
+	if !prepared.RejectAnthropicDowngrade || len(body) == 0 {
+		return nil
+	}
+	requested := strings.TrimSpace(prepared.Model)
+	if !isAnthropicProtectedModel(requested) {
+		requested = strings.TrimSpace(prepared.CompatOriginalModel())
+	}
+	if !isAnthropicProtectedModel(requested) {
+		return nil
+	}
+	actual := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if actual == "" {
+		actual = strings.TrimSpace(gjson.GetBytes(body, "message.model").String())
+	}
+	if !modelIDMatchesFamily(actual, "claude-opus-4-8") {
+		return nil
+	}
+	return &gatewayModelDowngradeError{requested: requested, actual: actual}
+}
+
+func (p claudePreparedRequest) CompatOriginalModel() string {
+	if p.Compat == nil {
+		return p.Model
+	}
+	return p.Compat.OriginalModel
+}
+
+func isAnthropicProtectedModel(model string) bool {
+	return modelIDMatchesFamily(model, "claude-fable-5") || modelIDMatchesFamily(model, "claude-opus-5")
+}
+
+func modelIDMatchesFamily(model, family string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	family = strings.ToLower(strings.TrimSpace(family))
+	return model == family || strings.HasPrefix(model, family+"-")
 }
 
 func readGatewaySSEBlock(reader *bufio.Reader) ([]byte, error) {
@@ -953,11 +1400,36 @@ func copyGatewayResponseHeaders(target, source http.Header) {
 	}
 }
 
-func (a *app) recordGatewayUsage(key gatewayKey, account gatewayAccount, model string, stream bool, requestID string, usage tokenUsage, started time.Time) {
+func copyGatewayRequestID(target, source http.Header) {
+	for _, name := range []string{"request-id", "x-request-id"} {
+		if value := strings.TrimSpace(source.Get(name)); value != "" {
+			target.Set(name, value)
+		}
+	}
+}
+
+func (a *app) recordGatewayUsage(ctx context.Context, key gatewayKey, account gatewayAccount, model string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) {
+	requestID, clientRequestID, traceID, upstreamRequestID := gatewayCorrelationIDs(ctx, upstreamRequestID)
 	_, _, usageErr := a.recordUsage(usageInput{
-		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, AccountSKHint: account.SourceSKHint, Model: model,
+		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, ClientRequestID: clientRequestID, TraceID: traceID, UpstreamRequestID: upstreamRequestID,
+		PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, AccountSKHint: account.SourceSKHint, Model: model,
 		InputTokens: usage.Input, OutputTokens: usage.Output, CacheCreationTokens: usage.CacheCreation,
 		CacheReadTokens: usage.CacheRead, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
+	})
+	if usageErr == nil {
+		return
+	}
+	_, _ = a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
+}
+
+func (a *app) recordGatewayRejectedDowngradeUsage(ctx context.Context, key gatewayKey, account gatewayAccount, actualModel string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) {
+	requestID, clientRequestID, traceID, upstreamRequestID := gatewayCorrelationIDs(ctx, upstreamRequestID)
+	zero := 0.0
+	_, _, usageErr := a.recordUsage(usageInput{
+		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, ClientRequestID: clientRequestID, TraceID: traceID, UpstreamRequestID: upstreamRequestID,
+		PurposeKey: "default", GroupID: key.GroupID, AccountID: account.ID, AccountSKHint: account.SourceSKHint, Model: actualModel,
+		InputTokens: usage.Input, OutputTokens: usage.Output, CacheCreationTokens: usage.CacheCreation,
+		CacheReadTokens: usage.CacheRead, BilledCostOverride: &zero, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
 	})
 	if usageErr == nil {
 		return
@@ -977,15 +1449,25 @@ func bearerOrAPIKey(r *http.Request) string {
 
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
-	var normalRequestMode, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled
+	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.overload_cooldown_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
-		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active'
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames)
+		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &key.OverloadCooldownSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
+	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
 	key.AdaptiveHedgeEnabled = adaptiveHedgeEnabled == 1
 	key.MCPToolNamesEnabled = mcpToolNames == 1
+	key.ServiceTierPassthrough = serviceTierPassthrough == 1
+	key.InferenceGeoPassthrough = inferenceGeoPassthrough == 1
+	key.SpeedPassthrough = speedPassthrough == 1
+	key.AnthropicBetaPassthrough = anthropicBetaPassthrough == 1
+	key.RejectAnthropicDowngrade = rejectAnthropicDowngrade == 1
+	key.RejectDistillation = rejectDistillation == 1
+	key.CapacityQueueEnabled = capacityQueueEnabled == 1
+	key.StrategyRequiredEnabled = strategyRequired == 1
 	return key, err
 }
 
@@ -1125,8 +1607,70 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 	return a.acquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, false)
 }
 
+const (
+	gatewayCapacityQueuePollInterval = 300 * time.Millisecond
+	gatewayCapacityQueueMaxWaiters   = 256
+)
+
+// waitForGatewayCapacity parks a request whose group is fully saturated
+// (concurrency or RPM) and keeps retrying account acquisition until capacity
+// frees up, the configured timeout elapses, or the client goes away. Groups
+// with the queue disabled never reach this path and keep rejecting instantly.
+func (a *app) waitForGatewayCapacity(ctx context.Context, key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, initialErr error) (gatewayAccount, error) {
+	counterValue, _ := a.capacityWaiters.LoadOrStore(key.GroupID, new(int64))
+	counter := counterValue.(*int64)
+	if atomic.AddInt64(counter, 1) > gatewayCapacityQueueMaxWaiters {
+		atomic.AddInt64(counter, -1)
+		return gatewayAccount{}, fmt.Errorf("capacity queue for group %s is full (%d waiting requests): %w", strings.ToUpper(key.GroupID), gatewayCapacityQueueMaxWaiters, initialErr)
+	}
+	defer atomic.AddInt64(counter, -1)
+
+	timeout := time.Duration(key.CapacityQueueTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(gatewayCapacityQueuePollInterval)
+	defer ticker.Stop()
+	lastCapacityErr := initialErr
+	for {
+		select {
+		case <-ctx.Done():
+			return gatewayAccount{}, ctx.Err()
+		case <-deadline.C:
+			return gatewayAccount{}, fmt.Errorf("request waited %s in the capacity queue without a free account: %w", timeout, lastCapacityErr)
+		case <-ticker.C:
+			account, err := a.acquireGatewayAccount(key, sessionHash, requestedModel, excluded)
+			if err == nil {
+				return account, nil
+			}
+			if !errors.Is(err, errNoGatewayAccountCapacity) {
+				return gatewayAccount{}, err
+			}
+			lastCapacityErr = err
+		}
+	}
+}
+
 func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool) (gatewayAccount, error) {
-	if key.RPMDispatchEnabled {
+	account, err := a.tryAcquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, loadAware)
+	if err == nil || !errors.Is(err, errNoGatewayAccountCapacity) {
+		return account, err
+	}
+	ready, reserveErr := a.ensureReserveCapacity(key.GroupID, requestedModel, "capacity", excluded)
+	if reserveErr != nil {
+		return gatewayAccount{}, reserveActivationError(key.GroupID, reserveErr)
+	}
+	if !ready {
+		return gatewayAccount{}, err
+	}
+	return a.tryAcquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, loadAware)
+}
+
+func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool) (gatewayAccount, error) {
+	serializedDispatch := key.RPMDispatchEnabled || a.groupUsesRPMReservationStrategy(key.GroupID)
+	if serializedDispatch {
 		lockValue, _ := a.dispatchLocks.LoadOrStore(key.GroupID, &sync.Mutex{})
 		dispatchLock := lockValue.(*sync.Mutex)
 		dispatchLock.Lock()
@@ -1140,6 +1684,8 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 	defer tx.Rollback()
 	_, _ = tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`)
 	_, _ = tx.Exec(`DELETE FROM dispatch_sessions WHERE expires_at <= ` + nowSQL)
+	_, _ = tx.Exec(`DELETE FROM account_model_cooldowns WHERE reset_at <= ` + nowSQL)
+	_, _ = tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL)
 	var stickyID int64
 	if sessionHash != "" {
 		_ = tx.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ? AND expires_at > `+nowSQL, sessionHash, key.ID).Scan(&stickyID)
@@ -1150,12 +1696,18 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 	} else {
 		orderClause += `, COALESCE(a.last_used_at, ''), a.id`
 	}
-	rows, err := tx.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.source_sk_hint, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id, ag.priority, a.priority,
+	rows, err := tx.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.source_sk_hint, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id, ag.priority, a.priority, COALESCE(a.last_used_at, ''),
 		COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_rpm,
-		COALESCE((SELECT requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight
+		COALESCE((SELECT requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight,
+		COALESCE((SELECT rpm_limit FROM account_rpm_thresholds t WHERE t.account_id = a.id AND t.reset_at > `+nowSQL+`), 0) AS temporary_rpm_limit,
+		COALESCE(ds.id, 0), COALESCE(ds.rpm_limit, 0), COALESCE(ds.tpm_limit, 0), COALESCE(ds.concurrency_limit, 0), COALESCE(ds.rpm_strategy, ''), COALESCE(ds.rpm_sticky_buffer, 0), COALESCE(ds.dispatch_mode, ''),
+		CASE WHEN ds.tpm_limit > 0 THEN COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) ELSE 0 END AS current_tpm,
+		CASE WHEN EXISTS (SELECT 1 FROM account_model_cooldowns mc WHERE mc.account_id = a.id AND mc.model = ? AND mc.reset_at > `+nowSQL+`) THEN 1 ELSE 0 END AS model_cooldown
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
+		LEFT JOIN groups g ON g.id = ag.group_id
+		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
 		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND `+accountStatePredicate("a", "normal")+`
-		`+orderClause, key.GroupID, stickyID)
+		`+orderClause, modelCooldownKey(requestedModel), key.GroupID, stickyID)
 	if err != nil {
 		return gatewayAccount{}, err
 	}
@@ -1163,34 +1715,80 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 		account         gatewayAccount
 		groupPriority   int
 		accountPriority int
+		lastUsed        string
 		rpm             int
 		inflight        int
+		temporaryRPM    int
+		strategyID      int64
+		strategyRPM     int
+		strategyTPM     int64
+		strategyConc    int
+		strategyRPMMode string
+		strategyBuffer  int
+		strategyMode    string
+		tpm             int64
+		modelCooldown   int
 	}
 	candidates := []candidate{}
 	for rows.Next() {
 		var item candidate
-		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.rpm, &item.inflight); err != nil {
+		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &item.tpm, &item.modelCooldown); err != nil {
 			rows.Close()
 			return gatewayAccount{}, err
+		}
+		// A bound strategy overrides the account's own limits where it sets them.
+		if item.strategyID > 0 {
+			if item.strategyConc > 0 && item.strategyConc < item.account.Concurrency {
+				item.account.Concurrency = item.strategyConc
+			}
+			if item.strategyRPM > 0 {
+				item.account.BaseRPM = item.strategyRPM
+				item.account.RPMStrategy = item.strategyRPMMode
+				item.account.StickyBuffer = item.strategyBuffer
+			}
 		}
 		candidates = append(candidates, item)
 	}
 	rows.Close()
 	selectedIndex := -1
+	diagnostics := gatewayCapacityDiagnostics{Candidates: len(candidates)}
 	for index, candidate := range candidates {
-		if excluded[candidate.account.ID] || !accountSupportsModel(candidate.account, requestedModel) {
+		if excluded[candidate.account.ID] {
+			diagnostics.Excluded++
+			continue
+		}
+		if key.StrategyRequiredEnabled && candidate.strategyID == 0 {
+			diagnostics.StrategyMissing++
+			continue
+		}
+		if candidate.modelCooldown == 1 {
+			diagnostics.ModelCooldown++
+			continue
+		}
+		if !accountSupportsModel(candidate.account, requestedModel) {
+			diagnostics.ModelUnsupported++
 			continue
 		}
 		if candidate.inflight >= candidate.account.Concurrency {
+			diagnostics.ConcurrencyBlocked++
+			continue
+		}
+		if candidate.temporaryRPM > 0 && candidate.rpm >= candidate.temporaryRPM {
+			diagnostics.TemporaryRPMBlocked++
+			continue
+		}
+		if candidate.strategyTPM > 0 && candidate.tpm >= candidate.strategyTPM {
+			diagnostics.TPMBlocked++
 			continue
 		}
 		sticky := stickyID == candidate.account.ID
 		if !rpmSchedulable(candidate.account, candidate.rpm, sticky) {
+			diagnostics.RPMBlocked++
 			continue
 		}
 		if selectedIndex < 0 {
 			selectedIndex = index
-			if !loadAware {
+			if !loadAware && candidate.strategyMode == "" {
 				break
 			}
 			continue
@@ -1199,21 +1797,78 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 		if candidate.groupPriority != selected.groupPriority || candidate.accountPriority != selected.accountPriority {
 			break
 		}
-		if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
-			(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
-			selectedIndex = index
+		if loadAware {
+			if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
+				(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
+				selectedIndex = index
+			}
+			continue
+		}
+		// Strategy dispatch modes compare only accounts bound to the same
+		// strategy: "serial" concentrates traffic on the busiest account,
+		// "balance" spreads it to the least loaded one.
+		if candidate.strategyID > 0 && candidate.strategyID == selected.strategyID {
+			switch candidate.strategyMode {
+			case "serial":
+				if candidate.rpm > selected.rpm || (candidate.rpm == selected.rpm && candidate.inflight > selected.inflight) {
+					selectedIndex = index
+				}
+			case "balance":
+				if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
+					(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
+					selectedIndex = index
+				}
+			case "round_robin":
+				candidateRPM := gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM)
+				selectedRPM := gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)
+				if candidateRPM < selectedRPM ||
+					(candidateRPM == selectedRPM && gatewayCandidateOlder(candidate.lastUsed, selected.lastUsed)) ||
+					(candidateRPM == selectedRPM && candidate.lastUsed == selected.lastUsed && candidate.account.ID < selected.account.ID) {
+					selectedIndex = index
+				}
+			case "concentrated":
+				// Accounts already carrying traffic form the active set; an
+				// account at zero RPM is 待调度 and only gets promoted when no
+				// active account can take the request. Within the active set the
+				// busiest account is filled first.
+				candidateActive := candidate.rpm > 0
+				selectedActive := selected.rpm > 0
+				if candidateActive != selectedActive {
+					if candidateActive {
+						selectedIndex = index
+					}
+					continue
+				}
+				if candidateActive {
+					if candidate.rpm > selected.rpm || (candidate.rpm == selected.rpm && candidate.inflight > selected.inflight) {
+						selectedIndex = index
+					}
+					continue
+				}
+				// Promote deterministically so a burst does not wake several
+				// idle accounts at once.
+				if gatewayCandidateOlder(candidate.lastUsed, selected.lastUsed) ||
+					(candidate.lastUsed == selected.lastUsed && candidate.account.ID < selected.account.ID) {
+					selectedIndex = index
+				}
+			}
 		}
 	}
 	if selectedIndex < 0 {
-		return gatewayAccount{}, errors.New("no account capacity or model support available for group " + strings.ToUpper(key.GroupID) + " (model, concurrency, or RPM limit)")
+		return gatewayAccount{}, &gatewayCapacityError{groupID: key.GroupID, diagnostics: diagnostics}
 	}
-	selected := candidates[selectedIndex].account
-	if key.RPMDispatchEnabled {
-		// Reserve concentrated RPM in the same transaction as selection so a
-		// concurrent burst cannot overfill one account before opening the next.
+	selectedCandidate := candidates[selectedIndex]
+	selected := selectedCandidate.account
+	if key.RPMDispatchEnabled || selected.RPMStrategy == "fixed" || dispatchModeReservesRPM(selectedCandidate.strategyMode) {
+		// Reserve RPM in the same transaction as selection so a concurrent
+		// burst cannot overfill one account before opening the next. Fixed,
+		// round-robin and concentrated accounts reserve here to keep their
+		// policy hard; concentrated in particular would otherwise let a burst
+		// see every account at zero RPM and promote all of them at once.
 		if _, err := tx.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, selected.ID); err != nil {
 			return gatewayAccount{}, err
 		}
+		selected.RPMReserved = true
 	}
 	if _, err := tx.Exec(`INSERT INTO account_inflight (account_id, requests) VALUES (?, 1) ON CONFLICT(account_id) DO UPDATE SET requests = requests + 1`, selected.ID); err != nil {
 		return gatewayAccount{}, err
@@ -1245,6 +1900,64 @@ func gatewayCandidateRPMLoad(current, limit int) float64 {
 		return 0
 	}
 	return float64(current) / float64(limit)
+}
+
+func gatewayCandidateOlder(candidateLastUsed, selectedLastUsed string) bool {
+	if candidateLastUsed == selectedLastUsed {
+		return false
+	}
+	if candidateLastUsed == "" {
+		return true
+	}
+	if selectedLastUsed == "" {
+		return false
+	}
+	return candidateLastUsed < selectedLastUsed
+}
+
+// gatewayShouldQueue reports whether an exhausted group should park the request.
+// The group toggle wins outright; otherwise a strategy that governs how many
+// accounts are in play opts the group in automatically.
+func (a *app) gatewayShouldQueue(key gatewayKey) bool {
+	return key.CapacityQueueEnabled || a.groupQueuesWhenFull(key.GroupID)
+}
+
+// dispatchModeReservesRPM reports whether a mode needs its RPM counted inside
+// the selection transaction rather than after the upstream call.
+func dispatchModeReservesRPM(mode string) bool {
+	return mode == "round_robin" || mode == "concentrated"
+}
+
+// groupUsesRPMReservationStrategy reports whether any account reachable through
+// the group resolves a strategy whose mode needs serialized selection.
+func (a *app) groupUsesRPMReservationStrategy(groupID string) bool {
+	return a.groupHasDispatchMode(groupID, dispatchModesQueueWhenFull)
+}
+
+// groupQueuesWhenFull reports whether the group's strategies should park a
+// request instead of rejecting it when every account is capped.
+func (a *app) groupQueuesWhenFull(groupID string) bool {
+	return a.groupHasDispatchMode(groupID, dispatchModesQueueWhenFull)
+}
+
+func (a *app) groupHasDispatchMode(groupID string, modes []string) bool {
+	if len(modes) == 0 {
+		return false
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(modes)), ",")
+	args := make([]any, 0, len(modes)+1)
+	args = append(args, groupID)
+	for _, mode := range modes {
+		args = append(args, mode)
+	}
+	var found int
+	err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM account_groups ag
+		JOIN accounts a ON a.id = ag.account_id
+		LEFT JOIN groups g ON g.id = ag.group_id
+		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL AND ds.dispatch_mode IN (`+placeholders+`)
+		LIMIT 1)`, args...).Scan(&found)
+	return err == nil && found > 0
 }
 
 func (a *app) recordGatewayAccountRPM(accountID int64) {

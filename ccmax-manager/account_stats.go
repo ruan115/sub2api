@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,13 +59,16 @@ type dailyStat struct {
 }
 
 type batchAuthorizationInput struct {
-	SessionKeys  []string `json:"session_keys"`
-	ProxyPoolID  int64    `json:"proxy_pool_id"`
-	GroupIDs     []string `json:"group_ids"`
-	AuthType     string   `json:"auth_type"`
-	AccountPrice float64  `json:"account_price"`
-	Concurrency  int      `json:"concurrency"`
-	BaseRPM      int      `json:"base_rpm"`
+	SessionKeys     []string `json:"session_keys"`
+	ProxyPoolID     int64    `json:"proxy_pool_id"`
+	GroupIDs        []string `json:"group_ids"`
+	AuthType        string   `json:"auth_type"`
+	AccountPrice    float64  `json:"account_price"`
+	Concurrency     int      `json:"concurrency"`
+	BaseRPM         int      `json:"base_rpm"`
+	RPMStrategy     string   `json:"rpm_strategy"`
+	RPMStickyBuffer int      `json:"rpm_sticky_buffer"`
+	StrategyID      *int64   `json:"strategy_id"`
 }
 
 type batchAuthorizationResult struct {
@@ -72,6 +78,7 @@ type batchAuthorizationResult struct {
 	ProxyIP      string `json:"proxy_ip,omitempty"`
 	Subscription string `json:"subscription_type,omitempty"`
 	Success      bool   `json:"success"`
+	Updated      bool   `json:"updated,omitempty"`
 	Skipped      bool   `json:"skipped,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
@@ -79,9 +86,21 @@ type batchAuthorizationResult struct {
 type batchAuthorizationResponse struct {
 	Total   int                        `json:"total"`
 	Success int                        `json:"success"`
+	Updated int                        `json:"updated"`
 	Skipped int                        `json:"skipped"`
 	Failed  int                        `json:"failed"`
 	Items   []batchAuthorizationResult `json:"items"`
+}
+
+type batchAuthProxyCandidate struct {
+	ID  int64
+	URL string
+}
+
+type batchAuthProxyProbeResult struct {
+	Candidate     batchAuthProxyCandidate
+	Organizations []claudeOrganization
+	Err           error
 }
 
 const accumulateAccountSurvivalSQL = `survival_seconds_total = survival_seconds_total + CASE
@@ -125,6 +144,23 @@ func accountDispatchState(item account) string {
 	return "normal"
 }
 
+// accountLimitWindow reports which quota window is holding the account back, so
+// the UI can split "暂不可调度" into 5h and 7d buckets. It only answers while the
+// cooldown is still in the future; a stale window value is ignored.
+func accountLimitWindow(item account) string {
+	if item.RateLimitWindow != "5h" && item.RateLimitWindow != "7d" {
+		return ""
+	}
+	if item.RateLimitResetAt == "" {
+		return ""
+	}
+	reset, err := time.Parse(time.RFC3339Nano, item.RateLimitResetAt)
+	if err != nil || !reset.After(time.Now().UTC()) {
+		return ""
+	}
+	return item.RateLimitWindow
+}
+
 func accountStatePredicate(alias, state string) string {
 	errorState := "(" + alias + ".status = 'error' OR " + alias + ".invalidated_at IS NOT NULL OR (" + alias + ".auth_status = 'reauth_required' AND " + alias + ".onboarded_at IS NOT NULL))"
 	normalState := "(" + alias + ".status = 'active' AND " + alias + ".schedulable = 1 AND " + alias + ".auth_status = 'valid' " +
@@ -132,13 +168,24 @@ func accountStatePredicate(alias, state string) string {
 		"AND (" + alias + ".expires_at IS NULL OR " + alias + ".expires_at > " + nowSQL + ") " +
 		"AND (" + alias + ".rate_limit_reset_at IS NULL OR " + alias + ".rate_limit_reset_at <= " + nowSQL + ") " +
 		"AND EXISTS (SELECT 1 FROM proxies state_proxy WHERE state_proxy.id = " + alias + ".proxy_id AND state_proxy.status = 'active' AND state_proxy.deleted_at IS NULL))"
+	unavailableState := "(NOT " + errorState + " AND NOT " + normalState + ")"
+	// A window bucket is a strict subset of "unavailable": the cooldown must
+	// still be active and the upstream must have told us which window it was.
+	limitedState := func(window string) string {
+		return "(" + unavailableState + " AND " + alias + ".rate_limit_window = '" + window + "'" +
+			" AND " + alias + ".rate_limit_reset_at IS NOT NULL AND " + alias + ".rate_limit_reset_at > " + nowSQL + ")"
+	}
 	switch state {
 	case "normal":
 		return normalState
 	case "error":
 		return errorState
 	case "unavailable":
-		return "(NOT " + errorState + " AND NOT " + normalState + ")"
+		return unavailableState
+	case "limited_5h":
+		return limitedState("5h")
+	case "limited_7d":
+		return limitedState("7d")
 	default:
 		return "1 = 1"
 	}
@@ -171,6 +218,10 @@ func normalizeSubscriptionType(value string) string {
 	}
 }
 
+func normalizeRateLimitTier(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
 func subscriptionTypeFromCredentials(credentials map[string]any) string {
 	if value, ok := credentials["subscription_type"].(string); ok {
 		if normalized := normalizeSubscriptionType(value); normalized != "" {
@@ -179,6 +230,11 @@ func subscriptionTypeFromCredentials(credentials map[string]any) string {
 	}
 	accessToken, _ := credentials["access_token"].(string)
 	return subscriptionTypeFromToken(accessToken)
+}
+
+func rateLimitTierFromCredentials(credentials map[string]any) string {
+	value, _ := credentials["rate_limit_tier"].(string)
+	return normalizeRateLimitTier(value)
 }
 
 func subscriptionTypeFromToken(token string) string {
@@ -309,18 +365,20 @@ func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
-	days := 30
-	if value, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && value > 0 {
-		days = min(value, 365)
+	startDate, endDate, days, err := dailyStatsRange(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	start := time.Now().In(time.FixedZone("Asia/Shanghai", 8*60*60)).AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	start := startDate.Format("2006-01-02")
+	end := endDate.Format("2006-01-02")
 	items := map[string]*dailyStat{}
 	for index := 0; index < days; index++ {
-		date := time.Now().In(time.FixedZone("Asia/Shanghai", 8*60*60)).AddDate(0, 0, -index).Format("2006-01-02")
+		date := endDate.AddDate(0, 0, -index).Format("2006-01-02")
 		items[date] = &dailyStat{Date: date}
 	}
-	usageWhere := `date(created_at, '` + shanghaiOffset + `') >= ?`
-	usageArgs := []any{start}
+	usageWhere := `date(created_at, '` + shanghaiOffset + `') BETWEEN ? AND ?`
+	usageArgs := []any{start, end}
 	if user.Role == "user" {
 		usageWhere += ` AND user_id = ?`
 		usageArgs = append(usageArgs, user.ID)
@@ -344,16 +402,16 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	usageRows.Close()
-	if err := a.mergeDailyAccountEvents(items, start, "onboarded", user, func(item *dailyStat, count int64) { item.AccountsOnboarded = count }); err != nil {
+	if err := a.mergeDailyAccountEvents(items, start, end, "onboarded", user, func(item *dailyStat, count int64) { item.AccountsOnboarded = count }); err != nil {
 		writeDBError(w, err)
 		return
 	}
-	if err := a.mergeDailyAccountEvents(items, start, "invalidated", user, func(item *dailyStat, count int64) { item.AccountsDied = count }); err != nil {
+	if err := a.mergeDailyAccountEvents(items, start, end, "invalidated", user, func(item *dailyStat, count int64) { item.AccountsDied = count }); err != nil {
 		writeDBError(w, err)
 		return
 	}
-	authWhere := `date(created_at, '` + shanghaiOffset + `') >= ?`
-	authArgs := []any{start}
+	authWhere := `date(created_at, '` + shanghaiOffset + `') BETWEEN ? AND ?`
+	authArgs := []any{start, end}
 	if user.Role == "user" {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		authWhere += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = authorization_logs.account_id AND ` + condition + `)`
@@ -379,18 +437,55 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 	authRows.Close()
 	result := make([]dailyStat, 0, days)
 	for index := 0; index < days; index++ {
-		date := time.Now().In(time.FixedZone("Asia/Shanghai", 8*60*60)).AddDate(0, 0, -index).Format("2006-01-02")
+		date := endDate.AddDate(0, 0, -index).Format("2006-01-02")
 		result = append(result, *items[date])
 	}
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (a *app) mergeDailyAccountEvents(items map[string]*dailyStat, start, eventType string, user panelUser, assign func(*dailyStat, int64)) error {
+func dailyStatsRange(r *http.Request) (time.Time, time.Time, int, error) {
+	const maxDays = 365
+	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Now().In(location)
+	endDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	days := 30
+	startDate := endDate.AddDate(0, 0, -(days - 1))
+	from, to := strings.TrimSpace(r.URL.Query().Get("from")), strings.TrimSpace(r.URL.Query().Get("to"))
+	if from == "" && to == "" {
+		if value, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && value > 0 {
+			days = min(value, maxDays)
+			startDate = endDate.AddDate(0, 0, -(days - 1))
+		}
+		return startDate, endDate, days, nil
+	}
+	if from == "" || to == "" {
+		return time.Time{}, time.Time{}, 0, errors.New("from and to dates are both required")
+	}
+	var err error
+	startDate, err = time.ParseInLocation("2006-01-02", from, location)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, errors.New("from date is invalid")
+	}
+	endDate, err = time.ParseInLocation("2006-01-02", to, location)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, errors.New("to date is invalid")
+	}
+	if startDate.After(endDate) {
+		return time.Time{}, time.Time{}, 0, errors.New("from date cannot be after to date")
+	}
+	days = int(endDate.Sub(startDate)/(24*time.Hour)) + 1
+	if days > maxDays {
+		return time.Time{}, time.Time{}, 0, fmt.Errorf("date range cannot exceed %d days", maxDays)
+	}
+	return startDate, endDate, days, nil
+}
+
+func (a *app) mergeDailyAccountEvents(items map[string]*dailyStat, start, end, eventType string, user panelUser, assign func(*dailyStat, int64)) error {
 	if eventType != "onboarded" && eventType != "invalidated" {
 		return errors.New("invalid account event column")
 	}
-	where := `event_type = ? AND date(created_at, '` + shanghaiOffset + `') >= ?`
-	args := []any{eventType, start}
+	where := `event_type = ? AND date(created_at, '` + shanghaiOffset + `') BETWEEN ? AND ?`
+	args := []any{eventType, start, end}
 	if user.Role == "user" {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		where += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = account_lifecycle_events.account_id AND ` + condition + `)`
@@ -424,11 +519,31 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "proxy pool, account groups or account price is invalid")
 		return
 	}
+	if err := a.validateAccountGroupIDs(input.GroupIDs); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if input.Concurrency <= 0 {
 		input.Concurrency = 10
 	}
 	if input.BaseRPM < 0 || input.BaseRPM > 10000 {
 		writeError(w, http.StatusBadRequest, "base RPM is invalid")
+		return
+	}
+	if input.RPMStrategy == "" {
+		input.RPMStrategy = "tiered"
+	}
+	if input.RPMStrategy != "tiered" && input.RPMStrategy != "sticky_exempt" && input.RPMStrategy != "fixed" {
+		writeError(w, http.StatusBadRequest, "invalid RPM strategy")
+		return
+	}
+	if input.RPMStickyBuffer < 0 {
+		writeError(w, http.StatusBadRequest, "RPM sticky buffer cannot be negative")
+		return
+	}
+	strategyValue, err := a.resolveStrategyBinding(input.StrategyID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	authType, _, apiScope, err := normalizeClaudeAuthMode(input.AuthType)
@@ -441,19 +556,13 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "provide between 1 and 200 Session Keys")
 		return
 	}
+	a.batchAuthMu.Lock()
+	defer a.batchAuthMu.Unlock()
 	response := batchAuthorizationResponse{Total: len(keys), Items: make([]batchAuthorizationResult, 0, len(keys))}
 	poolID := input.ProxyPoolID
 	for index, sessionKey := range keys {
 		item := batchAuthorizationResult{Index: index + 1}
-		proxyID, proxyURL, selectErr := a.selectProxyForNewAccount(&poolID, nil, true)
-		if selectErr != nil {
-			item.Error = selectErr.Error()
-			response.Failed++
-			response.Items = append(response.Items, item)
-			a.recordAuthorization(nil, nil, "", "batch_session_key", false, item.Error, "", requestIP(r))
-			continue
-		}
-		token, exchangeErr := exchangeClaudeSessionKey(r.Context(), sessionKey, apiScope, proxyURL)
+		token, proxyID, _, exchangeErr := a.exchangeBatchClaudeSessionKey(r.Context(), sessionKey, apiScope, poolID)
 		if exchangeErr != nil {
 			item.Error = exchangeErr.Error()
 			response.Failed++
@@ -478,17 +587,58 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if exists {
+			leaseOwner, leaseErr := a.acquireAccountTokenLease(r.Context(), existingID)
+			if leaseErr != nil {
+				item.Error = leaseErr.Error()
+				response.Failed++
+				response.Items = append(response.Items, item)
+				a.recordAuthorization(&existingID, nil, item.Name, "batch_session_key", false, item.Error, token.SubscriptionType, requestIP(r))
+				continue
+			}
+			existingProxyID, existingProxyURL, proxyErr := a.accountAuthorizationProxy(existingID)
+			if proxyErr != nil {
+				a.releaseAccountTokenLease(existingID, leaseOwner)
+				item.Error = proxyErr.Error()
+				response.Failed++
+				response.Items = append(response.Items, item)
+				a.recordAuthorization(&existingID, nil, item.Name, "batch_session_key", false, item.Error, token.SubscriptionType, requestIP(r))
+				continue
+			}
+			if proxyID == nil || *proxyID != existingProxyID {
+				token, exchangeErr = exchangeClaudeSessionKey(r.Context(), sessionKey, apiScope, existingProxyURL)
+				if exchangeErr != nil {
+					a.releaseAccountTokenLease(existingID, leaseOwner)
+					item.Error = exchangeErr.Error()
+					response.Failed++
+					response.Items = append(response.Items, item)
+					a.recordAuthorization(&existingID, &existingProxyID, item.Name, "batch_session_key", false, item.Error, "", requestIP(r))
+					continue
+				}
+				proxyID = &existingProxyID
+			}
+			updateErr := a.updateBatchAuthorizedAccount(existingID, input, authType, sessionKey, token, leaseOwner)
+			a.releaseAccountTokenLease(existingID, leaseOwner)
+			if updateErr != nil {
+				item.Error = updateErr.Error()
+				response.Failed++
+				response.Items = append(response.Items, item)
+				a.recordAuthorization(&existingID, proxyID, item.Name, "batch_session_key", false, item.Error, token.SubscriptionType, requestIP(r))
+				continue
+			}
 			item.AccountID = existingID
 			item.Name = existingName
 			item.Subscription = token.SubscriptionType
-			item.Skipped = true
-			item.Error = "同邮箱账号已存在，未重复创建"
-			response.Skipped++
+			item.Success = true
+			item.Updated = true
+			item.Error = "同邮箱账号已更新 OAuth 凭证与授权代理"
+			_ = a.db.QueryRow(`SELECT COALESCE(NULLIF(exit_ip, ''), host) FROM proxies WHERE id = ?`, *proxyID).Scan(&item.ProxyIP)
+			response.Success++
+			response.Updated++
 			response.Items = append(response.Items, item)
 			a.recordAuthorization(&existingID, proxyID, item.Name, "batch_session_key", true, item.Error, token.SubscriptionType, requestIP(r))
 			continue
 		}
-		accountID, createErr := a.createBatchAuthorizedAccount(input, authType, item.Name, sessionKey, token, *proxyID)
+		accountID, createErr := a.createBatchAuthorizedAccount(input, authType, item.Name, sessionKey, token, *proxyID, strategyValue)
 		if createErr != nil {
 			item.Error = createErr.Error()
 			response.Failed++
@@ -505,6 +655,155 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		a.recordAuthorization(&accountID, proxyID, item.Name, "batch_session_key", true, "authorization succeeded", token.SubscriptionType, requestIP(r))
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *app) exchangeBatchClaudeSessionKey(ctx context.Context, sessionKey, scope string, poolID int64) (*claudeTokenInfo, *int64, string, error) {
+	proxyID, proxyURL, err := a.selectProxyForNewAccount(&poolID, nil, true)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	excluded := map[int64]bool{*proxyID: true}
+	token, err := exchangeClaudeSessionKey(ctx, sessionKey, scope, proxyURL)
+	if err == nil {
+		return token, proxyID, proxyURL, nil
+	}
+	if !isClaudeSessionProxyChallenge(err) {
+		return nil, proxyID, proxyURL, err
+	}
+
+	lastChallenge := err
+	for {
+		candidates, candidateErr := a.availableBatchAuthProxyCandidates(poolID, excluded)
+		if candidateErr != nil {
+			return nil, proxyID, proxyURL, candidateErr
+		}
+		if len(candidates) == 0 {
+			return nil, proxyID, proxyURL, fmt.Errorf("no authorization-compatible proxy is available in this pool: %w", lastChallenge)
+		}
+		candidate, _, probeErr := probeClaudeSessionProxies(ctx, sessionKey, candidates)
+		if probeErr != nil {
+			return nil, proxyID, proxyURL, probeErr
+		}
+		excluded[candidate.ID] = true
+		candidateID := candidate.ID
+		token, exchangeErr := exchangeClaudeSessionKey(ctx, sessionKey, scope, candidate.URL)
+		if exchangeErr == nil {
+			return token, &candidateID, candidate.URL, nil
+		}
+		if !isClaudeSessionProxyChallenge(exchangeErr) {
+			return nil, &candidateID, candidate.URL, exchangeErr
+		}
+		proxyID, proxyURL, lastChallenge = &candidateID, candidate.URL, exchangeErr
+	}
+}
+
+func (a *app) accountAuthorizationProxy(accountID int64) (int64, string, error) {
+	var proxyID sql.NullInt64
+	if err := a.db.QueryRow(`SELECT proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&proxyID); err != nil {
+		return 0, "", err
+	}
+	if !proxyID.Valid {
+		return 0, "", errors.New("existing account must bind an active proxy before reauthorization")
+	}
+	proxyURL, err := a.proxyURL(proxyID.Int64)
+	if err != nil {
+		return 0, "", errors.New("existing account proxy is unavailable")
+	}
+	return proxyID.Int64, proxyURL.String(), nil
+}
+
+func (a *app) availableBatchAuthProxyCandidates(poolID int64, excluded map[int64]bool) ([]batchAuthProxyCandidate, error) {
+	rows, err := a.db.Query(`SELECT p.id FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+		AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+		AND `+proxyNotQuarantinedPredicate("p")+`
+		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)
+		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id`, poolID)
+	if err != nil {
+		return nil, err
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		if !excluded[id] {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	candidates := make([]batchAuthProxyCandidate, 0, len(ids))
+	for _, id := range ids {
+		proxyURL, proxyErr := a.proxyURL(id)
+		if proxyErr == nil {
+			candidates = append(candidates, batchAuthProxyCandidate{ID: id, URL: proxyURL.String()})
+		}
+	}
+	return candidates, nil
+}
+
+func probeClaudeSessionProxies(ctx context.Context, sessionKey string, candidates []batchAuthProxyCandidate) (batchAuthProxyCandidate, []claudeOrganization, error) {
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan batchAuthProxyCandidate)
+	results := make(chan batchAuthProxyProbeResult, len(candidates))
+	workerCount := 6
+	if len(candidates) < workerCount {
+		workerCount = len(candidates)
+	}
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for candidate := range jobs {
+				organizations, err := getClaudeOrganizations(probeCtx, sessionKey, candidate.URL)
+				select {
+				case results <- batchAuthProxyProbeResult{Candidate: candidate, Organizations: organizations, Err: err}:
+				case <-probeCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, candidate := range candidates {
+			select {
+			case jobs <- candidate:
+			case <-probeCtx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	var lastErr error
+	for result := range results {
+		if result.Err == nil {
+			cancel()
+			return result.Candidate, result.Organizations, nil
+		}
+		lastErr = result.Err
+		if isClaudeSessionInvalid(result.Err) && !isClaudeSessionProxyChallenge(result.Err) {
+			cancel()
+			return batchAuthProxyCandidate{}, nil, result.Err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no unassigned active proxy is available in this pool")
+	}
+	return batchAuthProxyCandidate{}, nil, fmt.Errorf("no authorization-compatible proxy is available in this pool: %w", lastErr)
 }
 
 func normalizeAccountEmail(value string) string {
@@ -554,8 +853,16 @@ func uniqueSessionKeys(values []string) []string {
 	return result
 }
 
-func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authType, name, sessionKey string, token *claudeTokenInfo, proxyID int64) (int64, error) {
+func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authType, name, sessionKey string, token *claudeTokenInfo, proxyID int64, strategyID any) (int64, error) {
 	encoded, err := json.Marshal(token)
+	if err != nil {
+		return 0, err
+	}
+	extraJSON, err := json.Marshal(map[string]any{
+		"base_rpm":          input.BaseRPM,
+		"rpm_strategy":      input.RPMStrategy,
+		"rpm_sticky_buffer": input.RPMStickyBuffer,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -565,8 +872,8 @@ func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authTy
 	}
 	defer tx.Rollback()
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, auth_status, auth_checked_at, token_expires_at, subscription_type, account_price, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, ?, '{}', 'active', 1, ?, 50, 1, ?, ?, 1, ?, 'tiered', 0, 'off', 'valid', `+nowSQL+`, ?, ?, ?, `+nowSQL+`)`,
-		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), input.Concurrency, input.ProxyPoolID, proxyID, input.BaseRPM, expiresAt, token.SubscriptionType, input.AccountPrice)
+	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, auth_status, auth_checked_at, token_expires_at, subscription_type, rate_limit_tier, account_price, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, ?, ?, 'active', 1, ?, 50, 1, ?, ?, 1, ?, ?, ?, 'off', ?, 'valid', `+nowSQL+`, ?, ?, ?, ?, `+nowSQL+`)`,
+		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), string(extraJSON), input.Concurrency, input.ProxyPoolID, proxyID, input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, strategyID, expiresAt, token.SubscriptionType, token.RateLimitTier, input.AccountPrice)
 	if err != nil {
 		return 0, err
 	}
@@ -581,4 +888,39 @@ func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authTy
 		return 0, err
 	}
 	return accountID, nil
+}
+
+func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthorizationInput, authType, sessionKey string, token *claudeTokenInfo, leaseOwner string) error {
+	encoded, err := json.Marshal(token)
+	if err != nil {
+		return err
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previousOnboarded, previousInvalidated sql.NullString
+	if err := tx.QueryRow(`SELECT onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&previousOnboarded, &previousInvalidated); err != nil {
+		return err
+	}
+	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
+	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`,
+		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, accountID, leaseOwner)
+	if err != nil {
+		return err
+	}
+	if updated, _ := result.RowsAffected(); updated == 0 {
+		return sql.ErrNoRows
+	}
+	if err := setAccountGroups(tx, accountID, input.GroupIDs, 50); err != nil {
+		return err
+	}
+	if !previousOnboarded.Valid || previousInvalidated.Valid {
+		if _, err := tx.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type) VALUES (?, 'onboarded')`, accountID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

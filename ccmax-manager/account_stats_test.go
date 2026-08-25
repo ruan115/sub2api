@@ -1,8 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -143,6 +145,24 @@ func TestAccountStatisticsSubscriptionAndDispatchState(t *testing.T) {
 	}
 }
 
+func TestDailyStatsSupportsInclusiveDateRange(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var daily []dailyStat
+	putJSON(t, handler, http.MethodGet, "/api/stats/daily?from=2026-08-01&to=2026-08-03", nil, http.StatusOK, &daily)
+	if len(daily) != 3 || daily[0].Date != "2026-08-03" || daily[1].Date != "2026-08-02" || daily[2].Date != "2026-08-01" {
+		t.Fatalf("daily date range = %+v", daily)
+	}
+	putJSON(t, handler, http.MethodGet, "/api/stats/daily?from=2026-08-03&to=2026-08-01", nil, http.StatusBadRequest, nil)
+	putJSON(t, handler, http.MethodGet, "/api/stats/daily?from=2025-01-01&to=2026-08-01", nil, http.StatusBadRequest, nil)
+}
+
 func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
@@ -156,6 +176,10 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 		switch {
 		case r.URL.Path == "/organizations":
 			writeJSON(w, http.StatusOK, []map[string]any{{"uuid": "org-1", "raven_type": "team"}})
+		case r.URL.Path == "/profile":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"organization": map[string]string{"organization_type": "team", "rate_limit_tier": "default_team"},
+			})
 		case strings.HasSuffix(r.URL.Path, "/authorize"):
 			cookie, err := r.Cookie("sessionKey")
 			if err != nil {
@@ -187,25 +211,35 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	previousOrganizations := claudeOrganizationsEndpoint
 	previousAuthorize := claudeSessionAuthorizeBaseURL
 	previousToken := claudeTokenEndpoint
+	previousProfile := claudeProfileEndpoint
 	claudeOrganizationsEndpoint = upstream.URL + "/organizations"
 	claudeSessionAuthorizeBaseURL = upstream.URL + "/v1/oauth"
 	claudeTokenEndpoint = upstream.URL + "/token"
+	claudeProfileEndpoint = upstream.URL + "/profile"
 	defer func() {
 		claudeOrganizationsEndpoint = previousOrganizations
 		claudeSessionAuthorizeBaseURL = previousAuthorize
 		claudeTokenEndpoint = previousToken
+		claudeProfileEndpoint = previousProfile
 	}()
 
 	firstProxyID, firstCalls := createCountingForwardProxy(t, a)
 	secondProxyID, secondCalls := createCountingForwardProxy(t, a)
 	thirdProxyID, thirdCalls := createCountingForwardProxy(t, a)
+	var strategy struct {
+		ID int64 `json:"id"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/strategies", map[string]any{
+		"name": "onboarding-fixed", "rpm_limit": 15, "rpm_strategy": "fixed", "dispatch_mode": "serial",
+	}, http.StatusCreated, &strategy)
 	var result batchAuthorizationResponse
 	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-authorize", map[string]any{
 		"session_keys": []string{"first", "second", "duplicate-first"}, "proxy_pool_id": 1,
 		"group_ids": []string{"a"}, "auth_type": "oauth", "account_price": 25,
 		"concurrency": 2, "base_rpm": 15,
+		"rpm_strategy": "fixed", "rpm_sticky_buffer": 4, "strategy_id": strategy.ID,
 	}, http.StatusOK, &result)
-	if result.Success != 2 || result.Skipped != 1 || result.Failed != 0 || len(result.Items) != 3 {
+	if result.Success != 3 || result.Updated != 1 || result.Skipped != 0 || result.Failed != 0 || len(result.Items) != 3 {
 		t.Fatalf("batch result = %+v", result)
 	}
 	if firstCalls.Load() == 0 || secondCalls.Load() == 0 || thirdCalls.Load() == 0 {
@@ -214,7 +248,7 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	if result.Items[0].Name != "first@example.com" || result.Items[1].Name != "second@example.com" {
 		t.Fatalf("account names were not derived from token emails: %+v", result.Items)
 	}
-	if result.Items[0].Subscription != "team" || result.Items[1].Subscription != "team" || !result.Items[2].Skipped || result.Items[2].AccountID != result.Items[0].AccountID {
+	if result.Items[0].Subscription != "team" || result.Items[1].Subscription != "team" || !result.Items[2].Updated || !result.Items[2].Success || result.Items[2].AccountID != result.Items[0].AccountID {
 		t.Fatalf("subscription types = %+v", result.Items)
 	}
 	if firstProxyID == secondProxyID || firstProxyID == thirdProxyID || secondProxyID == thirdProxyID {
@@ -233,15 +267,109 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	if accountCount != 2 || distinctProxyCount != 2 || authorizationCount != 3 {
 		t.Fatalf("account/proxy/auth counts = %d/%d/%d", accountCount, distinctProxyCount, authorizationCount)
 	}
-	var firstHint, secondHint string
-	if err := a.db.QueryRow(`SELECT source_sk_hint FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&firstHint); err != nil {
+	var firstTier string
+	if err := a.db.QueryRow(`SELECT rate_limit_tier FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&firstTier); err != nil {
+		t.Fatal(err)
+	}
+	if firstTier != "default_team" {
+		t.Fatalf("rate limit tier = %q, want default_team", firstTier)
+	}
+	var firstHint, secondHint, firstCredentials string
+	var updatedProxyID int64
+	if err := a.db.QueryRow(`SELECT source_sk_hint, credentials_json, proxy_id FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&firstHint, &firstCredentials, &updatedProxyID); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.db.QueryRow(`SELECT source_sk_hint FROM accounts WHERE id = ?`, result.Items[1].AccountID).Scan(&secondHint); err != nil {
 		t.Fatal(err)
 	}
-	if firstHint != sourceSKHint("first") || secondHint != sourceSKHint("second") {
+	if firstHint != sourceSKHint("duplicate-first") || secondHint != sourceSKHint("second") {
 		t.Fatalf("source SK hints = %q/%q", firstHint, secondHint)
+	}
+	if decodeObject(firstCredentials)["access_token"] != "access-duplicate-first" {
+		t.Fatalf("duplicate email did not replace OAuth credentials: %s", firstCredentials)
+	}
+	if updatedProxyID != firstProxyID {
+		t.Fatalf("updated account proxy = %d, want original bound proxy %d", updatedProxyID, firstProxyID)
+	}
+	var rpmStrategy, extraJSON string
+	var stickyBuffer int
+	var boundStrategy sql.NullInt64
+	if err := a.db.QueryRow(`SELECT rpm_strategy, rpm_sticky_buffer, strategy_id, extra_json FROM accounts WHERE id = ?`, result.Items[1].AccountID).Scan(&rpmStrategy, &stickyBuffer, &boundStrategy, &extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if rpmStrategy != "fixed" || stickyBuffer != 4 || !boundStrategy.Valid || boundStrategy.Int64 != strategy.ID {
+		t.Fatalf("batch onboarding limits = %q/%d/%v, want fixed/4/%d", rpmStrategy, stickyBuffer, boundStrategy, strategy.ID)
+	}
+	extra := decodeObject(extraJSON)
+	if fmt.Sprint(extra["base_rpm"]) != "15" || extra["rpm_strategy"] != "fixed" || fmt.Sprint(extra["rpm_sticky_buffer"]) != "4" {
+		t.Fatalf("batch onboarding did not mirror limits into extra_json: %+v", extra)
+	}
+}
+
+func TestBatchAuthorizationRetriesCloudflareChallengeWithAnotherProxy(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	previousRetryDelays := claudeSessionChallengeDelays
+	claudeSessionChallengeDelays = []time.Duration{0, 0, 0}
+	defer func() { claudeSessionChallengeDelays = previousRetryDelays }()
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/organizations":
+			writeJSON(w, http.StatusOK, []map[string]any{{"uuid": "org-1", "raven_type": "team"}})
+		case strings.HasSuffix(r.URL.Path, "/authorize"):
+			writeJSON(w, http.StatusOK, map[string]string{"redirect_uri": "https://platform.claude.com/oauth/code/callback?code=fallback-code"})
+		case r.URL.Path == "/token":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"access_token": "access-fallback", "refresh_token": "refresh-fallback", "expires_in": 3600,
+				"organization": map[string]string{"uuid": "org-1", "raven_type": "team"},
+				"account":      map[string]string{"uuid": "account-fallback", "email_address": "fallback@example.com"},
+			})
+		case r.URL.Path == "/profile":
+			writeJSON(w, http.StatusOK, map[string]any{"organization": map[string]string{"organization_type": "team"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	previousOrganizations := claudeOrganizationsEndpoint
+	previousAuthorize := claudeSessionAuthorizeBaseURL
+	previousToken := claudeTokenEndpoint
+	previousProfile := claudeProfileEndpoint
+	claudeOrganizationsEndpoint = upstream.URL + "/organizations"
+	claudeSessionAuthorizeBaseURL = upstream.URL + "/v1/oauth"
+	claudeTokenEndpoint = upstream.URL + "/token"
+	claudeProfileEndpoint = upstream.URL + "/profile"
+	defer func() {
+		claudeOrganizationsEndpoint = previousOrganizations
+		claudeSessionAuthorizeBaseURL = previousAuthorize
+		claudeTokenEndpoint = previousToken
+		claudeProfileEndpoint = previousProfile
+	}()
+
+	challengeProxyID, challengeCalls := createCloudflareChallengeProxy(t, a)
+	workingProxyID, workingCalls := createCountingForwardProxy(t, a)
+	var result batchAuthorizationResponse
+	putJSON(t, a.routes(), http.MethodPost, "/api/accounts/batch-authorize", map[string]any{
+		"session_keys": []string{"valid-session"}, "proxy_pool_id": 1,
+		"group_ids": []string{"a"}, "auth_type": "oauth", "account_price": 0,
+	}, http.StatusOK, &result)
+	if result.Success != 1 || result.Failed != 0 || len(result.Items) != 1 {
+		t.Fatalf("batch result = %+v", result)
+	}
+	if challengeCalls.Load() < 4 || workingCalls.Load() == 0 {
+		t.Fatalf("proxy calls = challenge %d, working %d", challengeCalls.Load(), workingCalls.Load())
+	}
+	var assignedProxyID int64
+	if err := a.db.QueryRow(`SELECT proxy_id FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&assignedProxyID); err != nil {
+		t.Fatal(err)
+	}
+	if assignedProxyID == challengeProxyID || assignedProxyID != workingProxyID {
+		t.Fatalf("assigned proxy = %d, challenge = %d, working = %d", assignedProxyID, challengeProxyID, workingProxyID)
 	}
 }
 
@@ -349,6 +477,37 @@ func createCountingForwardProxy(t *testing.T, a *app) (int64, *atomic.Int64) {
 		t.Fatal(err)
 	}
 	result, err := a.db.Exec(`INSERT INTO proxies (pool_id, name, protocol, host, port, status) VALUES (1, ?, 'http', ?, ?, 'active')`, "counting-proxy-"+portText, host, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id, &calls
+}
+
+func createCloudflareChallengeProxy(t *testing.T, a *app) (int64, *atomic.Int64) {
+	t.Helper()
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.Header().Set("Server", "cloudflare")
+		w.Header().Set("cf-mitigated", "challenge")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<html><title>Just a moment...</title></html>"))
+	}))
+	t.Cleanup(server.Close)
+	host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := a.db.Exec(`INSERT INTO proxies (pool_id, name, protocol, host, port, status, latency_ms, last_test_at) VALUES (1, ?, 'http', ?, ?, 'active', 0, `+nowSQL+`)`, "challenge-proxy-"+portText, host, port)
 	if err != nil {
 		t.Fatal(err)
 	}

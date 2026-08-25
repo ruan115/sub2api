@@ -55,6 +55,12 @@ func TestRealtimeStatsUsesRollingMinute(t *testing.T) {
 	if len(result.Accounts) != 2 || result.Accounts[0].AccountID != first.ID || result.Accounts[0].RPM != 2 || result.Accounts[0].TPM != 150 {
 		t.Fatalf("realtime accounts = %+v", result.Accounts)
 	}
+	a.captureAccountRPMThreshold("a", first.ID)
+	var limited realtimeLoad
+	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=a", nil, http.StatusOK, &limited)
+	if limited.EligibleAccounts != 1 || limited.RPMCapacity != 10 || limited.Accounts[0].EffectiveRPM != 2 || limited.Accounts[0].TemporaryRPM != 2 || limited.Accounts[0].Eligible {
+		t.Fatalf("realtime learned threshold = %+v", limited)
+	}
 
 	var empty realtimeLoad
 	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=b", nil, http.StatusOK, &empty)
@@ -153,6 +159,91 @@ func TestRPMConcentratedDispatchReservesCapacityAcrossConcurrentSelections(t *te
 	}
 	if counts[first.ID] != 3 || counts[second.ID] != 3 {
 		t.Fatalf("concurrent concentrated selections = %+v", counts)
+	}
+}
+
+func TestDispatchStrategyRoundRobinSpreadsRPM(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	var strategy struct {
+		ID int64 `json:"id"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/strategies", map[string]any{
+		"name": "round-robin-100", "rpm_limit": 100, "rpm_strategy": "fixed", "dispatch_mode": "round_robin",
+	}, http.StatusCreated, &strategy)
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "round robin", "rate_multiplier": 1,
+		"status": "active", "rpm_dispatch_enabled": true, "strategy_id": strategy.ID,
+	}, http.StatusOK, nil)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := createGatewayTestAccount(t, a, handler, "rr-first", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "rr-second", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	third := createGatewayTestAccount(t, a, handler, "rr-third", "https://third.example.test", 0, nil, map[string]any{"access_token": "token-c"})
+
+	selectedIDs := make([]int64, 0, 6)
+	for range 6 {
+		selected, acquireErr := a.acquireGatewayAccount(key, "", "claude-test", map[int64]bool{})
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		selectedIDs = append(selectedIDs, selected.ID)
+		a.releaseGatewayAccount(selected.ID)
+	}
+	want := []int64{first.ID, second.ID, third.ID, first.ID, second.ID, third.ID}
+	for index, id := range want {
+		if selectedIDs[index] != id {
+			t.Fatalf("round-robin selections = %v, want %v", selectedIDs, want)
+		}
+	}
+}
+
+func TestDispatchStrategyRoundRobinReservesRPMWithoutGroupDispatch(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	var strategy struct {
+		ID int64 `json:"id"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/strategies", map[string]any{
+		"name": "round-robin-unlimited", "rpm_limit": 0, "rpm_strategy": "fixed", "dispatch_mode": "round_robin",
+	}, http.StatusCreated, &strategy)
+	disabled := false
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "round robin", "rate_multiplier": 1,
+		"status": "active", "rpm_dispatch_enabled": disabled, "strategy_id": strategy.ID,
+	}, http.StatusOK, nil)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := createGatewayTestAccount(t, a, handler, "rr-reserve-first", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "rr-reserve-second", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+
+	selected, err := a.acquireGatewayAccount(key, "", "claude-test", map[int64]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	next, err := a.acquireGatewayAccount(key, "", "claude-test", map[int64]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.releaseGatewayAccount(next.ID)
+	if selected.ID != first.ID || next.ID != second.ID {
+		t.Fatalf("round-robin without group dispatch = %d/%d, want %d/%d", selected.ID, next.ID, first.ID, second.ID)
+	}
+	var firstRPM int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, first.ID).Scan(&firstRPM); err != nil {
+		t.Fatal(err)
+	}
+	if firstRPM != 1 {
+		t.Fatalf("round-robin RPM reservation = %d, want 1", firstRPM)
 	}
 }
 

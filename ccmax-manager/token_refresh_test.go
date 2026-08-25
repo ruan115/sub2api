@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -86,5 +91,111 @@ func TestSaveClaudeTokenClearsOnlyAuthRefreshCooldown(t *testing.T) {
 	}
 	if !reset.Valid || reset.String != future {
 		t.Fatalf("provider rate-limit cooldown changed: %v", reset)
+	}
+}
+
+func TestTokenRefreshLeaseCoordinatesIndependentAppInstances(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	path := filepath.Join(t.TempDir(), "shared.db")
+	a1, err := newApp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a1.db.Close()
+	a2, err := newApp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.db.Close()
+
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		writeJSON(w, http.StatusOK, map[string]any{
+			"access_token": "shared-fresh-access", "refresh_token": "shared-fresh-refresh", "expires_in": 3600,
+		})
+	}))
+	defer upstream.Close()
+	previousEndpoint := claudeTokenEndpoint
+	claudeTokenEndpoint = upstream.URL
+	defer func() { claudeTokenEndpoint = previousEndpoint }()
+
+	handler := a1.routes()
+	proxyID := createTestForwardProxy(t, a1)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "shared-refresh", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "shared-old-access", "refresh_token": "shared-old-refresh", "expires_at": time.Now().Add(-time.Minute).Unix()},
+		"extra":       map[string]any{}, "status": "active", "schedulable": true, "concurrency": 1,
+		"priority": 10, "rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+	base := gatewayAccount{ID: created.ID, AuthType: "oauth", CredentialsJSON: `{"access_token":"shared-old-access","refresh_token":"shared-old-refresh","expires_at":1}`, ProxyID: sql.NullInt64{Int64: proxyID, Valid: true}}
+	errorsCh := make(chan error, 2)
+	go func() {
+		_, refreshErr := a1.refreshGatewayAccountToken(context.Background(), base, true)
+		errorsCh <- refreshErr
+	}()
+	<-started
+	go func() {
+		_, refreshErr := a2.refreshGatewayAccountToken(context.Background(), base, true)
+		errorsCh <- refreshErr
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	for range 2 {
+		if refreshErr := <-errorsCh; refreshErr != nil {
+			t.Fatal(refreshErr)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("cross-process refresh calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestRefreshInvalidGrantRecoversWhenDatabaseTokenAdvanced(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "race-recovery", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "race-old-access", "refresh_token": "race-old-refresh", "expires_at": time.Now().Add(time.Hour).Unix()},
+		"extra":       map[string]any{}, "status": "active", "schedulable": true, "concurrency": 1,
+		"priority": 10, "rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, updateErr := a.db.Exec(`UPDATE accounts SET credentials_json = ? WHERE id = ?`, `{"access_token":"race-new-access","refresh_token":"race-new-refresh","expires_at":4102444800}`, created.ID)
+		if updateErr != nil {
+			http.Error(w, updateErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "refresh token already used"})
+	}))
+	defer upstream.Close()
+	previousEndpoint := claudeTokenEndpoint
+	claudeTokenEndpoint = upstream.URL
+	defer func() { claudeTokenEndpoint = previousEndpoint }()
+
+	base := gatewayAccount{ID: created.ID, AuthType: "oauth", CredentialsJSON: `{"access_token":"race-old-access","refresh_token":"race-old-refresh"}`, ProxyID: sql.NullInt64{Int64: proxyID, Valid: true}}
+	refreshed, err := a.refreshGatewayAccountToken(context.Background(), base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gatewayAccountAccessToken(refreshed) != "race-new-access" || gatewayAccountRefreshToken(refreshed) != "race-new-refresh" {
+		t.Fatalf("race recovery returned stale credentials: %s", refreshed.CredentialsJSON)
+	}
+	got, err := a.getAccount(created.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "active" || got.AuthStatus != "valid" {
+		t.Fatalf("refresh race incorrectly invalidated account: %+v", got)
 	}
 }

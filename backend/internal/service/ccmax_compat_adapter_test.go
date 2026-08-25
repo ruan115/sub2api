@@ -123,6 +123,63 @@ func TestPrepareCCMaxCompatibilityRequestUsesOriginalOAuthPipeline(t *testing.T)
 	require.Less(t, bytes.Index(prepared.Body, []byte(`"unknown"`)), bytes.Index(prepared.Body, []byte(`"model"`)))
 }
 
+func TestPrepareCCMaxCompatibilityRequestAppliesGroupFieldPassthrough(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"service_tier":"auto","inference_geo":"us","speed":"fast"}`)
+	tests := []struct {
+		name          string
+		normalMode    bool
+		serviceTier   bool
+		inferenceGeo  bool
+		speed         bool
+		wantService   bool
+		wantInference bool
+		wantSpeed     bool
+	}{
+		{name: "default strips all fields"},
+		{name: "switches are independent", serviceTier: true, wantService: true},
+		{
+			name: "distilled mode preserves enabled fields", normalMode: true,
+			serviceTier: true, inferenceGeo: true, speed: true,
+			wantService: true, wantInference: true, wantSpeed: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+				Body: body, Model: "claude-sonnet-4-5", APIKey: "upstream-key",
+				NormalRequestMode: test.normalMode, ServiceTierPassthrough: test.serviceTier,
+				InferenceGeoPassthrough: test.inferenceGeo, SpeedPassthrough: test.speed,
+			})
+			require.NoError(t, err)
+			require.Equal(t, test.wantService, gjson.GetBytes(prepared.Body, "service_tier").Exists())
+			require.Equal(t, test.wantInference, gjson.GetBytes(prepared.Body, "inference_geo").Exists())
+			require.Equal(t, test.wantSpeed, gjson.GetBytes(prepared.Body, "speed").Exists())
+		})
+	}
+}
+
+func TestPrepareCCMaxCompatibilityRequestControlsClientAnthropicBeta(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{
+		"User-Agent":     {"relay/1.0"},
+		"Anthropic-Beta": {"client-custom-beta-2099-01-01"},
+	}
+	base := CCMaxCompatibilityInput{
+		Body: body, ClientHeaders: headers, Model: "claude-sonnet-4-5",
+		OAuth: true, AccessToken: "oauth-token",
+	}
+	withoutClientBeta, err := PrepareCCMaxCompatibilityRequest(base)
+	require.NoError(t, err)
+	require.NotContains(t, getHeaderRaw(withoutClientBeta.Headers, "anthropic-beta"), "client-custom-beta-2099-01-01")
+	require.Contains(t, getHeaderRaw(withoutClientBeta.Headers, "anthropic-beta"), "claude-code-20250219")
+
+	base.AnthropicBetaPassthrough = true
+	withClientBeta, err := PrepareCCMaxCompatibilityRequest(base)
+	require.NoError(t, err)
+	require.Contains(t, getHeaderRaw(withClientBeta.Headers, "anthropic-beta"), "client-custom-beta-2099-01-01")
+	require.Contains(t, getHeaderRaw(withClientBeta.Headers, "anthropic-beta"), "claude-code-20250219")
+}
+
 func TestPrepareCCMaxCompatibilityRequestStrictClaudeCodeClassification(t *testing.T) {
 	body := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":"arbitrary"}}`)
 	headers := http.Header{"User-Agent": {"claude-cli/2.1.220 (external, cli)"}}
@@ -159,7 +216,7 @@ func TestPrepareCCMaxCompatibilityRequestCanForceChatMimicry(t *testing.T) {
 }
 
 func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurface(t *testing.T) {
-	body := []byte(`{"unknown":{"drop":true},"model":"claude-fable-5","system":"Keep this system prompt.","stream":true,"max_tokens":64,"temperature":999,"top_p":999,"top_k":-1,"thinking":{"type":"enabled","budget_tokens":1024},"stop_sequences":["END"],"tools":[{"name":"read.file","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"read.file"},"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"unknown":{"drop":true},"model":"claude-fable-5","system":[{"type":"text","text":"Keep this system prompt.","cache_control":{"type":"ephemeral","ttl":"5m"}}],"stream":true,"max_tokens":64,"temperature":999,"top_p":999,"top_k":-1,"thinking":{"type":"enabled","budget_tokens":1024},"stop_sequences":["END"],"tools":[{"name":"read.file","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"read.file"},"messages":[{"role":"user","content":"hi"}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
 		Body: body, Model: "claude-fable-5", Stream: true, OAuth: true,
 		AccessToken: "token", NormalRequestMode: true,
@@ -167,10 +224,11 @@ func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurfac
 	require.NoError(t, err)
 	require.True(t, prepared.Mimic)
 	require.True(t, prepared.Distilled)
-	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
+	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 2)
 	require.Contains(t, gjson.GetBytes(prepared.Body, "system.0.text").String(), "x-anthropic-billing-header")
-	require.Equal(t, claudeCodeSystemPrompt, gjson.GetBytes(prepared.Body, "system.1.text").String())
-	require.Equal(t, "Keep this system prompt.", gjson.GetBytes(prepared.Body, "system.2.text").String())
+	require.Equal(t, "Keep this system prompt.", gjson.GetBytes(prepared.Body, "system.1.text").String())
+	require.Equal(t, "5m", gjson.GetBytes(prepared.Body, "system.1.cache_control.ttl").String())
+	require.NotContains(t, string(prepared.Body), claudeCodeSystemPrompt)
 	require.NotContains(t, string(prepared.Body), "authorized security testing")
 	for _, path := range []string{"unknown", "temperature", "top_p", "top_k"} {
 		require.False(t, gjson.GetBytes(prepared.Body, path).Exists(), path)
@@ -179,7 +237,80 @@ func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurfac
 	require.Equal(t, "END", gjson.GetBytes(prepared.Body, "stop_sequences.0").String())
 	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tools.0.name").String())
 	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tool_choice.name").String())
+	require.Equal(t, "5m", gjson.GetBytes(prepared.Body, "tools.0.cache_control.ttl").String())
+	require.Equal(t, "claude-fable-5", prepared.Model)
+	require.Equal(t, "claude-fable-5", gjson.GetBytes(prepared.Body, "model").String())
 	require.Contains(t, getHeaderRaw(prepared.Headers, "anthropic-beta"), "claude-code-20250219")
+}
+
+func TestPrepareCCMaxCompatibilityRequestNormalModePreservesExplicitCacheTTL(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"one hour","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"default","cache_control":{"type":"ephemeral"}}],"max_tokens":64,"tools":[{"name":"read_file","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "system.1.cache_control.ttl").String())
+	require.Equal(t, "5m", gjson.GetBytes(prepared.Body, "system.2.cache_control.ttl").String())
+	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "tools.0.cache_control.ttl").String())
+}
+
+func TestPrepareCCMaxCompatibilityRequestNormalModeOrdersGeneratedToolTTLBeforeSystem1h(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"one hour","cache_control":{"type":"ephemeral","ttl":"1h"}}],"max_tokens":64,"tools":[{"name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "tools.0.cache_control.ttl").String())
+	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "system.1.cache_control.ttl").String())
+}
+
+func TestNormalizeEphemeralCacheControlTTLOrderUsesAnthropicProcessingOrder(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"read_file","cache_control":{"type":"ephemeral","ttl":"5m"}}],"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"last","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]}`)
+	normalized := normalizeEphemeralCacheControlTTLOrder(body)
+	require.Equal(t, "1h", gjson.GetBytes(normalized, "tools.0.cache_control.ttl").String())
+	require.Equal(t, "1h", gjson.GetBytes(normalized, "system.0.cache_control.ttl").String())
+	require.Equal(t, "1h", gjson.GetBytes(normalized, "messages.0.content.0.cache_control.ttl").String())
+	require.Equal(t, "5m", gjson.GetBytes(normalized, "messages.0.content.1.cache_control.ttl").String())
+}
+
+func TestPrepareCCMaxCompatibilityCountTokensOrdersToolTTLBeforeMessage1h(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","tools":[{"name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true, CountTokens: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "tools.0.cache_control.ttl").String())
+	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "messages.0.content.0.cache_control.ttl").String())
+}
+
+func TestPrepareCCMaxCompatibilityRequestNormalModeOmitsIdentityByDefault(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.test; cc_entrypoint=cli;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Keep this system prompt."}],"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 2)
+	require.Equal(t, "Keep this system prompt.", gjson.GetBytes(prepared.Body, "system.1.text").String())
+	require.Equal(t, 1, strings.Count(string(prepared.Body), "x-anthropic-billing-header:"))
+	require.NotContains(t, string(prepared.Body), claudeCodeSystemPrompt)
+}
+
+func TestPrepareCCMaxCompatibilityRequestNormalModeCanEnableIdentity(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.test; cc_entrypoint=cli;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Client system."}],"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+		ClaudeCodeIdentityEnabled: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
+	require.Equal(t, 1, strings.Count(string(prepared.Body), "x-anthropic-billing-header:"))
+	require.Equal(t, 1, strings.Count(string(prepared.Body), claudeCodeSystemPrompt))
+	require.Equal(t, "Client system.", gjson.GetBytes(prepared.Body, "system.2.text").String())
 }
 
 func TestNormalizeCCMaxDistilledResponseAddsIterationsAndPreservesSignature(t *testing.T) {
@@ -294,4 +425,13 @@ func TestCCMaxCompatibilityDelegatesAccountRetryPolicy(t *testing.T) {
 	require.True(t, pool.PoolRetryable)
 	require.Equal(t, 4, pool.PoolRetryCount)
 	require.True(t, pool.SkipDefaultErrorHandling)
+}
+
+func TestResolveCCMaxCompatibilityCooldownKeeps529ModelScoped(t *testing.T) {
+	_, ok := ResolveCCMaxCompatibilityCooldown(529, make(http.Header))
+	require.False(t, ok)
+
+	resetAt, ok := ResolveCCMaxCompatibilityCooldown(http.StatusTooManyRequests, make(http.Header))
+	require.True(t, ok)
+	require.WithinDuration(t, time.Now().Add(5*time.Second), resetAt, time.Second)
 }

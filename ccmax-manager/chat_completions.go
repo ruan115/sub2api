@@ -118,6 +118,10 @@ func (w *chatCompletionsResponseWriter) Header() http.Header {
 	return w.header
 }
 
+func (w *chatCompletionsResponseWriter) Unwrap() http.ResponseWriter {
+	return w.target
+}
+
 func (w *chatCompletionsResponseWriter) WriteHeader(status int) {
 	if w.status == 0 {
 		w.status = status

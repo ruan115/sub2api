@@ -218,6 +218,63 @@ func TestChatCompletionsAliasReturnsOpenAIErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRejectsAnthropicSilentModelDowngrade(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		streamJSON := "false"
+		if stream {
+			name = "stream"
+			streamJSON = "true"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CCMAX_AUTH_DISABLED", "1")
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("request-id", "req-openai-downgrade")
+				_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_downgraded\",\"type\":\"message\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":3}}}\n\n")
+			}))
+			defer upstream.Close()
+
+			a, handler := newGatewayTestApp(t)
+			defer a.db.Close()
+			putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+				"name": "A 分组", "description": "模型降级控制", "rate_multiplier": 1, "status": "active",
+				"reject_anthropic_downgrade_enabled": true,
+			}, http.StatusOK, nil)
+			key := createGatewayTestKey(t, handler)
+			created := createGatewayTestAccount(t, a, handler, "chat-downgrade", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+				"model":"claude-fable-5","stream":`+streamJSON+`,
+				"messages":[{"role":"user","content":"hello"}]
+			}`))
+			request.Header.Set("Authorization", "Bearer "+key.Key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"type":"api_error"`) || !strings.Contains(response.Body.String(), "silently downgraded model") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+
+			var usageAccountID int64
+			var model string
+			var billedCost, actualCost float64
+			if err := a.db.QueryRow(`SELECT account_id, model, billed_cost, actual_cost FROM usage_logs WHERE request_id = 'req-openai-downgrade'`).Scan(&usageAccountID, &model, &billedCost, &actualCost); err != nil {
+				t.Fatal(err)
+			}
+			if usageAccountID != created.ID || model != "claude-opus-4-8" || billedCost != 0 || actualCost <= 0 {
+				t.Fatalf("usage account=%d model=%q billed=%f actual=%f", usageAccountID, model, billedCost, actualCost)
+			}
+			var errorAccountID sql.NullInt64
+			if err := a.db.QueryRow(`SELECT account_id FROM gateway_error_logs WHERE request_id = 'req-openai-downgrade'`).Scan(&errorAccountID); err != nil {
+				t.Fatal(err)
+			}
+			if !errorAccountID.Valid || errorAccountID.Int64 != created.ID {
+				t.Fatalf("gateway error account=%v, want %d", errorAccountID, created.ID)
+			}
+		})
+	}
+}
+
 func TestChatCompletionsAuthenticatesBeforeParsing(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)

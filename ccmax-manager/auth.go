@@ -20,7 +20,7 @@ import (
 
 const sessionCookie = "ccmax_session"
 
-var panelPages = []string{"overview", "accounts", "dead", "onboarding", "daily", "authorization", "proxies", "access", "pricing", "billing", "audit"}
+var panelPages = []string{"overview", "accounts", "dead", "onboarding", "daily", "authorization", "errors", "strategies", "proxies", "access", "pricing", "billing", "audit"}
 
 type authContextKey struct{}
 
@@ -141,8 +141,11 @@ func (a *app) migrateFeatures() error {
 	if err := addColumnIfMissing(a.db, "users", "balance", "REAL"); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = CASE role WHEN 'admin' THEN '["overview","accounts","dead","onboarding","daily","authorization","proxies","access","pricing","billing","audit"]' WHEN 'readonly_admin' THEN '["overview","accounts","dead","daily","authorization","proxies","pricing","billing","audit"]' ELSE '["accounts","access"]' END WHERE visible_pages_json = '[]'`); err != nil {
+	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = CASE role WHEN 'admin' THEN '["overview","accounts","dead","onboarding","daily","authorization","errors","proxies","access","pricing","billing","audit"]' WHEN 'readonly_admin' THEN '["overview","accounts","dead","daily","authorization","errors","proxies","pricing","billing","audit"]' ELSE '["accounts","access"]' END WHERE visible_pages_json = '[]'`); err != nil {
 		return fmt.Errorf("initialize visible pages: %w", err)
+	}
+	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = '["overview","accounts","dead","daily","authorization","errors","proxies","pricing","billing","audit"]' WHERE role = 'readonly_admin' AND visible_pages_json = '["overview","accounts","dead","daily","authorization","proxies","pricing","billing","audit"]'`); err != nil {
+		return fmt.Errorf("add error page to default read-only permissions: %w", err)
 	}
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -187,7 +190,7 @@ func defaultVisiblePages(role string) []string {
 	case "admin":
 		return append([]string{}, panelPages...)
 	case "readonly_admin":
-		return []string{"overview", "accounts", "dead", "daily", "authorization", "proxies", "pricing", "billing", "audit"}
+		return []string{"overview", "accounts", "dead", "daily", "authorization", "errors", "proxies", "pricing", "billing", "audit"}
 	default:
 		return []string{"accounts", "access"}
 	}
@@ -246,7 +249,7 @@ func userCanReadAPI(user panelUser, path string) bool {
 	case path == "/api/dashboard":
 		return userCanSeePage(user, "overview")
 	case strings.HasPrefix(path, "/api/groups") || strings.HasPrefix(path, "/api/purposes"):
-		return userCanSeeAnyPage(user, "overview", "accounts", "onboarding", "billing")
+		return userCanSeeAnyPage(user, "overview", "accounts", "onboarding", "billing", "access")
 	case strings.HasPrefix(path, "/api/accounts"):
 		return userCanSeeAnyPage(user, "accounts", "dead", "onboarding")
 	case strings.HasPrefix(path, "/api/proxy-pools") || strings.HasPrefix(path, "/api/proxies"):
@@ -259,8 +262,12 @@ func userCanReadAPI(user panelUser, path string) bool {
 		return userCanSeePage(user, "daily")
 	case strings.HasPrefix(path, "/api/stats/realtime"):
 		return userCanSeePage(user, "accounts")
-	case strings.HasPrefix(path, "/api/authorization-logs"):
+	case strings.HasPrefix(path, "/api/authorization-logs") || strings.HasPrefix(path, "/api/authorization-deauth"):
 		return userCanSeePage(user, "authorization")
+	case strings.HasPrefix(path, "/api/error-logs") || strings.HasPrefix(path, "/api/error-insights"):
+		return userCanSeePage(user, "errors")
+	case strings.HasPrefix(path, "/api/strategies"):
+		return userCanSeePage(user, "strategies")
 	case strings.HasPrefix(path, "/api/audit-logs"):
 		return userCanSeePage(user, "audit")
 	default:
@@ -481,9 +488,6 @@ func normalizeUserInput(input *userInput, requirePassword bool) error {
 	if input.Status == "" {
 		input.Status = "active"
 	}
-	if input.Role == "admin" || input.Role == "readonly_admin" {
-		input.AllowedGroupIDs = []string{"a", "b"}
-	}
 	if input.Username == "" || (requirePassword && len(input.Password) < 8) || input.RPM < 0 {
 		return errors.New("username, password or RPM is invalid")
 	}
@@ -521,6 +525,10 @@ func (a *app) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := a.prepareUserGroups(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	hash, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	allowed, _ := json.Marshal(input.AllowedGroupIDs)
 	visible, _ := json.Marshal(input.VisiblePages)
@@ -552,6 +560,10 @@ func (a *app) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := normalizeUserInput(&input, false); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.prepareUserGroups(&input); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -645,7 +657,7 @@ func (a *app) handleAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 	if input.Status == "" {
 		input.Status = "active"
 	}
-	if input.UserID <= 0 || input.Name == "" || (input.GroupID != "a" && input.GroupID != "b") || input.Quota < 0 {
+	if input.UserID <= 0 || input.Name == "" || !groupIDPattern.MatchString(input.GroupID) || input.Quota < 0 {
 		writeError(w, http.StatusBadRequest, "invalid API key fields")
 		return
 	}
@@ -792,6 +804,9 @@ func canRevealAPIKey(user panelUser, ownerID int64) bool {
 }
 
 func (a *app) userCanUseGroup(userID int64, groupID string) (bool, error) {
+	if err := a.validateDispatchGroupID(groupID); err != nil {
+		return false, err
+	}
 	var role, allowed string
 	err := a.db.QueryRow(`SELECT role, allowed_group_ids_json FROM users WHERE id = ? AND status = 'active' AND deleted_at IS NULL`, userID).Scan(&role, &allowed)
 	if err != nil {
@@ -808,6 +823,26 @@ func (a *app) userCanUseGroup(userID int64, groupID string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (a *app) prepareUserGroups(input *userInput) error {
+	if input.Role == "admin" || input.Role == "readonly_admin" {
+		rows, err := a.db.Query(`SELECT id FROM groups ORDER BY id`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		input.AllowedGroupIDs = []string{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			input.AllowedGroupIDs = append(input.AllowedGroupIDs, id)
+		}
+		return rows.Err()
+	}
+	return a.validateGroupIDs(input.AllowedGroupIDs, false)
 }
 
 func randomSecret(size int) string {

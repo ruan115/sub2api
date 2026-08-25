@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,9 @@ const (
 )
 
 func (a *app) startTokenRefreshScheduler() func() {
+	if disabled := strings.TrimSpace(os.Getenv("CCMAX_TOKEN_REFRESH_ENABLED")); disabled == "0" || strings.EqualFold(disabled, "false") {
+		return func() {}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var wait sync.WaitGroup
 	wait.Add(1)

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -42,15 +41,26 @@ type CCMaxCompatibilityInput struct {
 	// Sub2API's Chat Completions handler, regardless of the caller User-Agent.
 	ForceNonClaudeCode bool
 	// NormalRequestMode selects the distilled-compatible lane observed from the
-	// configured upstream: only the minimum OAuth identity blocks are added, the
-	// original system prompt remains a system prompt, unsupported top-level
-	// fields are dropped, and client Fable 5 controls are ignored. The default
-	// false value preserves the original Sub2API lane.
+	// configured upstream: billing attribution is added, the original system
+	// prompt remains a system prompt, cache breakpoints default to a 5m TTL while
+	// preserving any client-supplied TTL, unsupported top-level fields are dropped,
+	// and client Fable 5 controls are ignored. The default false value preserves
+	// the original Sub2API lane.
 	NormalRequestMode bool
+	// ClaudeCodeIdentityEnabled controls the optional short Claude Code identity
+	// prose in the distilled-compatible lane. Billing attribution is always kept.
+	// The default false value avoids injecting the identity sentence.
+	ClaudeCodeIdentityEnabled bool
 	// MCPToolNames rewrites mimicked tool names into the mcp__<server>__<tool>
 	// shape Claude Code uses for MCP servers instead of the Parrot-style opaque
 	// aliases. The default false value preserves the original Sub2API lane.
 	MCPToolNames bool
+	// The field passthrough switches are owned by the CCMAX group. They default
+	// to false so client routing hints cannot reach Anthropic unintentionally.
+	ServiceTierPassthrough   bool
+	InferenceGeoPassthrough  bool
+	SpeedPassthrough         bool
+	AnthropicBetaPassthrough bool
 }
 
 // CCMaxCompatibilityPrepared is the exact wire request produced by the
@@ -66,6 +76,32 @@ type CCMaxCompatibilityPrepared struct {
 	Distilled     bool
 	ToolRewrite   *ToolNameRewrite
 	input         CCMaxCompatibilityInput
+}
+
+// ForceCCMaxCompatibilityStream rebuilds a prepared compatibility request as
+// an upstream SSE request. Callers can use this to bridge a non-streaming
+// client request through a long-running streaming upstream connection without
+// changing the rest of the Sub2API compatibility pipeline.
+func ForceCCMaxCompatibilityStream(prepared *CCMaxCompatibilityPrepared) (*CCMaxCompatibilityPrepared, error) {
+	if prepared == nil {
+		return nil, fmt.Errorf("missing compatibility request")
+	}
+	logicalBody, err := sjson.SetBytes(prepared.LogicalBody, "stream", true)
+	if err != nil {
+		return nil, fmt.Errorf("enable compatibility streaming: %w", err)
+	}
+	input := prepared.input
+	input.Stream = true
+	body, headers, err := finalizeCCMaxCompatibilityWire(input, logicalBody, prepared.Model, prepared.Mimic)
+	if err != nil {
+		return nil, err
+	}
+	next := *prepared
+	next.Body = body
+	next.LogicalBody = logicalBody
+	next.Headers = headers
+	next.input = input
+	return &next, nil
 }
 
 const ccmaxDistilledOAuthSystemBlocks = `[
@@ -98,6 +134,9 @@ type ccmaxDistilledClaudeRequest struct {
 	Thinking          json.RawMessage `json:"thinking,omitempty"`
 	MCPServers        json.RawMessage `json:"mcp_servers,omitempty"`
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
+	ServiceTier       json.RawMessage `json:"service_tier,omitempty"`
+	InferenceGeo      json.RawMessage `json:"inference_geo,omitempty"`
+	Speed             json.RawMessage `json:"speed,omitempty"`
 }
 
 type ccmaxDistilledCacheCreation struct {
@@ -170,9 +209,8 @@ func ResolveCCMaxCompatibilityFingerprint(headers http.Header, existing *Fingerp
 }
 
 // PrepareCCMaxCompatibilityRequest runs the original Sub2API default CCMAX
-// transformations in their production order. Optional Sub2API settings retain
-// their defaults: system injection on, dateline normalization on, metadata
-// passthrough off, message-cache rewrite off, and 1h TTL injection off.
+// transformations in their production order. NormalRequestMode applies the
+// separately observed distilled request and response contract where it differs.
 func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxCompatibilityPrepared, error) {
 	if !gjson.ValidBytes(input.Body) {
 		return nil, fmt.Errorf("invalid Anthropic message request")
@@ -221,7 +259,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 				_ = json.Unmarshal([]byte(raw.Raw), &system)
 			}
 			if input.NormalRequestMode {
-				body = rewriteCCMaxDistilledSystem(body)
+				body = rewriteCCMaxDistilledSystem(body, input.ClaudeCodeIdentityEnabled)
 			} else {
 				body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
 			}
@@ -257,6 +295,10 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		}
 		body = enforceCacheControlLimit(body)
 	}
+	if input.NormalRequestMode && input.OAuth {
+		body = defaultEphemeralCacheControlTTL(body, claude.DefaultCacheControlTTL)
+		body = normalizeEphemeralCacheControlTTLOrder(body)
+	}
 
 	if !input.OAuth && strings.TrimSpace(input.MappedModel) != "" && input.MappedModel != model {
 		body = ReplaceModelInBody(body, input.MappedModel)
@@ -276,6 +318,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 	if input.NormalRequestMode && isCCMaxDistilledFable5(input.Model) {
 		body = applyCCMaxDistilledFableControls(body, !input.CountTokens)
 	}
+	body = applyCCMaxFieldPassthrough(body, input)
 
 	logicalBody := append([]byte(nil), body...)
 	body, headers, err := finalizeCCMaxCompatibilityWire(input, logicalBody, model, mimic)
@@ -289,6 +332,26 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		Mimic: mimic, ClaudeCode: claudeCode, Distilled: input.NormalRequestMode,
 		ToolRewrite: toolRewrite, input: input,
 	}, nil
+}
+
+func applyCCMaxFieldPassthrough(body []byte, input CCMaxCompatibilityInput) []byte {
+	fields := []struct {
+		path    string
+		allowed bool
+	}{
+		{path: "service_tier", allowed: input.ServiceTierPassthrough},
+		{path: "inference_geo", allowed: input.InferenceGeoPassthrough},
+		{path: "speed", allowed: input.SpeedPassthrough},
+	}
+	for _, field := range fields {
+		if field.allowed {
+			continue
+		}
+		if next, err := sjson.DeleteBytes(body, field.path); err == nil {
+			body = next
+		}
+	}
+	return body
 }
 
 func normalizeCCMaxDistilledRequestBody(body []byte, model string) ([]byte, error) {
@@ -335,29 +398,63 @@ func applyCCMaxDistilledFableControls(body []byte, adaptiveThinking bool) []byte
 }
 
 // rewriteCCMaxDistilledSystem keeps client system instructions in the system
-// field while adding only the two identity blocks required by direct Anthropic
-// OAuth. The larger Sub2API expansion prompt is intentionally not injected.
-func rewriteCCMaxDistilledSystem(body []byte) []byte {
-	identityBlocks, err := buildClaudeOAuthSystemPromptBlocksJSON(body, "", ccmaxDistilledOAuthSystemBlocks)
-	if err != nil {
+// field and ensures billing attribution is present exactly once. The optional
+// short Claude Code identity prose is included only when the group switch is
+// enabled. The Sub2API expansion prompt and synthetic message turns are
+// intentionally not injected in this lane.
+func rewriteCCMaxDistilledSystem(body []byte, includeClaudeCodeIdentity bool) []byte {
+	generated, err := buildClaudeOAuthSystemPromptBlocksJSON(body, "", ccmaxDistilledOAuthSystemBlocks)
+	if err != nil || len(generated) != 2 {
 		return body
 	}
-	items := append([][]byte(nil), identityBlocks...)
+	var billingBlock, identityBlock []byte
+	clientBlocks := make([][]byte, 0, 1)
 	original := gjson.GetBytes(body, "system")
 	switch {
 	case original.Type == gjson.String && strings.TrimSpace(original.String()) != "":
 		block, err := json.Marshal(map[string]any{"type": "text", "text": original.String()})
 		if err == nil {
-			items = append(items, block)
+			text := strings.TrimSpace(original.String())
+			switch {
+			case strings.HasPrefix(text, claudeCodeBillingHeaderPrefix) && strings.Contains(text, claudeCodeEntrypointMarker):
+				billingBlock = block
+			case text == claudeCodeSystemPrompt:
+				identityBlock = block
+			default:
+				clientBlocks = append(clientBlocks, block)
+			}
 		}
 	case original.IsArray():
 		original.ForEach(func(_, item gjson.Result) bool {
-			items = append(items, []byte(item.Raw))
+			text := strings.TrimSpace(item.Get("text").String())
+			switch {
+			case strings.HasPrefix(text, claudeCodeBillingHeaderPrefix) && strings.Contains(text, claudeCodeEntrypointMarker):
+				if billingBlock == nil {
+					billingBlock = []byte(item.Raw)
+				}
+			case text == claudeCodeSystemPrompt:
+				if identityBlock == nil {
+					identityBlock = []byte(item.Raw)
+				}
+			default:
+				clientBlocks = append(clientBlocks, []byte(item.Raw))
+			}
 			return true
 		})
 	case original.Exists() && original.Raw != "null":
-		items = append(items, []byte(original.Raw))
+		clientBlocks = append(clientBlocks, []byte(original.Raw))
 	}
+	if billingBlock == nil {
+		billingBlock = generated[0]
+	}
+	if includeClaudeCodeIdentity && identityBlock == nil {
+		identityBlock = generated[1]
+	}
+	items := [][]byte{billingBlock}
+	if includeClaudeCodeIdentity {
+		items = append(items, identityBlock)
+	}
+	items = append(items, clientBlocks...)
 	result, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(items))
 	if !ok {
 		return body
@@ -380,12 +477,23 @@ func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody [
 	if input.OAuth {
 		tokenType = "oauth"
 	}
+	clientHeaders := input.ClientHeaders
+	if !input.AnthropicBetaPassthrough && getHeaderRaw(clientHeaders, "anthropic-beta") != "" {
+		clientHeaders = input.ClientHeaders.Clone()
+		deleteHeaderAllForms(clientHeaders, "anthropic-beta")
+	}
 	var beta string
 	var setBeta bool
 	if input.CountTokens {
-		beta, setBeta = gateway.computeFinalCountTokensAnthropicBeta(tokenType, mimic, model, input.ClientHeaders, body, nil)
+		beta, setBeta = gateway.computeFinalCountTokensAnthropicBeta(tokenType, mimic, model, clientHeaders, body, nil)
 	} else {
-		beta, setBeta = gateway.computeFinalAnthropicBeta(tokenType, mimic, model, input.ClientHeaders, body, nil)
+		beta, setBeta = gateway.computeFinalAnthropicBeta(tokenType, mimic, model, clientHeaders, body, nil)
+		if input.AnthropicBetaPassthrough && mimic {
+			if clientBeta := getHeaderRaw(clientHeaders, "anthropic-beta"); clientBeta != "" {
+				beta = mergeAnthropicBetaDropping(strings.Split(beta, ","), clientBeta, nil)
+				setBeta = true
+			}
+		}
 	}
 	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, beta); changed {
 		body = sanitized
@@ -404,7 +512,7 @@ func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody [
 		setHeaderRaw(req.Header, "x-api-key", input.APIKey)
 	}
 	if !input.OAuth || !mimic || input.CountTokens {
-		for key, values := range input.ClientHeaders {
+		for key, values := range clientHeaders {
 			if !allowedHeaders[strings.ToLower(key)] {
 				continue
 			}
@@ -566,22 +674,20 @@ func GenerateCCMaxCompatibilitySessionHash(body []byte, clientIP, userAgent stri
 	return (&GatewayService{}).GenerateSessionHash(parsed)
 }
 
-// ResolveCCMaxCompatibilityCooldown exposes the default Anthropic account
-// cooldown decisions used by RateLimitService. The caller owns persistence.
+// ResolveCCMaxCompatibilityCooldown exposes Anthropic account-wide cooldown
+// decisions used by RateLimitService. Model-scoped overloads are intentionally
+// excluded and must be handled by the caller's model scheduler.
 func ResolveCCMaxCompatibilityCooldown(status int, headers http.Header) (time.Time, bool) {
 	switch status {
 	case http.StatusTooManyRequests:
-		if result := calculateAnthropic429ResetTime(headers); result != nil {
-			return result.resetAt, true
-		}
-		if raw := strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-reset")); raw != "" {
-			if timestamp, err := strconv.ParseInt(raw, 10, 64); err == nil {
-				return time.Unix(timestamp, 0), true
-			}
+		// Only explicit 5h/7d exhaustion is strong enough to park the whole
+		// account until the upstream window resets. The aggregate reset header
+		// is also emitted for transient and model-scoped 429s, so trusting it on
+		// its own can incorrectly remove a healthy account for several days.
+		if limit := selectAnthropicExhaustedWindow(headers, time.Now()); limit != nil {
+			return limit.resetAt, true
 		}
 		return time.Now().Add(defaultRateLimit429CooldownSeconds * time.Second), true
-	case 529:
-		return time.Now().Add(10 * time.Minute), true
 	default:
 		return time.Time{}, false
 	}
@@ -594,6 +700,18 @@ func IsCCMaxCompatibilityRPMSchedulable(authType string, baseRPM, concurrency, s
 	authType = normalizeCCMaxCompatibilityAuthType(authType)
 	if authType != AccountTypeOAuth && authType != AccountTypeSetupToken {
 		return true
+	}
+	if strategy == "fixed" {
+		// Hard cap: base_rpm is a strict admission line. Sticky sessions get a
+		// literal exemption of rpm_sticky_buffer requests (0 = no exemption);
+		// the tiered auto-computed buffer never applies here.
+		if baseRPM <= 0 || currentRPM < baseRPM {
+			return true
+		}
+		if stickyBuffer < 0 {
+			stickyBuffer = 0
+		}
+		return sticky && currentRPM < baseRPM+stickyBuffer
 	}
 	extra := map[string]any{
 		"base_rpm":          baseRPM,

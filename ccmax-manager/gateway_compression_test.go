@@ -8,10 +8,46 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 )
+
+func TestClientForProxyUsesLongConfigurableTimeoutsAndConnectionCache(t *testing.T) {
+	t.Setenv("CCMAX_UPSTREAM_RESPONSE_HEADER_TIMEOUT", "17m")
+	t.Setenv("CCMAX_UPSTREAM_REQUEST_TIMEOUT", "0")
+
+	client, err := clientForProxy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Timeout != 0 {
+		t.Fatalf("client timeout = %s, want disabled", client.Timeout)
+	}
+	wrapper, ok := client.Transport.(decompressingRoundTripper)
+	if !ok {
+		t.Fatalf("transport = %T, want decompressingRoundTripper", client.Transport)
+	}
+	transport, ok := wrapper.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("base transport = %T, want *http.Transport", wrapper.base)
+	}
+	if transport.ResponseHeaderTimeout != 17*time.Minute {
+		t.Fatalf("response header timeout = %s, want 17m", transport.ResponseHeaderTimeout)
+	}
+	if transport.MaxIdleConns != 1024 || transport.MaxIdleConnsPerHost != 128 {
+		t.Fatalf("idle connection limits = %d/%d, want 1024/128", transport.MaxIdleConns, transport.MaxIdleConnsPerHost)
+	}
+
+	cached, err := clientForProxy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached != client {
+		t.Fatal("clientForProxy did not reuse the configured transport")
+	}
+}
 
 func TestClientForProxyDecompressesExplicitAcceptEncoding(t *testing.T) {
 	payload := []byte(`{"id":"msg_compressed","usage":{"input_tokens":17,"output_tokens":4}}`)

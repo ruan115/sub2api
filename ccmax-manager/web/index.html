@@ -7,6 +7,7 @@
     <title>CCMAX Control</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/lib/choices.min.css?v=__ASSET_VERSION__" />
+    <link rel="stylesheet" href="/lib/tabulator.min.css?v=__ASSET_VERSION__" />
     <link rel="stylesheet" href="/styles.css?v=__ASSET_VERSION__" />
   </head>
   <body>
@@ -101,6 +102,14 @@
           <button class="nav-item" data-view="authorization" title="授权统计">
             <span class="nav-icon"><i data-lucide="percent"></i></span
             ><span>授权统计</span>
+          </button>
+          <button class="nav-item" data-view="errors" title="报错信息">
+            <span class="nav-icon"><i data-lucide="circle-alert"></i></span
+            ><span>报错信息</span>
+          </button>
+          <button class="nav-item" data-view="strategies" title="策略观测">
+            <span class="nav-icon"><i data-lucide="git-branch"></i></span
+            ><span>策略观测</span>
           </button>
           <button
             class="nav-item"
@@ -214,8 +223,11 @@
               <div class="section-heading">
                 <div>
                   <p class="kicker">POOL STATUS</p>
-                  <h2>A / B 分组</h2>
+                  <h2>账号分组</h2>
                 </div>
+                <button class="text-button write-action" data-open-group>
+                  <i data-lucide="plus"></i><span>新增分组</span>
+                </button>
               </div>
               <div id="group-cards" class="group-cards"></div>
             </section>
@@ -272,9 +284,9 @@
               </button>
             </div>
             <label class="date-filter"
-              ><span>开始</span><input type="date" id="account-from" /></label
+              ><span>开始</span><input type="datetime-local" step="60" id="account-from" /></label
             ><label class="date-filter"
-              ><span>结束</span><input type="date" id="account-to"
+              ><span>结束</span><input type="datetime-local" step="60" id="account-to"
             /></label>
           </section>
           <div
@@ -285,6 +297,8 @@
             <button class="active" data-account-status="">全部 <b id="status-all-count">0</b></button>
             <button data-account-status="normal">正常 <b id="status-normal-count">0</b></button>
             <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
+            <button data-account-status="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
+            <button data-account-status="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
             <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
           </div>
           <section class="panel table-panel accounts-panel">
@@ -316,6 +330,14 @@
                   aria-label="检测当前页账号存活状态并刷新列表"
                 >
                   <i data-lucide="refresh-cw"></i>
+                </button>
+                <button
+                  class="button secondary small write-action"
+                  id="edit-selected-accounts"
+                  type="button"
+                  disabled
+                >
+                  <i data-lucide="square-pen"></i><span>批量编辑</span>
                 </button>
                 <button
                   class="icon-button compact write-action"
@@ -364,8 +386,8 @@
               <div class="realtime-load-item" title="当前仍在处理的上游请求">
                 <span>在途请求</span><strong id="realtime-inflight">0</strong><small>当前并发</small>
               </div>
-              <div class="realtime-load-item" id="realtime-active-item" title="最近 60 秒实际承担请求的账号">
-                <span>激活账号</span><strong id="realtime-active-accounts">0 / 0</strong><small id="realtime-active-names">暂无负载</small>
+              <div class="realtime-load-item" id="realtime-active-item" title="最近 60 秒实际承担请求的账号；该数量随滚动窗口变化">
+                <span>负载账号</span><strong id="realtime-active-accounts">0 / 0</strong><small id="realtime-active-names">暂无负载</small>
               </div>
             </div>
             <div class="table-wrap">
@@ -397,14 +419,34 @@
 
         <section class="view" id="view-dead">
           <div class="metrics compact-metrics" id="dead-metrics"></div>
+          <div class="dead-filter-row">
+            <div class="status-tabs" id="dead-status-tabs">
+              <button class="active" data-dead-status="pending">待归档 <b id="dead-pending-count">0</b></button>
+              <button data-dead-status="archived">已归档 <b id="dead-archived-count">0</b></button>
+            </div>
+            <label class="search-field dead-search-field"
+              ><i data-lucide="search"></i
+              ><input
+                id="dead-search"
+                type="search"
+                autocomplete="off"
+                aria-label="搜索死亡账户"
+                placeholder="搜索账号、邮箱或代理 IP"
+            /></label>
+          </div>
           <section class="panel table-panel">
             <div class="section-heading">
-              <div><p class="kicker">ACCOUNT LIFECYCLE</p><h2>死亡账户</h2></div>
-              <span class="section-count" id="dead-list-count">0 个账号</span>
+              <div><p class="kicker">ACCOUNT LIFECYCLE</p><h2 id="dead-table-title">死亡账户</h2></div>
+              <div class="heading-actions">
+                <span class="section-count" id="dead-list-count">0 个账号</span>
+                <button class="button danger small write-action admin-only-column" id="archive-selected-accounts" type="button" disabled>
+                  <i data-lucide="archive"></i><span>归档已选</span><b id="selected-dead-count">0</b>
+                </button>
+              </div>
             </div>
             <div class="table-wrap">
               <table class="dead-table">
-                <thead><tr><th>账号</th><th>订阅</th><th>代理 / IP</th><th>上号时间</th><th>失效时间</th><th>存活时间</th><th class="num">请求数</th><th class="num">总计费</th><th>失效原因</th><th class="actions">操作</th></tr></thead>
+                <thead><tr><th class="select-column admin-only-column"><input type="checkbox" id="select-all-dead" aria-label="选择全部待归档账号" /></th><th>账号</th><th>订阅</th><th>代理 / IP</th><th>上号时间</th><th>失效时间</th><th>归档时间</th><th>存活时间</th><th class="num">请求数</th><th class="num">总计费</th><th>失效原因</th><th class="actions">操作</th></tr></thead>
                 <tbody id="dead-accounts-body"></tbody>
               </table>
             </div>
@@ -425,7 +467,10 @@
               <label><span>账号价格 USD</span><input id="batch-account-price" type="number" min="0" step="0.01" value="0" /></label>
               <label><span>并发数</span><input id="batch-concurrency" type="number" min="1" value="10" /></label>
               <label><span>基础 RPM</span><input id="batch-base-rpm" type="number" min="0" max="10000" value="15" /></label>
-              <fieldset class="group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
+              <label><span>RPM 策略</span><select id="batch-rpm-strategy"><option value="tiered">三区模型</option><option value="sticky_exempt">粘性豁免</option><option value="fixed">固定硬限</option></select></label>
+              <label><span>粘性豁免 n</span><input id="batch-rpm-buffer" type="number" min="0" value="0" /><small>固定硬限下粘性会话可超出基础 RPM 的额度</small></label>
+              <label><span>调度策略</span><select id="batch-strategy"><option value="">跟随分组</option></select><small>绑定后该账号的限流与算法优先使用策略配置</small></label>
+              <fieldset class="group-picker" id="batch-group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
               <div class="span-2 batch-auth-actions"><button class="button primary write-action" id="batch-auth-submit" type="submit"><i data-lucide="key-round"></i><span>开始批量授权</span></button></div>
             </form>
           </section>
@@ -437,7 +482,17 @@
 
         <section class="view" id="view-daily">
           <section class="panel table-panel">
-            <div class="section-heading"><div><p class="kicker">DAILY OPERATIONS</p><h2>每日统计</h2></div><select id="daily-days"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option></select></div>
+            <div class="section-heading daily-heading">
+              <div><p class="kicker">DAILY OPERATIONS</p><h2>每日统计</h2></div>
+              <div class="daily-date-range" role="group" aria-label="每日统计时间范围">
+                <label class="date-filter"><span>开始日期</span><input type="date" id="daily-from" /></label>
+                <span class="daily-date-separator" aria-hidden="true">至</span>
+                <label class="date-filter"><span>结束日期</span><input type="date" id="daily-to" /></label>
+                <button class="button secondary" id="apply-daily-range" type="button">
+                  <i data-lucide="calendar-search"></i><span>查询</span>
+                </button>
+              </div>
+            </div>
             <div class="table-wrap"><table class="daily-table"><thead><tr><th>日期</th><th class="num">请求数</th><th class="num">Token</th><th class="num">计费</th><th class="num">成本</th><th class="num">上号</th><th class="num">死亡</th><th class="num">授权成功 / 总数</th></tr></thead><tbody id="daily-body"></tbody></table></div>
           </section>
         </section>
@@ -445,14 +500,200 @@
         <section class="view" id="view-authorization">
           <section class="panel filter-bar authorization-filters">
             <select id="authorization-status"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select>
-            <label class="date-filter"><span>开始</span><input type="date" id="authorization-from" /></label>
-            <label class="date-filter"><span>结束</span><input type="date" id="authorization-to" /></label>
+            <label class="date-filter"><span>开始</span><input type="datetime-local" step="60" id="authorization-from" /></label>
+            <label class="date-filter"><span>结束</span><input type="datetime-local" step="60" id="authorization-to" /></label>
             <button class="button secondary" id="apply-authorization-filters">查询</button>
           </section>
           <div class="metrics compact-metrics" id="authorization-metrics"></div>
+          <section class="panel" id="deauth-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">MONITOR / DE-AUTHORIZATION</p>
+                <h2>掉授权监控</h2>
+              </div>
+              <div class="heading-actions">
+                <div class="segmented" id="deauth-window">
+                  <button data-window="15">15 分钟</button
+                  ><button class="active" data-window="60">1 小时</button
+                  ><button data-window="360">6 小时</button
+                  ><button data-window="1440">24 小时</button
+                  ><button data-window="10080">7 天</button>
+                </div>
+                <button class="button secondary small" id="refresh-deauth" type="button">
+                  <i data-lucide="refresh-cw"></i><span>刷新</span>
+                </button>
+              </div>
+            </div>
+            <p class="insight-hint">
+              统计窗口内新增的掉授权账号：账号被上游 401
+              判定为凭证失效时会立即退出调度并记录原因，「已恢复」表示之后又重新授权成功。
+            </p>
+            <div class="metrics compact-metrics" id="deauth-metrics"></div>
+            <div class="deauth-causes" id="deauth-causes"></div>
+            <div class="table-wrap">
+              <table class="authorization-table deauth-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>账号</th>
+                    <th>分组</th>
+                    <th>原因分类</th>
+                    <th>状态</th>
+                    <th>失权详情</th>
+                  </tr>
+                </thead>
+                <tbody id="deauth-body"></tbody>
+              </table>
+            </div>
+          </section>
           <section class="panel table-panel">
             <div class="section-heading"><div><p class="kicker">AUTHORIZATION LEDGER</p><h2>授权日志</h2></div><span class="section-count" id="authorization-count">0 条记录</span></div>
             <div class="table-wrap"><table class="authorization-table"><thead><tr><th>时间</th><th>账号</th><th>代理 IP</th><th>方式</th><th>订阅</th><th>状态</th><th>操作 IP</th><th>说明</th></tr></thead><tbody id="authorization-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-errors">
+          <section class="panel filter-bar error-filters">
+            <label class="search-field"
+              ><i data-lucide="search"></i
+              ><input
+                id="error-search"
+                type="search"
+                placeholder="账号、IP 或错误内容" /></label
+            ><select id="error-source" data-choice>
+              <option value="">全部来源</option>
+              <option value="account">账号状态</option>
+              <option value="authorization">授权失败</option>
+              <option value="gateway">API 请求</option>
+              <option value="proxy">代理异常</option>
+              <option value="audit">操作失败</option>
+              <option value="system">系统任务</option></select
+            ><select id="error-group">
+              <option value="">全部分组</option>
+              <option value="a">A 分组</option>
+              <option value="b">B 分组</option></select
+            ><label class="date-filter"
+              ><span>开始</span><input type="datetime-local" step="60" id="error-from" /></label
+            ><label class="date-filter"
+              ><span>结束</span><input type="datetime-local" step="60" id="error-to" /></label
+            ><button class="button secondary" id="apply-error-filters">
+              <i data-lucide="list-filter"></i><span>筛选</span>
+            </button>
+          </section>
+          <div class="metrics compact-metrics" id="error-metrics"></div>
+          <section class="panel" id="error-insight-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">OPERATIONS / ERROR INSIGHTS</p>
+                <h2>错误归因分析</h2>
+              </div>
+              <div class="heading-actions">
+                <select id="insight-status">
+                  <option value="401">401 认证失效</option>
+                  <option value="403">403 拒绝</option>
+                  <option value="429">429 限流</option>
+                  <option value="529">529 过载</option>
+                </select>
+              </div>
+            </div>
+            <p class="insight-hint">
+              每次网关报错都会记录该账号当时的瞬时 RPM / TPM
+              与历史总请求，用于观察限流压力与报错的相关性。
+            </p>
+            <div class="insight-chart-wrap">
+              <canvas id="insight-chart" height="230"></canvas>
+            </div>
+            <div class="table-wrap">
+              <table class="error-table insight-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>账号</th>
+                    <th class="num">瞬时 RPM</th>
+                    <th class="num">瞬时 TPM</th>
+                    <th class="num">总请求</th>
+                    <th>错误信息</th>
+                  </tr>
+                </thead>
+                <tbody id="insight-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="insight-empty" hidden>
+              <strong>该状态码暂无带归因快照的报错记录</strong>
+            </div>
+          </section>
+          <section class="panel table-panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">OPERATIONS / ERROR EVENTS</p>
+                <h2>报错信息</h2>
+              </div>
+              <span class="section-count" id="error-count">0 条记录</span>
+            </div>
+            <div class="table-wrap">
+              <table class="error-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>来源</th>
+                    <th>状态</th>
+                    <th>账号 / 操作者</th>
+                    <th>分组</th>
+                    <th>代理 IP</th>
+                    <th>上下文</th>
+                    <th>错误信息</th>
+                  </tr>
+                </thead>
+                <tbody id="error-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="error-empty" hidden>
+              <strong>当前条件没有报错记录</strong>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-strategies">
+          <section class="panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">DISPATCH / STRATEGIES</p>
+                <h2>调度策略</h2>
+              </div>
+              <div class="heading-actions">
+                <button
+                  class="button secondary small"
+                  id="refresh-strategies"
+                  type="button"
+                >
+                  <i data-lucide="refresh-cw"></i><span>刷新</span>
+                </button>
+                <button
+                  class="button secondary small write-action"
+                  id="add-strategy"
+                  type="button"
+                >
+                  + 新增策略
+                </button>
+              </div>
+            </div>
+            <p class="insight-hint strategy-hint">
+              策略是可复用的限流与调度配置，绑定到分组或账号后生效；RPM / TPM / 并发为 0 表示不限制。
+            </p>
+            <div class="strategy-cards" id="strategy-cards"></div>
+            <div class="empty-state" id="strategy-empty" hidden>
+              <strong>还没有策略，点击「新增策略」创建第一个</strong>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="section-heading">
+              <div>
+                <p class="kicker">DISPATCH / OBSERVATION</p>
+                <h2>实时观测</h2>
+              </div>
+              <span class="section-count" id="strategy-count">0 个策略</span>
+            </div>
+            <div id="strategy-tree"></div>
           </section>
         </section>
 
@@ -480,6 +721,16 @@
                   <h2>代理清单</h2>
                 </div>
                 <div class="heading-actions">
+                  <label class="search-field proxy-search-field">
+                    <i data-lucide="search"></i>
+                    <input
+                      id="proxy-search"
+                      type="search"
+                      autocomplete="off"
+                      placeholder="搜索代理、出口 IP 或占用账号"
+                      aria-label="搜索代理"
+                    />
+                  </label>
                   <select id="proxy-pool-filter"></select
                   ><button
                     class="button secondary small write-action"
@@ -493,6 +744,14 @@
                     id="import-proxies"
                   >
                     批量导入
+                  </button
+                  ><button
+                    class="button danger small write-action"
+                    id="delete-proxies-batch"
+                    type="button"
+                    disabled
+                  >
+                    <i data-lucide="trash-2"></i><span>删除已选</span><b id="selected-proxy-count">0</b>
                   </button>
                 </div>
               </div>
@@ -500,11 +759,13 @@
                 <table class="proxy-table">
                   <thead>
                     <tr>
+                      <th class="select-column admin-only-column"><input type="checkbox" id="select-all-proxies" aria-label="选择全部代理" /></th>
                       <th>代理</th>
                       <th>协议</th>
                       <th>出口 IP</th>
                       <th class="num">延迟</th>
-                      <th>独享账号</th>
+                      <th>当前占用</th>
+                      <th class="num" title="历史绑定过该 IP 的不同账号数">历史账号</th>
                       <th>状态</th>
                       <th>最近检测</th>
                       <th class="actions">操作</th>
@@ -591,10 +852,10 @@
         <section class="view" id="view-billing">
           <section class="panel filter-bar billing-filters">
             <label
-              ><span>开始日期</span
-              ><input type="date" id="billing-from" /></label
+              ><span>开始时间</span
+              ><input type="datetime-local" step="60" id="billing-from" /></label
             ><label
-              ><span>结束日期</span><input type="date" id="billing-to" /></label
+              ><span>结束时间</span><input type="datetime-local" step="60" id="billing-to" /></label
             ><label
               ><span>分组</span
               ><select id="billing-group">
@@ -733,9 +994,9 @@
               <option value="proxy">代理</option>
               <option value="price">价格</option></select
             ><label class="date-filter"
-              ><span>开始</span><input type="date" id="audit-from" /></label
+              ><span>开始</span><input type="datetime-local" step="60" id="audit-from" /></label
             ><label class="date-filter"
-              ><span>结束</span><input type="date" id="audit-to" /></label
+              ><span>结束</span><input type="datetime-local" step="60" id="audit-to" /></label
             ><button class="button secondary" id="apply-audit-filters">
               <i data-lucide="list-filter"></i><span>筛选</span>
             </button>
@@ -858,7 +1119,7 @@
               value="0"
               required
           /></label>
-          <fieldset class="group-picker">
+          <fieldset class="group-picker" id="account-group-picker">
             <legend>所属分组</legend>
             <label class="group-choice group-a"
               ><input
@@ -932,6 +1193,7 @@
             ><select id="account-rpm-strategy">
               <option value="tiered">三区模型</option>
               <option value="sticky_exempt">粘性豁免</option>
+              <option value="fixed">固定硬限</option>
             </select></label
           ><label
             ><span>粘性缓冲区</span
@@ -940,14 +1202,21 @@
               type="number"
               min="0"
               value="0"
-            /><small>0 使用并发数与基础 RPM 自动计算</small></label
-          ><label class="span-2"
+            /><small id="account-rpm-buffer-hint"
+              >0 使用并发数与基础 RPM 自动计算</small
+            ></label
+          ><label
             ><span>用户消息限速</span
             ><select id="account-queue-mode">
               <option value="off">关闭</option>
               <option value="soft">软性限速</option>
               <option value="serial">串行队列</option>
             </select></label
+          ><label
+            ><span>调度策略</span
+            ><select id="account-strategy">
+              <option value="">跟随分组</option></select
+            ><small>单独绑定时优先于分组策略</small></label
           >
           <div class="form-section span-2">
             <strong>请求处理</strong
@@ -1003,6 +1272,85 @@
           ><button class="button primary" id="account-submit" type="submit">
             <i data-lucide="key-round"></i><span>创建账号</span>
           </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="batch-account-dialog" class="modal wide batch-edit-modal">
+      <form method="dialog" id="batch-account-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">ACCOUNT / BATCH EDIT</p>
+            <h2>批量编辑账号</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>×</button>
+        </div>
+        <div class="form-grid batch-edit-grid">
+          <div class="batch-edit-summary span-2">
+            <strong id="batch-edit-count">已选择 0 个账号</strong>
+            <span>只修改勾选的共有字段；账号凭证、名称和独享代理不会被覆盖。</span>
+          </div>
+          <div class="form-section span-2">
+            <strong>调度容量</strong><span>RPM 设为 0 表示关闭账号级 RPM 限制</span>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="concurrency" /><span>并发数</span></label>
+            <input class="batch-edit-value" id="batch-edit-concurrency" type="number" min="1" />
+            <small data-batch-edit-hint="concurrency"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="base_rpm" /><span>基础 RPM</span></label>
+            <input class="batch-edit-value" id="batch-edit-base-rpm" type="number" min="0" max="10000" />
+            <small data-batch-edit-hint="base_rpm"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="rpm_strategy" /><span>RPM 策略</span></label>
+            <select class="batch-edit-value" id="batch-edit-rpm-strategy"><option value="tiered">三区模型</option><option value="sticky_exempt">粘性豁免</option><option value="fixed">固定硬限</option></select>
+            <small data-batch-edit-hint="rpm_strategy"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="rpm_sticky_buffer" /><span>粘性缓冲区</span></label>
+            <input class="batch-edit-value" id="batch-edit-rpm-buffer" type="number" min="0" />
+            <small data-batch-edit-hint="rpm_sticky_buffer"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="user_msg_queue_mode" /><span>用户消息限速</span></label>
+            <select class="batch-edit-value" id="batch-edit-queue-mode"><option value="off">关闭</option><option value="soft">软性限速</option><option value="serial">串行队列</option></select>
+            <small data-batch-edit-hint="user_msg_queue_mode"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="strategy_id" /><span>调度策略</span></label>
+            <select class="batch-edit-value" id="batch-edit-strategy"><option value="">跟随分组（解绑）</option></select>
+            <small data-batch-edit-hint="strategy_id"></small>
+          </div>
+          <div class="form-section span-2">
+            <strong>共有配置</strong><span>这些字段可以由多个账号使用相同配置</span>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="priority" /><span>优先级</span></label>
+            <input class="batch-edit-value" id="batch-edit-priority" type="number" />
+            <small data-batch-edit-hint="priority"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="rate_multiplier" /><span>账号计费倍率</span></label>
+            <input class="batch-edit-value" id="batch-edit-rate" type="number" min="0" step="0.01" />
+            <small data-batch-edit-hint="rate_multiplier"></small>
+          </div>
+          <div class="batch-edit-field span-2">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="account_price" /><span>账号价格 USD</span></label>
+            <input class="batch-edit-value" id="batch-edit-price" type="number" min="0" step="0.01" />
+            <small data-batch-edit-hint="account_price"></small>
+          </div>
+          <fieldset class="group-picker batch-edit-groups span-2" id="batch-edit-group-picker">
+            <legend><label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="group_ids" /><span>所属分组</span></label></legend>
+            <label class="group-choice group-a"><input class="batch-edit-value" type="checkbox" name="batch-edit-group" value="a" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label>
+            <label class="group-choice group-b"><input class="batch-edit-value" type="checkbox" name="batch-edit-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label>
+            <small data-batch-edit-hint="group_ids"></small>
+          </fieldset>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>取消</button>
+          <button class="button primary" id="batch-account-submit" type="submit"><i data-lucide="save"></i><span>应用到已选账号</span></button>
         </div>
       </form>
     </dialog>
@@ -1089,8 +1437,21 @@
           </div>
           <div class="group-mode-setting">
             <div>
+              <strong>储备账号池</strong>
+              <small title="账号只存放在此分组，不直接接收 API 请求；其他分组容量不足或遇到 429 时按需单向迁入，迁入后不会自动放回">仅存储账号；调度组容量不足或遇到 429 时按需单向补号</small>
+            </div>
+            <label class="compact-toggle" title="储备账号池">
+              <input
+                id="group-reserve-pool"
+                type="checkbox"
+                aria-label="储备账号池" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
               <strong>蒸馏兼容模式</strong>
-              <small>关闭时保持 Sub2API 原版链路；开启后仅保留 OAuth 必需身份块，不注入 Sub2 扩展提示词，并按蒸馏渠道规则处理参数、工具和响应</small>
+              <small title="关闭：Sub2API 原版；开启：保留 billing 与客户端 system/messages/tools；缓存 TTL 未传时默认 5m，显式传入 5m 或 1h 时原样保留；不跨模型回退">关闭：Sub2API 原版；开启：保留请求内容，TTL 默认 5m、显式值优先，不跨模型回退</small>
             </div>
             <label class="compact-toggle" title="蒸馏兼容模式">
               <input
@@ -1100,6 +1461,98 @@
               <i></i>
             </label>
           </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>Claude Code 身份句</strong>
+              <small title="默认关闭；仅在蒸馏兼容模式生效。关闭时不注入 You are Claude Code...，但仍保留 billing attribution">默认关闭；仅在蒸馏兼容模式生效。关闭时不注入 “You are Claude Code...”，但仍保留 billing attribution</small>
+            </div>
+            <label class="compact-toggle" title="Claude Code 身份句">
+              <input
+                id="group-claude-code-identity"
+                type="checkbox"
+                aria-label="Claude Code 身份句" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>拒绝 Anthropic 静默模型降级</strong>
+              <small title="开启后，Fable 5 或 Opus 5 被上游降级为 Opus 4.8 时向客户端返回错误；关闭时正常透传">开启后，Fable 5 或 Opus 5 被上游降级为 Opus 4.8 时向客户端返回错误；关闭时正常透传</small>
+            </div>
+            <label class="compact-toggle" title="拒绝 Anthropic 静默模型降级">
+              <input
+                id="group-reject-anthropic-downgrade"
+                type="checkbox"
+                aria-label="拒绝 Anthropic 静默模型降级" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>拒绝用户蒸馏探测</strong>
+              <small title="检测用户提取系统提示词、隐藏指令、工具定义或内部参数的高置信度请求；命中后不进入账号调度，返回 588 Not allowed">检测提示词与工具定义提取行为；命中后返回 588 Not allowed</small>
+            </div>
+            <label class="compact-toggle" title="拒绝用户蒸馏探测">
+              <input
+                id="group-reject-distillation"
+                type="checkbox"
+                aria-label="拒绝用户蒸馏探测" />
+              <i></i>
+            </label>
+          </div>
+          <section class="group-passthrough-panel" aria-labelledby="group-passthrough-title">
+            <div class="group-passthrough-head">
+              <span class="group-passthrough-icon" aria-hidden="true">
+                <i data-lucide="sliders-horizontal"></i>
+              </span>
+              <div>
+                <strong id="group-passthrough-title">字段透传控制</strong>
+                <small>仅作用于当前分组，默认全部关闭</small>
+              </div>
+            </div>
+            <div class="group-passthrough-list">
+              <div class="group-mode-setting group-passthrough-row">
+                <div>
+                  <strong>允许透传 service_tier</strong>
+                  <small title="将 service_tier 字段透传到上游">将 service_tier 字段透传到上游</small>
+                </div>
+                <label class="compact-toggle" title="允许透传 service_tier">
+                  <input id="group-passthrough-service-tier" type="checkbox" aria-label="允许透传 service_tier" />
+                  <i></i>
+                </label>
+              </div>
+              <div class="group-mode-setting group-passthrough-row">
+                <div>
+                  <strong>允许 inference_geo 透传</strong>
+                  <small title="透传 inference_geo 字段用于控制 Claude 数据驻留推理区域">透传 inference_geo 字段用于控制 Claude 数据驻留推理区域</small>
+                </div>
+                <label class="compact-toggle" title="允许 inference_geo 透传">
+                  <input id="group-passthrough-inference-geo" type="checkbox" aria-label="允许 inference_geo 透传" />
+                  <i></i>
+                </label>
+              </div>
+              <div class="group-mode-setting group-passthrough-row">
+                <div>
+                  <strong>允许 speed 透传</strong>
+                  <small title="透传 speed 字段用于控制 Claude 推理速度模式">透传 speed 字段用于控制 Claude 推理速度模式</small>
+                </div>
+                <label class="compact-toggle" title="允许 speed 透传">
+                  <input id="group-passthrough-speed" type="checkbox" aria-label="允许 speed 透传" />
+                  <i></i>
+                </label>
+              </div>
+              <div class="group-mode-setting group-passthrough-row">
+                <div>
+                  <strong>允许 Claude beta 查询透传</strong>
+                  <small title="透传 anthropic-beta 头部以使用 beta 功能，并保留 OAuth 必需标记">透传 anthropic-beta 头部以使用 beta 功能，并保留 OAuth 必需标记</small>
+                </div>
+                <label class="compact-toggle" title="允许 Claude beta 查询透传">
+                  <input id="group-passthrough-anthropic-beta" type="checkbox" aria-label="允许 Claude beta 查询透传" />
+                  <i></i>
+                </label>
+              </div>
+            </div>
+          </section>
           <div class="group-mode-setting">
             <div>
               <strong>工具名 MCP 化</strong>
@@ -1124,6 +1577,79 @@
                 type="checkbox"
                 aria-label="RPM 集中调度" />
               <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>仅调度已绑定策略的账号</strong>
+              <small>开启后组内没有解析到调度策略的账号不再参与选号（账号自身未绑定、且本分组也没绑定策略时即为无策略）；默认关闭</small>
+            </div>
+            <label class="compact-toggle" title="仅调度已绑定策略的账号">
+              <input
+                id="group-strategy-required"
+                type="checkbox"
+                aria-label="仅调度已绑定策略的账号" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>容量排队</strong>
+              <small>所有账号 RPM / 并发全部打满时，请求进入队列等待空位而不是立即拒绝；超时仍无空位才返回错误。集中调度 / 均匀 RPM 策略会自动排队，无需在此开启</small>
+            </div>
+            <label class="compact-toggle" title="容量排队">
+              <input
+                id="group-capacity-queue-enabled"
+                type="checkbox"
+                aria-label="容量排队" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>排队超时</strong>
+              <small>容量排队的最长等待时间，超时后返回无可用账号错误</small>
+            </div>
+            <label class="compact-number" title="排队超时时间">
+              <input
+                id="group-capacity-queue-timeout"
+                type="number"
+                min="1"
+                max="600"
+                step="1"
+                value="30"
+                required
+                aria-label="排队超时秒数" />
+              <span>秒</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>调度策略</strong>
+              <small>绑定后组内账号按策略的 RPM / TPM / 并发与算法调度；账号单独绑定的策略优先于分组</small>
+            </div>
+            <label class="compact-select" title="调度策略">
+              <select id="group-strategy" aria-label="调度策略">
+                <option value="">不绑定</option>
+              </select>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>529 模型熔断</strong>
+              <small title="同一账号与模型收到上游 529 后短暂暂停；该账号的其他模型不受影响">同一账号与模型收到上游 529 后短暂暂停，其他模型仍可调度</small>
+            </div>
+            <label class="compact-number" title="529 模型熔断时间">
+              <input
+                id="group-overload-cooldown"
+                type="number"
+                min="1"
+                max="600"
+                step="1"
+                value="10"
+                required
+                aria-label="529 模型熔断秒数" />
+              <span>秒</span>
             </label>
           </div>
           <div class="group-mode-setting">
@@ -1160,6 +1686,126 @@
         </div>
       </form>
     </dialog>
+    <dialog id="strategy-dialog" class="modal wide strategy-modal">
+      <form id="strategy-form" method="dialog">
+        <header class="modal-head">
+          <div>
+            <p class="kicker">DISPATCH / STRATEGY</p>
+            <h2 id="strategy-dialog-title">新增策略</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-dialog>
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="form-grid">
+          <input type="hidden" id="strategy-id" />
+          <label class="span-2"
+            ><span>策略名称</span
+            ><input id="strategy-name" required maxlength="60"
+          /></label>
+          <label class="span-2"
+            ><span>描述</span
+            ><input id="strategy-description" maxlength="200"
+          /></label>
+          <label
+            ><span>RPM 限制</span
+            ><input
+              id="strategy-rpm"
+              type="number"
+              min="0"
+              max="100000"
+              value="0" /><small>0 不限制；生效时覆盖账号自身 RPM 配置</small></label
+          ><label
+            ><span>TPM 限制</span
+            ><input
+              id="strategy-tpm"
+              type="number"
+              min="0"
+              value="0" /><small>最近 60 秒 token 总量达到后暂停调度，0 不限制</small></label
+          ><label
+            ><span>并发限制</span
+            ><input
+              id="strategy-concurrency"
+              type="number"
+              min="0"
+              max="1000"
+              value="0" /><small>0 不限制；与账号自身并发取较小值</small></label
+          ><label
+            ><span>RPM 模式</span
+            ><select id="strategy-rpm-mode">
+              <option value="fixed">固定硬限</option>
+              <option value="tiered">三区模型</option>
+              <option value="sticky_exempt">粘性豁免</option>
+            </select></label
+          ><label
+            ><span>粘性豁免 n</span
+            ><input
+              id="strategy-buffer"
+              type="number"
+              min="0"
+              value="0" /><small>固定硬限下粘性会话可超出的额度</small></label
+          ><label
+            ><span>调度算法</span
+            ><select id="strategy-dispatch-mode">
+              <option value="">跟随分组</option>
+              <option value="serial">串行填满（集中打满一个账号再换下一个）</option>
+              <option value="balance">负载均衡（优先最空闲账号）</option>
+              <option value="round_robin">均匀 RPM（A/B/C 轮转分配请求）</option>
+              <option value="concentrated">
+                集中调度（打满一个再放行下一个，其余为待调度，全满排队）
+              </option>
+            </select></label
+          >
+        </div>
+        <footer class="modal-actions">
+          <button type="button" class="button ghost" data-close-dialog>
+            取消
+          </button>
+          <button class="button primary" type="submit" id="strategy-save">
+            保存
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="strategy-account-dialog" class="modal wide strategy-account-modal">
+      <form id="strategy-account-form" method="dialog">
+        <header class="modal-head">
+          <div>
+            <p class="kicker">DISPATCH / ACCOUNTS</p>
+            <h2 id="strategy-account-title">导入账号</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-dialog>
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <input type="hidden" id="strategy-account-id" />
+        <input type="hidden" id="strategy-account-mode" />
+        <div class="strategy-account-toolbar">
+          <label class="search-field">
+            <i data-lucide="search"></i>
+            <input
+              id="strategy-account-search"
+              type="search"
+              autocomplete="off"
+              placeholder="搜索账号、邮箱或代理 IP"
+              aria-label="搜索策略账号"
+            />
+          </label>
+          <span class="section-count" id="strategy-account-count">0 个账号</span>
+        </div>
+        <div class="strategy-account-list" id="strategy-account-list"></div>
+        <footer class="modal-actions">
+          <button type="button" class="button ghost" data-close-dialog>
+            取消
+          </button>
+          <button class="button primary" type="submit" id="strategy-account-submit">
+            应用
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
     <dialog id="proxy-pool-dialog" class="modal">
       <form method="dialog" id="proxy-pool-form">
         <div class="modal-head">
@@ -1186,7 +1832,11 @@
               <option value="socks5">SOCKS5</option>
               <option value="http">HTTP</option>
               <option value="https">HTTPS</option>
-            </select></label
+              <option value="ssh">SSH 隧道</option>
+            </select><small
+              >SSH 隧道用账号密码登录后转发 TCP，导入格式与其他协议一致（如
+              host:22:root:password）</small
+            ></label
           ><label
             ><span>状态</span
             ><select id="proxy-pool-status">
@@ -1236,7 +1886,7 @@
               placeholder="host:port:user:pass&#10;user:pass:host:port&#10;user:pass@host:port&#10;host:port@user:pass"
             ></textarea
             ><small
-              >支持 socks5/http/https URL、host:port，以及四种常见账号密码顺序，每行一个。</small
+              >支持 socks5/http/https/ssh URL、host:port，以及四种常见账号密码顺序，每行一个。不带协议前缀时使用所选代理池的默认协议。</small
             ></label
           >
         </div>
@@ -1283,7 +1933,7 @@
               <option value="admin">管理员</option>
             </select></label
           >
-          <fieldset class="group-picker">
+          <fieldset class="group-picker" id="user-group-picker">
             <legend>允许调度分组</legend>
             <label class="group-choice group-a"
               ><input
@@ -1311,6 +1961,8 @@
             <label><input type="checkbox" name="user-page" value="onboarding" /><span>批量上号</span></label>
             <label><input type="checkbox" name="user-page" value="daily" /><span>每日统计</span></label>
             <label><input type="checkbox" name="user-page" value="authorization" /><span>授权统计</span></label>
+            <label><input type="checkbox" name="user-page" value="errors" /><span>报错信息</span></label>
+            <label><input type="checkbox" name="user-page" value="strategies" /><span>策略观测</span></label>
             <label><input type="checkbox" name="user-page" value="proxies" /><span>代理池</span></label>
             <label><input type="checkbox" name="user-page" value="access" /><span>用户与 SK</span></label>
             <label><input type="checkbox" name="user-page" value="pricing" /><span>模型价格</span></label>
@@ -1638,6 +2290,8 @@
     <div id="account-action-menu" class="account-action-popover" role="menu" hidden></div>
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
     <script src="/lib/choices.min.js?v=__ASSET_VERSION__" defer></script>
+    <script src="/lib/chart.umd.min.js?v=__ASSET_VERSION__" defer></script>
+    <script src="/lib/tabulator.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/lib/lucide.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/app.js?v=__ASSET_VERSION__" defer></script>
   </body>

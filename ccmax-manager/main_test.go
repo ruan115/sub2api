@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -80,6 +81,194 @@ func TestAccountPoolRoutingAndBilling(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("usage count = %d, want 1", count)
+	}
+}
+
+func TestGroupFieldPassthroughSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "字段透传", "rate_multiplier": 1, "status": "active",
+		"service_tier_passthrough_enabled":   true,
+		"inference_geo_passthrough_enabled":  true,
+		"speed_passthrough_enabled":          true,
+		"anthropic_beta_passthrough_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.ServiceTierPassthrough || !updated.InferenceGeoPassthrough || !updated.SpeedPassthrough || !updated.AnthropicBetaPassthrough {
+		t.Fatalf("group passthrough settings were not persisted: %+v", updated)
+	}
+
+	// An older cached page omits the new fields. Its unrelated save must not
+	// silently disable a configuration that was already enabled.
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.ServiceTierPassthrough || !updated.InferenceGeoPassthrough || !updated.SpeedPassthrough || !updated.AnthropicBetaPassthrough {
+		t.Fatalf("legacy update reset group passthrough settings: %+v", updated)
+	}
+}
+
+func TestGroupRejectAnthropicDowngradePersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "拒绝降级", "rate_multiplier": 1, "status": "active",
+		"reject_anthropic_downgrade_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.RejectAnthropicDowngrade {
+		t.Fatalf("group downgrade setting was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.RejectAnthropicDowngrade {
+		t.Fatalf("legacy update reset group downgrade setting: %+v", updated)
+	}
+}
+
+func TestGroupRejectDistillationPersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "拒绝用户蒸馏", "rate_multiplier": 1, "status": "active",
+		"reject_distillation_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.RejectDistillation {
+		t.Fatalf("group distillation guard was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.RejectDistillation {
+		t.Fatalf("legacy update reset group distillation guard: %+v", updated)
+	}
+}
+
+func TestDynamicGroupCreateRenameAndAssignment(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var created group
+	putJSON(t, handler, http.MethodPost, "/api/groups", map[string]any{
+		"name": "高峰业务", "description": "动态分组", "rate_multiplier": 1.25, "status": "active",
+	}, http.StatusCreated, &created)
+	if created.ID == "" || created.ID == "a" || created.ID == "b" {
+		t.Fatalf("dynamic group id = %q", created.ID)
+	}
+
+	var renamed group
+	putJSON(t, handler, http.MethodPut, "/api/groups/"+created.ID, map[string]any{
+		"name": "高峰业务二组", "description": "名称已更新", "rate_multiplier": 1.25, "status": "active",
+	}, http.StatusOK, &renamed)
+	if renamed.ID != created.ID || renamed.Name != "高峰业务二组" {
+		t.Fatalf("renamed group = %+v", renamed)
+	}
+
+	var purposeItem purpose
+	putJSON(t, handler, http.MethodPost, "/api/purposes", map[string]any{
+		"key": "peak", "name": "高峰用途", "active_group_id": created.ID,
+	}, http.StatusCreated, &purposeItem)
+	if purposeItem.ActiveGroupID != created.ID {
+		t.Fatalf("purpose group = %q, want %q", purposeItem.ActiveGroupID, created.ID)
+	}
+
+	var accountItem account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "dynamic-group-account", "platform": "anthropic", "auth_type": "oauth",
+		"status": "active", "schedulable": false, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{created.ID},
+	}, http.StatusCreated, &accountItem)
+	if len(accountItem.GroupIDs) != 1 || accountItem.GroupIDs[0] != created.ID {
+		t.Fatalf("account groups = %v, want %q", accountItem.GroupIDs, created.ID)
+	}
+}
+
+func TestLegacyABGroupConstraintIsMigrated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE groups (
+		id TEXT PRIMARY KEY CHECK (id IN ('a', 'b')),
+		name TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		rate_multiplier REAL NOT NULL DEFAULT 1,
+		daily_limit_usd REAL,
+		monthly_limit_usd REAL,
+		status TEXT NOT NULL DEFAULT 'active',
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+		updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO groups (id, name) VALUES ('a', 'A 分组'), ('b', 'B 分组')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := newApp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	if _, err := a.db.Exec(`INSERT INTO groups (id, name) VALUES ('c', 'C 分组')`); err != nil {
+		t.Fatalf("dynamic group insert after migration: %v", err)
+	}
+	var invalidReferences int
+	rows, err := a.db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		invalidReferences++
+	}
+	if invalidReferences != 0 {
+		t.Fatalf("foreign key violations after migration = %d", invalidReferences)
+	}
+}
+
+func TestMinuteFilterTimeUsesShanghaiAndInclusiveEndMinute(t *testing.T) {
+	if got := normalizeDateStart("2026-08-24T10:52"); got != "2026-08-24T02:52:00Z" {
+		t.Fatalf("start = %q", got)
+	}
+	if got := normalizeDateEnd("2026-08-24T10:52"); got != "2026-08-24T02:53:00Z" {
+		t.Fatalf("end = %q", got)
+	}
+	if got := normalizeDateEnd("2026-08-24"); got != "2026-08-24T16:00:00Z" {
+		t.Fatalf("date end = %q", got)
 	}
 }
 
@@ -194,6 +383,10 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 		"status": "active", "schedulable": false, "concurrency": 1, "priority": 10,
 		"rate_multiplier": 1, "group_ids": []string{"a"}, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
 	}, http.StatusCreated, &pending)
+	futureCooldown := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ? WHERE id = ?`, futureCooldown, ready.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	var paused struct {
 		Matched int64 `json:"matched"`
@@ -218,7 +411,8 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 		t.Fatalf("enable result = %+v", enabled)
 	}
 	var readyScheduled, pendingScheduled int
-	if err := a.db.QueryRow(`SELECT schedulable FROM accounts WHERE id = ?`, ready.ID).Scan(&readyScheduled); err != nil {
+	var readyCooldown sql.NullString
+	if err := a.db.QueryRow(`SELECT schedulable, rate_limit_reset_at FROM accounts WHERE id = ?`, ready.ID).Scan(&readyScheduled, &readyCooldown); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.db.QueryRow(`SELECT schedulable FROM accounts WHERE id = ?`, pending.ID).Scan(&pendingScheduled); err != nil {
@@ -227,6 +421,158 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 	if readyScheduled != 1 || pendingScheduled != 0 {
 		t.Fatalf("scheduled states = %d/%d", readyScheduled, pendingScheduled)
 	}
+	if readyCooldown.Valid {
+		t.Fatalf("manual resume kept cooldown = %q", readyCooldown.String)
+	}
+}
+
+func TestAccountBatchUpdateOnlyChangesSelectedSharedFields(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	created := make([]account, 0, 2)
+	for index := 0; index < 2; index++ {
+		proxyID := createTestForwardProxy(t, a)
+		var item account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": fmt.Sprintf("batch-%d@example.com", index), "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": fmt.Sprintf("token-%d", index)}, "extra": map[string]any{"request_passthrough": true},
+			"status": "active", "schedulable": true, "concurrency": index + 1, "priority": 50,
+			"rate_multiplier": 1, "account_price": 2, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+			"base_rpm": 15, "rpm_strategy": "tiered", "rpm_sticky_buffer": 0, "user_msg_queue_mode": "off",
+		}, http.StatusCreated, &item)
+		created = append(created, item)
+	}
+	originalCredentials := make(map[int64]string, len(created))
+	originalProxies := make(map[int64]int64, len(created))
+	for _, item := range created {
+		var proxyID int64
+		var credentials string
+		if err := a.db.QueryRow(`SELECT credentials_json, proxy_id FROM accounts WHERE id = ?`, item.ID).Scan(&credentials, &proxyID); err != nil {
+			t.Fatal(err)
+		}
+		originalCredentials[item.ID] = credentials
+		originalProxies[item.ID] = proxyID
+	}
+	var result struct {
+		Matched int `json:"matched"`
+		Updated int `json:"updated"`
+		Skipped int `json:"skipped"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-update", map[string]any{
+		"ids":         []int64{created[0].ID, created[1].ID, created[1].ID, 99999},
+		"concurrency": 7, "priority": 8, "rate_multiplier": 1.25, "account_price": 4.5,
+		"base_rpm": 42, "rpm_strategy": "sticky_exempt", "rpm_sticky_buffer": 3,
+		"user_msg_queue_mode": "soft", "group_ids": []string{"b"},
+	}, http.StatusOK, &result)
+	if result.Matched != 2 || result.Updated != 2 || result.Skipped != 1 {
+		t.Fatalf("batch update result = %+v", result)
+	}
+	for _, before := range created {
+		after, err := a.getAccount(before.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Name != before.Name || after.ProxyID == nil || *after.ProxyID != originalProxies[before.ID] {
+			t.Fatalf("exclusive fields changed for account %d: name=%q proxy=%v", before.ID, after.Name, after.ProxyID)
+		}
+		var credentials string
+		if err := a.db.QueryRow(`SELECT credentials_json FROM accounts WHERE id = ?`, before.ID).Scan(&credentials); err != nil {
+			t.Fatal(err)
+		}
+		if credentials != originalCredentials[before.ID] {
+			t.Fatalf("credentials changed for account %d", before.ID)
+		}
+		if after.Concurrency != 7 || after.Priority != 8 || after.RateMultiplier != 1.25 || after.AccountPrice != 4.5 || after.BaseRPM != 42 || after.RPMStrategy != "sticky_exempt" || after.RPMStickyBuffer != 3 || after.UserMsgQueueMode != "soft" || strings.Join(after.GroupIDs, ",") != "b" {
+			t.Fatalf("shared fields not updated for account %d: %+v", before.ID, after)
+		}
+		if after.Extra["request_passthrough"] != true || fmt.Sprint(after.Extra["base_rpm"]) != "42" || after.Extra["rpm_strategy"] != "sticky_exempt" {
+			t.Fatalf("extra fields were not preserved/synchronized: %+v", after.Extra)
+		}
+		var groupPriority int
+		if err := a.db.QueryRow(`SELECT priority FROM account_groups WHERE account_id = ? AND group_id = 'b'`, before.ID).Scan(&groupPriority); err != nil {
+			t.Fatal(err)
+		}
+		if groupPriority != 8 {
+			t.Fatalf("group priority = %d, want 8", groupPriority)
+		}
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-update", map[string]any{"ids": []int64{created[0].ID}}, http.StatusBadRequest, nil)
+}
+
+func TestAccountBatchUpdateBindsAndClearsDispatchStrategy(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	var strategy struct {
+		ID int64 `json:"id"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/strategies", map[string]any{
+		"name": "serial-15", "rpm_limit": 15, "rpm_strategy": "fixed", "dispatch_mode": "serial",
+	}, http.StatusCreated, &strategy)
+	created := make([]account, 0, 2)
+	for index := 0; index < 2; index++ {
+		proxyID := createTestForwardProxy(t, a)
+		var item account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": fmt.Sprintf("bind-%d@example.com", index), "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": fmt.Sprintf("token-%d", index)},
+			"status":      "active", "schedulable": true, "concurrency": 5, "priority": 50,
+			"rate_multiplier": 1, "account_price": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+			"base_rpm": 15, "rpm_strategy": "tiered", "rpm_sticky_buffer": 0, "user_msg_queue_mode": "off",
+		}, http.StatusCreated, &item)
+		created = append(created, item)
+	}
+	ids := []int64{created[0].ID, created[1].ID}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-update", map[string]any{
+		"ids": ids, "strategy_id": strategy.ID,
+	}, http.StatusOK, nil)
+	for _, item := range created {
+		after, err := a.getAccount(item.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.StrategyID == nil || *after.StrategyID != strategy.ID {
+			t.Fatalf("account %d strategy = %v, want %d", item.ID, after.StrategyID, strategy.ID)
+		}
+	}
+	// A bound strategy must not be deletable until every account is unbound.
+	putJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/strategies/%d", strategy.ID), nil, http.StatusConflict, nil)
+	// Omitting strategy_id keeps the binding; only an explicit 0 clears it.
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-update", map[string]any{
+		"ids": ids, "concurrency": 9,
+	}, http.StatusOK, nil)
+	kept, err := a.getAccount(created[0].ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.StrategyID == nil || *kept.StrategyID != strategy.ID {
+		t.Fatalf("strategy binding was lost by an unrelated batch update: %v", kept.StrategyID)
+	}
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-update", map[string]any{
+		"ids": ids, "strategy_id": 0,
+	}, http.StatusOK, nil)
+	for _, item := range created {
+		after, err := a.getAccount(item.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.StrategyID != nil {
+			t.Fatalf("account %d strategy = %v, want unbound", item.ID, *after.StrategyID)
+		}
+	}
+	putJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/strategies/%d", strategy.ID), nil, http.StatusOK, nil)
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-update", map[string]any{
+		"ids": ids, "strategy_id": strategy.ID,
+	}, http.StatusBadRequest, nil)
 }
 
 func TestAutomaticProxyAssignmentIsExclusive(t *testing.T) {
@@ -349,6 +695,35 @@ func TestProxyDeletePausesManualAccount(t *testing.T) {
 	}
 }
 
+func TestProxyBatchDeleteRemovesSelectedProxies(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": 1, "text": "http://127.0.0.1:15101\nsocks5://127.0.0.1:15102",
+	}, http.StatusCreated, nil)
+	var proxies []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
+	if len(proxies) != 2 {
+		t.Fatalf("proxy count = %d, want 2", len(proxies))
+	}
+	ids := []int64{proxies[0].ID, proxies[1].ID}
+	var result proxyBatchDeleteResponse
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch-delete", map[string]any{"ids": ids}, http.StatusOK, &result)
+	if result.Matched != 2 || result.Deleted != 2 || result.ReassignedAccounts != 0 || result.PausedAccounts != 0 {
+		t.Fatalf("batch delete result = %+v", result)
+	}
+	proxies = nil
+	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
+	if len(proxies) != 0 {
+		t.Fatalf("remaining proxies = %+v", proxies)
+	}
+}
+
 func TestAccountCreateSupportsDeferredSessionAuthorization(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
@@ -378,6 +753,14 @@ func TestAccountCreateSupportsDeferredSessionAuthorization(t *testing.T) {
 				"organization": map[string]string{"uuid": "org-1"},
 				"account":      map[string]string{"uuid": "account-1", "email_address": "user@example.com"},
 			})
+		case "/profile":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"account": map[string]bool{"has_claude_max": true},
+				"organization": map[string]string{
+					"organization_type": "claude_max",
+					"rate_limit_tier":   "default_claude_max_20x",
+				},
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -386,13 +769,16 @@ func TestAccountCreateSupportsDeferredSessionAuthorization(t *testing.T) {
 	previousOrganizations := claudeOrganizationsEndpoint
 	previousAuthorize := claudeSessionAuthorizeBaseURL
 	previousToken := claudeTokenEndpoint
+	previousProfile := claudeProfileEndpoint
 	claudeOrganizationsEndpoint = server.URL + "/organizations"
 	claudeSessionAuthorizeBaseURL = server.URL + "/v1/oauth"
 	claudeTokenEndpoint = server.URL + "/token"
+	claudeProfileEndpoint = server.URL + "/profile"
 	defer func() {
 		claudeOrganizationsEndpoint = previousOrganizations
 		claudeSessionAuthorizeBaseURL = previousAuthorize
 		claudeTokenEndpoint = previousToken
+		claudeProfileEndpoint = previousProfile
 	}()
 
 	payload := map[string]any{
@@ -424,7 +810,7 @@ func TestAccountCreateSupportsDeferredSessionAuthorization(t *testing.T) {
 	payload["session_key"] = "valid-session"
 	var created account
 	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusCreated, &created)
-	if created.AuthStatus != "valid" || !created.HasCredentials || created.TokenExpiresAt == "" {
+	if created.AuthStatus != "valid" || !created.HasCredentials || created.TokenExpiresAt == "" || created.SubscriptionType != "max" || created.RateLimitTier != "default_claude_max_20x" {
 		t.Fatalf("created account is not fully authorized: %+v", created)
 	}
 	var credentials string
@@ -507,6 +893,8 @@ func TestReadOnlyAdministratorCannotWrite(t *testing.T) {
 	requestJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "changed", "description": "", "rate_multiplier": 1, "status": "active",
 	}, readonlyCookie, "", http.StatusForbidden, nil)
+	requestJSON(t, handler, http.MethodPost, "/api/accounts/1/archive", map[string]any{}, readonlyCookie, "", http.StatusForbidden, nil)
+	requestJSON(t, handler, http.MethodPost, "/api/accounts/batch-archive", map[string]any{"ids": []int64{1}}, readonlyCookie, "", http.StatusForbidden, nil)
 	requestJSON(t, handler, http.MethodPost, "/api/pool/resolve", map[string]any{"purpose_key": "default"}, readonlyCookie, "", http.StatusForbidden, nil)
 }
 
@@ -539,7 +927,10 @@ func TestOrdinaryUserSeesAccountPoolButCannotMutateAccounts(t *testing.T) {
 		{http.MethodPut, "/api/accounts/1", map[string]any{}},
 		{http.MethodDelete, "/api/accounts/1", nil},
 		{http.MethodPost, "/api/accounts/batch-delete", map[string]any{"ids": []int64{1}}},
+		{http.MethodPost, "/api/accounts/batch-archive", map[string]any{"ids": []int64{1}}},
+		{http.MethodPost, "/api/accounts/1/archive", map[string]any{}},
 		{http.MethodPost, "/api/accounts/batch-schedule", map[string]any{"ids": []int64{1}, "schedulable": true}},
+		{http.MethodPost, "/api/accounts/batch-update", map[string]any{"ids": []int64{1}, "concurrency": 2}},
 		{http.MethodPost, "/api/accounts/health/refresh", map[string]any{"ids": []int64{1}}},
 		{http.MethodPost, "/api/accounts/1/quota/refresh", map[string]any{}},
 		{http.MethodPost, "/api/accounts/1/auth-url", map[string]any{}},

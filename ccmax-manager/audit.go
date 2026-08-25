@@ -171,11 +171,23 @@ func auditAction(r *http.Request) (string, string, string) {
 	if path == "accounts/batch-delete" {
 		action = "account.delete"
 	}
+	if path == "accounts/batch-archive" || strings.HasSuffix(path, "/archive") {
+		action = "account.archive"
+	}
+	if strings.HasSuffix(path, "/restore") {
+		action = "account.restore"
+	}
 	if path == "accounts/batch-schedule" {
 		action = "account.schedule"
 	}
+	if path == "accounts/batch-update" {
+		action = "account.batch_update"
+	}
 	if path == "proxies/batch-test" {
 		action = "proxy.test"
+	}
+	if path == "proxies/batch-delete" {
+		action = "proxy.delete"
 	}
 	if path == "accounts/health/refresh" {
 		action = "account.health_refresh"

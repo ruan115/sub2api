@@ -2,7 +2,11 @@ const state = {
   me: null,
   view: "overview",
   dashboard: null,
+  groups: [],
+  strategies: [],
+  strategiesLoaded: false,
   accounts: [],
+  archivedAccounts: [],
   accountSummary: null,
   realtime: null,
   realtimeLoading: null,
@@ -11,8 +15,11 @@ const state = {
   billing: null,
   usage: [],
   audits: [],
+  errors: null,
   daily: [],
   authorization: null,
+  deauth: null,
+  deauthWindow: 60,
   purposes: [],
   proxyPools: [],
   proxies: [],
@@ -21,17 +28,25 @@ const state = {
   accountGroup: "",
   accountSearch: "",
   accountStatus: "",
+  deadStatus: "pending",
+  deadSearch: "",
   accountsLoadedAt: 0,
   accountsLoading: null,
   accountAutoRefresh: true,
   breakdown: "group",
   proxyPoolFilter: "",
+  proxySearch: "",
   oauthSessionID: "",
   batchResults: [],
   paginationPages: {},
   paginationSizes: {},
   serverPagination: {},
   selectedAccountIDs: new Set(),
+  selectedDeadAccountIDs: new Set(),
+  selectedProxyIDs: new Set(),
+  selectedStrategyAccountIDs: new Set(),
+  strategyAccountMode: "bind",
+  strategyAccountID: "",
 };
 
 const viewMeta = {
@@ -46,6 +61,8 @@ const viewMeta = {
   onboarding: ["POOL / BATCH ONBOARDING", "批量上号", ""],
   daily: ["ANALYTICS / DAILY", "每日统计", ""],
   authorization: ["SECURITY / AUTHORIZATION", "授权统计", ""],
+  errors: ["OPERATIONS / ERROR EVENTS", "报错信息", ""],
+  strategies: ["DISPATCH / STRATEGIES", "策略观测", "新增策略"],
 };
 const rolePageDefaults = {
   admin: Object.keys(viewMeta),
@@ -55,6 +72,7 @@ const rolePageDefaults = {
     "dead",
     "daily",
     "authorization",
+    "errors",
     "proxies",
     "pricing",
     "billing",
@@ -64,6 +82,23 @@ const rolePageDefaults = {
 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+function beginButtonRequest(button, busyText = "") {
+  if (!button || button.dataset.requestPending === "true") return null;
+  const label = button.querySelector("span");
+  const previousLabel = label?.textContent || "";
+  button.dataset.requestPending = "true";
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (label && busyText) label.textContent = busyText;
+  return () => {
+    delete button.dataset.requestPending;
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    if (label && busyText) label.textContent = previousLabel;
+  };
+}
+
 const isAdmin = () => state.me?.role === "admin";
 const isManager = () =>
   state.me?.role === "admin" || state.me?.role === "readonly_admin";
@@ -91,6 +126,7 @@ const paginationTables = {
   prices: { body: "prices-body", size: 20, render: renderPriceTable },
   usage: { body: "usage-body", size: 20, render: renderBilling },
   audit: { body: "audit-body", size: 20, render: renderAudit },
+  errors: { body: "error-body", size: 20, render: renderErrors },
 };
 
 function resetPagination(key) {
@@ -120,7 +156,8 @@ function renderPagination(key, total, page, pageSize, totalPages) {
         )
         .join("")}</select></label>
       <button type="button" data-pagination-key="${key}" data-page-step="-1" title="上一页" aria-label="上一页" ${page <= 1 ? "disabled" : ""}><i data-lucide="chevron-left"></i></button>
-      <span class="pagination-page" aria-live="polite">${page} / ${totalPages}</span>
+      <label class="pagination-jump"><span class="sr-only">跳转页码</span><input type="number" min="1" max="${totalPages}" value="${page}" data-pagination-jump="${key}" aria-label="跳转页码" /><span>/ ${totalPages}</span></label>
+      <button type="button" data-pagination-go="${key}" title="跳转" aria-label="跳转到指定页"><i data-lucide="arrow-right-to-line"></i></button>
       <button type="button" data-pagination-key="${key}" data-page-step="1" title="下一页" aria-label="下一页" ${page >= totalPages ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>
     </div>`;
   refreshIcons();
@@ -174,6 +211,20 @@ async function loadServerPage(key) {
   if (key === "usage") return loadBilling();
   if (key === "audit") return loadAudit();
   if (key === "authorization") return loadAuthorization();
+  if (key === "errors") return loadErrors();
+}
+
+async function goToPaginationPage(key, value) {
+  const server = state.serverPagination[key];
+  const control = document.querySelector(`input[data-pagination-jump="${key}"]`);
+  const totalPages = Math.max(
+    1,
+    Number(server?.totalPages || control?.max || 1),
+  );
+  const page = Math.min(totalPages, Math.max(1, Number(value) || 1));
+  state.paginationPages[key] = page;
+  if (server) await loadServerPage(key);
+  else paginationTables[key].render();
 }
 
 function refreshIcons() {
@@ -274,7 +325,7 @@ function initializeResizableTable() {
 }
 function resetDialogViewport(dialog) {
   dialog.scrollTop = 0;
-  $$("form, .form-grid, .form-stack, .secret-body", dialog).forEach((node) => {
+  $$("form, .form-grid, .form-stack, .secret-body, .strategy-account-list", dialog).forEach((node) => {
     node.scrollTop = 0;
   });
 }
@@ -282,7 +333,14 @@ function showInitializedDialog(selector) {
   const dialog = $(selector);
   resetDialogViewport(dialog);
   dialog.showModal();
-  requestAnimationFrame(() => resetDialogViewport(dialog));
+  const reset = () => resetDialogViewport(dialog);
+  requestAnimationFrame(() => {
+    reset();
+    requestAnimationFrame(reset);
+  });
+  // The modal entrance animation can restore the previous scroll offset after
+  // the first layout frame in WebKit/Chromium.
+  setTimeout(reset, 250);
 }
 function setSidebarCollapsed(collapsed) {
   const shell = $("#app-shell");
@@ -332,8 +390,87 @@ function escapeHTML(value) {
   );
 }
 function groupMark(id, modifier = "") {
-  const group = String(id).toLowerCase() === "b" ? "b" : "a";
-  return `<span class="group-mark ${group} ${modifier}" title="${group.toUpperCase()} 分组"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg><span>${group.toUpperCase()}</span></span>`;
+  const groupID = String(id || "").toLowerCase();
+  const item = state.groups.find((group) => group.id === groupID);
+  const title = item?.name || `${groupID.toUpperCase()} 分组`;
+  const label = groupID === "a" || groupID === "b" ? groupID.toUpperCase() : title;
+  const tone = groupID === "a" || groupID === "b" ? groupID : "dynamic";
+  return `<span class="group-mark ${tone} ${modifier}" title="${escapeHTML(title)}"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg><span>${escapeHTML(label)}</span></span>`;
+}
+function availableGroups(activeOnly = false) {
+  return state.groups.filter(
+    (group) => !activeOnly || group.status === "active",
+  );
+}
+function groupOption(group, selected = "") {
+  const suffix = group.reserve_pool_enabled
+    ? "（储备池）"
+    : group.status === "active"
+      ? ""
+      : "（已停用）";
+  return `<option value="${escapeHTML(group.id)}" ${group.id === selected ? "selected" : ""}>${escapeHTML(group.name + suffix)}</option>`;
+}
+function fillGroupSelect(
+  selector,
+  includeAll = false,
+  activeOnly = false,
+  dispatchOnly = false,
+) {
+  const select = $(selector);
+  if (!select) return;
+  const selected = select.value;
+  const groups = availableGroups(activeOnly).filter(
+    (group) => !dispatchOnly || !group.reserve_pool_enabled,
+  );
+  select.innerHTML = `${includeAll ? '<option value="">全部分组</option>' : ""}${groups
+    .map((group) => groupOption(group, selected))
+    .join("")}`;
+  const values = [...select.options].map((option) => option.value);
+  if (values.includes(selected)) select.value = selected;
+}
+function fillGroupPicker(selector, inputName, activeOnly = false) {
+  const fieldset = $(selector);
+  if (!fieldset) return;
+  const selected = new Set(
+    $$(`input[name="${inputName}"]:checked`, fieldset).map((node) => node.value),
+  );
+  fieldset.querySelectorAll(".group-choice").forEach((node) => node.remove());
+  const groups = availableGroups(activeOnly);
+  if (!selected.size && groups.length) selected.add(groups[0].id);
+  const html = groups
+    .map(
+      (group) =>
+        `<label class="group-choice group-${group.id === "a" || group.id === "b" ? group.id : "dynamic"}" title="${escapeHTML(group.name)}"><input class="${inputName === "batch-edit-group" ? "batch-edit-value" : ""}" type="checkbox" name="${inputName}" value="${escapeHTML(group.id)}" ${selected.has(group.id) ? "checked" : ""} /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>${escapeHTML(group.name)}${group.reserve_pool_enabled ? " · 储备" : ""}</b></label>`,
+    )
+    .join("");
+  const hint = fieldset.querySelector("small");
+  if (hint) hint.insertAdjacentHTML("beforebegin", html);
+  else fieldset.insertAdjacentHTML("beforeend", html);
+}
+function hydrateGroupControls() {
+  const buttons = [
+    '<button class="active" data-group="">全部</button>',
+    ...availableGroups().map(
+      (group) =>
+        `<button data-group="${escapeHTML(group.id)}">${groupMark(group.id, "button-mark")}</button>`,
+    ),
+  ];
+  $("#account-group-filter").innerHTML = buttons.join("");
+  const activeButton = $(`#account-group-filter button[data-group="${state.accountGroup}"]`);
+  if (activeButton) {
+    $$("#account-group-filter button").forEach((button) =>
+      button.classList.toggle("active", button === activeButton),
+    );
+  } else {
+    state.accountGroup = "";
+  }
+  fillGroupPicker("#batch-group-picker", "batch-group", true);
+  fillGroupPicker("#account-group-picker", "account-group");
+  fillGroupPicker("#batch-edit-group-picker", "batch-edit-group");
+  fillGroupPicker("#user-group-picker", "user-group");
+  fillGroupSelect("#purpose-group", false, true, true);
+  fillGroupSelect("#billing-group", true);
+  fillGroupSelect("#error-group", true);
 }
 function money(value) {
   const number = Number(value || 0);
@@ -485,8 +622,16 @@ async function loadCore() {
     if (canView("overview")) {
       state.dashboard = await api("/api/dashboard");
       state.purposes = state.dashboard.purposes;
+      state.groups = state.dashboard.groups;
       renderDashboard();
+    } else if (
+      ["accounts", "dead", "onboarding", "billing", "access", "errors"].some(
+        (page) => canView(page),
+      )
+    ) {
+      state.groups = await api("/api/groups");
     }
+    if (state.groups.length) hydrateGroupControls();
     if (canView("billing") && !canView("overview"))
       state.purposes = await api("/api/purposes");
     if (canView("accounts") || canView("dead") || canView("onboarding")) {
@@ -534,10 +679,23 @@ async function loadAccounts() {
     return;
   if (state.accountsLoading) return state.accountsLoading;
   state.accountsLoading = (async () => {
-    state.accounts = await api("/api/accounts");
+    const [accounts, archivedAccounts] = await Promise.all([
+      api("/api/accounts"),
+      canView("dead") ? api("/api/accounts?archived=only") : Promise.resolve([]),
+    ]);
+    state.accounts = accounts;
+    state.archivedAccounts = archivedAccounts;
     const accountIDs = new Set(state.accounts.map((item) => item.id));
     state.selectedAccountIDs = new Set(
       [...state.selectedAccountIDs].filter((id) => accountIDs.has(id)),
+    );
+    const deadIDs = new Set(
+      state.accounts
+        .filter((item) => item.dispatch_status === "error")
+        .map((item) => item.id),
+    );
+    state.selectedDeadAccountIDs = new Set(
+      [...state.selectedDeadAccountIDs].filter((id) => deadIDs.has(id)),
     );
     state.accountsLoadedAt = performance.now();
     renderAccounts();
@@ -692,8 +850,19 @@ async function loadAudit() {
 
 async function loadDaily() {
   if (!canView("daily")) return;
+  const from = $("#daily-from").value;
+  const to = $("#daily-to").value;
+  if (!from || !to) {
+    toast("请选择完整的开始和结束日期", "error");
+    return;
+  }
+  if (from > to) {
+    toast("开始日期不能晚于结束日期", "error");
+    return;
+  }
   try {
-    state.daily = await api(`/api/stats/daily?days=${$("#daily-days").value}`);
+    const params = new URLSearchParams({ from, to });
+    state.daily = await api(`/api/stats/daily?${params}`);
     renderDaily();
   } catch (error) {
     toast(error.message, "error");
@@ -716,6 +885,362 @@ async function loadAuthorization() {
   } catch (error) {
     toast(error.message, "error");
   }
+}
+
+async function loadErrors() {
+  if (!canView("errors")) return;
+  const params = new URLSearchParams(paginationParams("errors"));
+  if ($("#error-search").value)
+    params.set("search", $("#error-search").value.trim());
+  if ($("#error-source").value)
+    params.set("source", $("#error-source").value);
+  if ($("#error-group").value)
+    params.set("group_id", $("#error-group").value);
+  if ($("#error-from").value) params.set("from", $("#error-from").value);
+  if ($("#error-to").value) params.set("to", $("#error-to").value);
+  try {
+    state.errors = await api(`/api/error-logs?${params}`);
+    setServerPagination("errors", state.errors);
+    renderErrors();
+    loadErrorInsights();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+let insightChart = null;
+async function loadErrorInsights() {
+  const params = new URLSearchParams();
+  params.set("status", $("#insight-status").value || "401");
+  if ($("#error-from").value) params.set("from", $("#error-from").value);
+  if ($("#error-to").value) params.set("to", $("#error-to").value);
+  try {
+    const data = await api(`/api/error-insights?${params}`);
+    renderErrorInsights(data);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderErrorInsights(data) {
+  const accounts = data.accounts || [];
+  const events = data.events || [];
+  $("#insight-empty").hidden = accounts.length > 0 || events.length > 0;
+  $("#insight-body").innerHTML = events
+    .map(
+      (item) => `<tr>
+        <td class="mono time-cell">${dateTime(item.created_at)}</td>
+        <td>${escapeHTML(item.account_name || `#${item.account_id}`)}</td>
+        <td class="num mono">${item.rpm >= 0 ? item.rpm : "—"}</td>
+        <td class="num mono">${item.tpm >= 0 ? Number(item.tpm).toLocaleString("zh-CN") : "—"}</td>
+        <td class="num mono">${item.total_requests >= 0 ? Number(item.total_requests).toLocaleString("zh-CN") : "—"}</td>
+        <td class="error-message-cell">${escapeHTML(item.message)}</td>
+      </tr>`,
+    )
+    .join("");
+  const canvas = $("#insight-chart");
+  if (insightChart) {
+    insightChart.destroy();
+    insightChart = null;
+  }
+  if (!accounts.length || typeof Chart === "undefined") return;
+  insightChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: accounts.map((item) => item.account_name || `#${item.account_id}`),
+      datasets: [
+        {
+          label: `${data.status} 次数`,
+          data: accounts.map((item) => item.count),
+          backgroundColor: "rgba(239, 68, 68, 0.65)",
+          yAxisID: "y",
+        },
+        {
+          label: "报错时平均瞬时 RPM",
+          data: accounts.map((item) => Math.round(item.avg_rpm * 10) / 10),
+          backgroundColor: "rgba(59, 130, 246, 0.65)",
+          yAxisID: "y1",
+        },
+        {
+          label: "基础 RPM 限制",
+          data: accounts.map((item) => item.base_rpm),
+          type: "line",
+          borderColor: "rgba(245, 158, 11, 0.9)",
+          backgroundColor: "rgba(245, 158, 11, 0.9)",
+          pointRadius: 3,
+          fill: false,
+          yAxisID: "y1",
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        y: {
+          position: "left",
+          beginAtZero: true,
+          title: { display: true, text: "报错次数" },
+          ticks: { precision: 0 },
+        },
+        y1: {
+          position: "right",
+          beginAtZero: true,
+          grid: { drawOnChartArea: false },
+          title: { display: true, text: "RPM" },
+        },
+      },
+    },
+  });
+}
+
+const strategyModeLabels = {
+  "": "跟随分组",
+  serial: "串行填满",
+  balance: "负载均衡",
+  round_robin: "均匀 RPM",
+  concentrated: "集中调度",
+};
+const strategyRPMModeLabels = {
+  fixed: "固定硬限",
+  tiered: "三区模型",
+  sticky_exempt: "粘性豁免",
+};
+let strategyTable = null;
+
+async function loadStrategies() {
+  if (!canView("strategies")) return;
+  try {
+    state.strategies = await api("/api/strategies/observe");
+    state.strategiesLoaded = true;
+    renderStrategies();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function strategyLimitText(value, unit = "") {
+  return value > 0 ? `${Number(value).toLocaleString("zh-CN")}${unit}` : "不限";
+}
+
+function renderStrategies() {
+  const strategies = state.strategies || [];
+  $("#strategy-empty").hidden = strategies.length > 0;
+  $("#strategy-count").textContent = `${strategies.length} 个策略`;
+  $("#strategy-cards").innerHTML = strategies
+    .map((item) => {
+      const actions = isAdmin()
+        ? `<span class="row-actions strategy-actions">
+            <button data-bind-strategy="${item.id}" title="导入账号到策略池"><i data-lucide="user-plus"></i></button>
+            <button data-unbind-strategy="${item.id}" title="从策略池移出账号"><i data-lucide="user-minus"></i></button>
+            <button data-edit-strategy="${item.id}" title="编辑策略"><i data-lucide="pencil"></i></button>
+            <button class="danger" data-delete-strategy="${item.id}" title="删除策略"><i data-lucide="trash-2"></i></button>
+          </span>`
+        : "";
+      const boundLabel = item.bound_accounts
+        ? `${item.bound_accounts} 个账号`
+        : "未绑定账号";
+      return `<article class="strategy-card">
+        <div class="strategy-card-head">
+          <strong title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</strong>
+          ${actions}
+        </div>
+        <p class="strategy-card-desc">${escapeHTML(item.description || strategyModeLabels[item.dispatch_mode] || "")}</p>
+        <div class="strategy-card-grid">
+          <div><span>RPM</span><b>${item.current_rpm} / ${strategyLimitText(item.rpm_limit)}</b></div>
+          <div><span>TPM</span><b>${Number(item.current_tpm).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}</b></div>
+          <div><span>并发</span><b>${item.current_inflight} / ${strategyLimitText(item.concurrency_limit)}</b></div>
+          <div><span>存活账号</span><b class="${item.accounts_alive < item.bound_accounts ? "warn" : ""}">${item.accounts_alive} / ${item.bound_accounts}${item.accounts_pending ? `<small> · 待调度 ${item.accounts_pending}</small>` : ""}</b></div>
+        </div>
+        <footer>
+          <span class="pill">${escapeHTML(strategyRPMModeLabels[item.rpm_strategy] || item.rpm_strategy)}</span>
+          <span class="pill">${escapeHTML(strategyModeLabels[item.dispatch_mode] ?? item.dispatch_mode)}</span>
+          <span class="pill ${item.bound_groups ? "ok" : "off"}">${item.bound_groups} 个分组绑定</span>
+          <span class="pill ${item.bound_accounts ? "ok" : "off"}">${escapeHTML(boundLabel)}</span>
+        </footer>
+      </article>`;
+    })
+    .join("");
+  renderStrategyTree(strategies);
+  refreshIcons();
+}
+
+function strategyAccountCandidates(strategyID, mode) {
+  const currentID = Number(strategyID);
+  const search = $("#strategy-account-search")?.value.trim().toLowerCase() || "";
+  return (state.accounts || [])
+    .filter((account) =>
+      mode === "unbind"
+        ? Number(account.strategy_id || 0) === currentID
+        : Number(account.strategy_id || 0) !== currentID,
+    )
+    .filter((account) => {
+      if (!search) return true;
+      return [
+        account.id,
+        account.name,
+        account.credential_hint,
+        account.source_sk_hint,
+        account.proxy_name,
+        account.proxy_hint,
+        account.proxy_ip,
+      ]
+        .filter((value) => value !== null && value !== undefined)
+        .join(" ")
+        .toLowerCase()
+        .includes(search);
+    });
+}
+
+function renderStrategyAccountList() {
+  const strategyID = state.strategyAccountID;
+  const mode = state.strategyAccountMode;
+  const candidates = strategyAccountCandidates(strategyID, mode);
+  const selected = candidates.filter((item) =>
+    state.selectedStrategyAccountIDs.has(item.id),
+  );
+  $("#strategy-account-count").textContent = `${selected.length} / ${candidates.length} 个账号`;
+  $("#strategy-account-list").innerHTML = candidates.length
+    ? candidates
+        .map((item) => {
+          const groups = item.group_ids?.length
+            ? item.group_ids.map((groupID) => groupMark(groupID, "mini")).join("")
+            : '<span class="muted">无分组</span>';
+          const proxy = item.proxy_ip || item.proxy_hint || "未绑定 IP";
+          const checked = state.selectedStrategyAccountIDs.has(item.id)
+            ? "checked"
+            : "";
+          return `<label class="strategy-account-row">
+            <input type="checkbox" data-strategy-account-select="${item.id}" ${checked} />
+            <span>
+              <strong title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</strong>
+              <small title="${escapeHTML(proxy)}">${groups}<em>${escapeHTML(proxy)}</em></small>
+            </span>
+            <b class="pill ${item.dispatch_status === "normal" ? "ok" : item.dispatch_status === "error" ? "error" : "off"}">${item.dispatch_status === "normal" ? "正常" : item.dispatch_status === "error" ? "错误" : "暂不可调度"}</b>
+          </label>`;
+        })
+        .join("")
+    : '<div class="empty-state compact"><strong>没有可选择账号</strong></div>';
+  refreshIcons();
+}
+
+async function openStrategyAccountDialog(strategyID, mode) {
+  if (!state.accounts.length && canView("accounts")) await loadAccounts();
+  const item = state.strategies.find(
+    (entry) => String(entry.id) === String(strategyID),
+  );
+  if (!item) return;
+  state.strategyAccountID = String(strategyID);
+  state.strategyAccountMode = mode;
+  state.selectedStrategyAccountIDs.clear();
+  $("#strategy-account-title").textContent =
+    mode === "unbind"
+      ? `从“${item.name}”移出账号`
+      : `导入账号到“${item.name}”`;
+  $("#strategy-account-id").value = item.id;
+  $("#strategy-account-mode").value = mode;
+  $("#strategy-account-search").value = "";
+  renderStrategyAccountList();
+  showInitializedDialog("#strategy-account-dialog");
+}
+
+function renderStrategyTree(strategies) {
+  if (typeof Tabulator === "undefined") return;
+  const rows = strategies.map((item) => ({
+    name: item.name,
+    kind: "策略",
+    rpm: `${item.current_rpm} / ${strategyLimitText(item.rpm_limit)}`,
+    tpm: `${Number(item.current_tpm).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}`,
+    inflight: `${item.current_inflight} / ${strategyLimitText(item.concurrency_limit)}`,
+    status: item.accounts_pending
+      ? `${item.accounts_alive}/${item.bound_accounts} 存活 · ${item.accounts_pending} 待调度`
+      : `${item.accounts_alive}/${item.bound_accounts} 存活`,
+    binding: strategyModeLabels[item.dispatch_mode] ?? item.dispatch_mode,
+    _children: (item.accounts || []).map((account) => ({
+      name: account.name,
+      kind: "账号",
+      rpm: `${account.rpm}${item.rpm_limit > 0 ? ` / ${item.rpm_limit}` : account.base_rpm > 0 ? ` / ${account.base_rpm}` : ""}`,
+      tpm: Number(account.tpm).toLocaleString("zh-CN"),
+      inflight: `${account.inflight} / ${item.concurrency_limit > 0 ? Math.min(account.concurrency, item.concurrency_limit) : account.concurrency}`,
+      status:
+        account.dispatch === "pending"
+          ? "待调度"
+          : account.alive
+            ? "存活"
+            : `不可用（${account.status}）`,
+      binding:
+        (account.direct_binding ? "账号直绑" : "分组继承") +
+        (account.group_ids?.length ? ` · ${account.group_ids.join(",")}` : ""),
+    })),
+  }));
+  if (strategyTable) {
+    strategyTable.replaceData(rows);
+    return;
+  }
+  strategyTable = new Tabulator("#strategy-tree", {
+    data: rows,
+    layout: "fitColumns",
+    dataTree: true,
+    dataTreeChildField: "_children",
+    dataTreeStartExpanded: true,
+    placeholder: "暂无策略数据",
+    columns: [
+      { title: "名称", field: "name", widthGrow: 2, minWidth: 160, tooltip: true },
+      { title: "类型", field: "kind", width: 80, tooltip: true },
+      { title: "RPM（当前 / 限制）", field: "rpm", widthGrow: 1, tooltip: true },
+      { title: "TPM（当前 / 限制）", field: "tpm", widthGrow: 1, tooltip: true },
+      { title: "在途 / 并发", field: "inflight", widthGrow: 1, tooltip: true },
+      { title: "状态", field: "status", widthGrow: 1, tooltip: true },
+      { title: "算法 / 绑定", field: "binding", widthGrow: 1, tooltip: true },
+    ],
+  });
+}
+
+function openStrategy(item = null) {
+  $("#strategy-dialog-title").textContent = item ? "编辑策略" : "新增策略";
+  $("#strategy-id").value = item?.id || "";
+  $("#strategy-name").value = item?.name || "";
+  $("#strategy-description").value = item?.description || "";
+  $("#strategy-rpm").value = item?.rpm_limit ?? 0;
+  $("#strategy-tpm").value = item?.tpm_limit ?? 0;
+  $("#strategy-concurrency").value = item?.concurrency_limit ?? 0;
+  $("#strategy-rpm-mode").value = item?.rpm_strategy || "fixed";
+  $("#strategy-buffer").value = item?.rpm_sticky_buffer ?? 0;
+  $("#strategy-dispatch-mode").value = item?.dispatch_mode || "";
+  showInitializedDialog("#strategy-dialog");
+}
+
+function fillStrategySelect(select, selectedID) {
+  const current = selectedID ? String(selectedID) : "";
+  // Each select declares its own "no strategy" wording in the markup.
+  const placeholder = select.dataset.emptyLabel || select.options[0]?.text || "";
+  select.dataset.emptyLabel = placeholder;
+  select.innerHTML =
+    `<option value="">${escapeHTML(placeholder)}</option>` +
+    (state.strategies || [])
+      .map(
+        (item) =>
+          `<option value="${item.id}" ${String(item.id) === current ? "selected" : ""}>${escapeHTML(item.name)}</option>`,
+      )
+      .join("");
+}
+
+async function ensureStrategiesLoaded() {
+  if (state.strategiesLoaded || !canView("strategies")) return;
+  try {
+    state.strategies = await api("/api/strategies/observe");
+    state.strategiesLoaded = true;
+  } catch {
+    // Selects keep only the placeholder; strategySelectPayload then omits
+    // strategy_id so an unreadable list can never silently unbind anything.
+  }
+}
+
+// Returns undefined while the strategy list is unknown, so the field is dropped
+// from the payload and the backend keeps the current binding.
+function strategySelectPayload(select) {
+  return state.strategiesLoaded ? Number(select.value || 0) : undefined;
 }
 
 function metric(label, value, note, tone = "") {
@@ -749,7 +1274,7 @@ function renderDashboard() {
   $("#purpose-list").innerHTML = data.purposes
     .map(
       (item) =>
-        `<div class="purpose-row"><div class="purpose-name"><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.key)}</small></div><span class="purpose-description">${escapeHTML(item.description || "—")}</span><div class="purpose-actions"><div class="segmented"><button class="group-a ${item.active_group_id === "a" ? "active" : ""}" data-purpose-switch="${item.id}" data-group="a" ${isAdmin() ? "" : "disabled"}>${groupMark("a", "button-mark")}</button><button class="group-b ${item.active_group_id === "b" ? "active" : ""}" data-purpose-switch="${item.id}" data-group="b" ${isAdmin() ? "" : "disabled"}>${groupMark("b", "button-mark")}</button></div>${isAdmin() ? `<button class="icon-button compact" data-edit-purpose="${item.id}" title="编辑用途">···</button>` : ""}</div></div>`,
+        `<div class="purpose-row"><div class="purpose-name"><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.key)}</small></div><span class="purpose-description">${escapeHTML(item.description || "—")}</span><div class="purpose-actions"><select class="purpose-group-select" data-purpose-switch="${item.id}" ${isAdmin() ? "" : "disabled"} aria-label="${escapeHTML(item.name)} 调度分组">${state.groups.filter((group) => !group.reserve_pool_enabled && (group.status === "active" || group.id === item.active_group_id)).map((group) => groupOption(group, item.active_group_id)).join("")}</select>${isAdmin() ? `<button class="icon-button compact" data-edit-purpose="${item.id}" title="编辑用途">···</button>` : ""}</div></div>`,
     )
     .join("");
   $("#group-cards").innerHTML = data.groups
@@ -762,16 +1287,39 @@ function renderDashboard() {
         : item.stream_hedge_enabled
           ? "极速竞速"
           : "串行";
-      return `<article class="group-card ${item.id}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>可用账号</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      const passthroughCount = [
+        item.service_tier_passthrough_enabled,
+        item.inference_geo_passthrough_enabled,
+        item.speed_passthrough_enabled,
+        item.anthropic_beta_passthrough_enabled,
+      ].filter(Boolean).length;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
 }
 
+const limitWindowLabels = { "5h": "5h 限制", "7d": "7d 限制" };
+
+// The 5h / 7d buckets are subsets of "暂不可调度", so an empty filter or the
+// parent filter still matches a window-limited account.
+function accountMatchesStatus(account, status) {
+  if (!status) return true;
+  if (status === "limited_5h" || status === "limited_7d") {
+    return (
+      account.dispatch_status === "unavailable" &&
+      account.limit_window === status.slice("limited_".length)
+    );
+  }
+  return account.dispatch_status === status;
+}
+
 function accountStatus(account) {
   if (account.dispatch_status === "error") return ["错误", "error"];
-  if (account.dispatch_status === "unavailable")
-    return ["暂不可调度", "off"];
+  if (account.dispatch_status === "unavailable") {
+    const label = limitWindowLabels[account.limit_window];
+    return label ? [label, "warn"] : ["暂不可调度", "off"];
+  }
   return ["正常", "ok"];
 }
 function accountAuthStatus(account) {
@@ -798,6 +1346,14 @@ function subscriptionName(value) {
     value ||
     "未识别"
   );
+}
+function accountSubscriptionName(item) {
+  const subscription = subscriptionName(item?.subscription_type);
+  const tier = String(item?.rate_limit_tier || "").toLowerCase();
+  const multiplier = tier.match(/(?:^|_)(\d+x)(?:_|$)/)?.[1];
+  return subscription === "Max" && multiplier
+    ? `${subscription} ${multiplier}`
+    : subscription;
 }
 function durationText(seconds) {
   const value = Math.max(0, Number(seconds || 0));
@@ -862,7 +1418,10 @@ function accountLiveLoadInner(load, fallbackBaseRPM = 0) {
   const rpm = Number(load?.rpm || 0);
   const tpm = Number(load?.tpm || 0);
   const inflight = Number(load?.inflight || 0);
-  const baseRPM = Number(load?.base_rpm ?? fallbackBaseRPM ?? 0);
+  const baseRPM = Number(
+    load?.effective_rpm ?? load?.base_rpm ?? fallbackBaseRPM ?? 0,
+  );
+  const temporaryRPM = Number(load?.temporary_rpm || 0);
   let tone = "idle";
   if (baseRPM > 0 && rpm >= baseRPM) tone = "error";
   else if (baseRPM > 0 && rpm >= baseRPM * 0.8) tone = "warn";
@@ -871,7 +1430,8 @@ function accountLiveLoadInner(load, fallbackBaseRPM = 0) {
     baseRPM > 0 ? Math.min(100, Math.round((rpm / baseRPM) * 100)) : 0;
   const capacity = baseRPM > 0 ? `${rpm}/${baseRPM}` : `${rpm}/∞`;
   const detail = `TPM ${compact(tpm)} · 在途 ${inflight}`;
-  const hint = `最近 60 秒：RPM ${capacity}${baseRPM > 0 ? "" : "（未设置 RPM 上限）"} · TPM ${Number(tpm).toLocaleString("zh-CN")} · 在途 ${inflight}`;
+  const thresholdHint = temporaryRPM > 0 ? ` · 临时阈值 ${temporaryRPM}` : "";
+  const hint = `最近 60 秒：RPM ${capacity}${baseRPM > 0 ? "" : "（未设置 RPM 上限）"}${thresholdHint} · TPM ${Number(tpm).toLocaleString("zh-CN")} · 在途 ${inflight}`;
   return `<b>RPM</b><span class="${tone}"><i style="width:${ratio}%"></i></span><strong class="${tone}" title="${escapeHTML(hint)}">${capacity}</strong><small title="${escapeHTML(hint)}">${detail}</small>`;
 }
 function renderRealtime() {
@@ -921,15 +1481,19 @@ function closeAccountActionMenu() {
   const trigger = $('[data-account-menu][aria-expanded="true"]');
   if (trigger) trigger.setAttribute("aria-expanded", "false");
 }
+function accountNeedsSchedulingResume(item) {
+  return !item.schedulable || item.dispatch_status === "unavailable";
+}
 function openAccountActionMenu(trigger, item) {
   const menu = $("#account-action-menu");
   const alreadyOpen =
     !menu.hidden && menu.dataset.accountId === String(item.id);
   closeAccountActionMenu();
   if (alreadyOpen) return;
+  const shouldResume = accountNeedsSchedulingResume(item);
   menu.dataset.accountId = String(item.id);
   menu.innerHTML = `
-    <button type="button" role="menuitem" data-toggle-account="${item.id}"><i data-lucide="${item.schedulable ? "pause" : "play"}"></i><span>${item.schedulable ? "暂停调度" : "恢复调度"}</span></button>
+    <button type="button" role="menuitem" data-toggle-account="${item.id}" data-resume-account="${shouldResume}"><i data-lucide="${shouldResume ? "play" : "pause"}"></i><span>${shouldResume ? "恢复调度" : "暂停调度"}</span></button>
     <button type="button" role="menuitem" data-edit-account="${item.id}"><i data-lucide="square-pen"></i><span>编辑账号</span></button>
     <button type="button" role="menuitem" class="danger" data-delete-account="${item.id}"><i data-lucide="trash-2"></i><span>删除账号</span></button>`;
   menu.hidden = false;
@@ -984,11 +1548,17 @@ function renderAccounts() {
     unavailable: scoped.filter(
       (item) => item.dispatch_status === "unavailable",
     ).length,
+    limited_5h: scoped.filter((item) => accountMatchesStatus(item, "limited_5h"))
+      .length,
+    limited_7d: scoped.filter((item) => accountMatchesStatus(item, "limited_7d"))
+      .length,
     error: scoped.filter((item) => item.dispatch_status === "error").length,
   };
   $("#status-all-count").textContent = scoped.length;
   $("#status-normal-count").textContent = counts.normal;
   $("#status-unavailable-count").textContent = counts.unavailable;
+  $("#status-limited-5h-count").textContent = counts.limited_5h;
+  $("#status-limited-7d-count").textContent = counts.limited_7d;
   $("#status-error-count").textContent = counts.error;
   $$("#account-status-tabs button").forEach((node) => {
     node.classList.toggle(
@@ -996,9 +1566,8 @@ function renderAccounts() {
       node.dataset.accountStatus === state.accountStatus,
     );
   });
-  const filtered = scoped.filter(
-    (item) =>
-      !state.accountStatus || item.dispatch_status === state.accountStatus,
+  const filtered = scoped.filter((item) =>
+    accountMatchesStatus(item, state.accountStatus),
   );
   $("#account-list-count").textContent = `${filtered.length} 个账号`;
   $("#nav-account-count").textContent = state.accounts.length;
@@ -1020,7 +1589,11 @@ function renderAccounts() {
       const statusDetail = `${authDetail}${checked}`;
       const onboardedAt = dateTime(item.onboarded_at);
       const lastUsedAt = dateTime(item.last_used_at);
-      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionName(item.subscription_type))}">${escapeHTML(subscriptionName(item.subscription_type))}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
+      const subscription = accountSubscriptionName(item);
+      const subscriptionTitle = item.rate_limit_tier
+        ? `${subscription} · ${item.rate_limit_tier}`
+        : subscription;
+      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -1039,7 +1612,7 @@ function syncAccountSelection() {
         `${item.name} ${item.notes} ${item.credential_hint}`
           .toLowerCase()
           .includes(search)) &&
-      (!state.accountStatus || item.dispatch_status === state.accountStatus),
+      accountMatchesStatus(item, state.accountStatus),
   );
   const selected = selectable.filter((item) =>
     state.selectedAccountIDs.has(item.id),
@@ -1051,6 +1624,8 @@ function syncAccountSelection() {
   $("#selected-account-count").textContent = state.selectedAccountIDs.size;
   $("#delete-selected-accounts").disabled =
     !isAdmin() || state.selectedAccountIDs.size === 0;
+  $("#edit-selected-accounts").disabled =
+    !isAdmin() || state.selectedAccountIDs.size === 0;
   $("#schedule-selected-accounts").disabled =
     !isAdmin() || state.selectedAccountIDs.size === 0;
   $("#pause-selected-accounts").disabled =
@@ -1058,18 +1633,36 @@ function syncAccountSelection() {
 }
 
 function renderDeadAccounts() {
-  const dead = state.accounts.filter(
+  const pending = state.accounts.filter(
     (item) => item.dispatch_status === "error",
   );
-  $("#nav-dead-count").textContent = dead.length;
-  $("#dead-list-count").textContent = `${dead.length} 个账号`;
+  const archived = state.archivedAccounts;
+  const source = state.deadStatus === "archived" ? archived : pending;
+  const dead = source.filter(deadAccountMatchesSearch);
+  $("#nav-dead-count").textContent = pending.length;
+  $("#dead-pending-count").textContent = pending.length;
+  $("#dead-archived-count").textContent = archived.length;
+  $("#dead-list-count").textContent = state.deadSearch.trim()
+    ? `${dead.length} / ${source.length} 个账号`
+    : `${dead.length} 个账号`;
+  $("#dead-table-title").textContent = state.deadStatus === "archived" ? "归档账户" : "死亡账户";
   $("#dead-empty").hidden = dead.length > 0;
+  $("#dead-empty strong").textContent = state.deadSearch.trim()
+    ? "没有匹配账户"
+    : state.deadStatus === "archived"
+      ? "暂无归档账户"
+      : "暂无死亡账户";
+  $("#dead-empty span").textContent = state.deadSearch.trim()
+    ? "请调整账号、邮箱或代理 IP 搜索条件。"
+    : state.deadStatus === "archived"
+      ? "归档后的死亡账户会保留在这里。"
+      : "授权失效或状态错误的账号会显示在这里。";
   const average =
     dead.length > 0
       ? dead.reduce((sum, item) => sum + item.survival_seconds, 0) / dead.length
       : 0;
   $("#dead-metrics").innerHTML = [
-    metric("DEAD ACCOUNTS", dead.length, "授权失效或账号错误", "b"),
+    metric(state.deadStatus === "archived" ? "ARCHIVED ACCOUNTS" : "DEAD ACCOUNTS", dead.length, state.deadStatus === "archived" ? "已释放代理 IP" : "授权失效或账号错误", "b"),
     metric(
       "TOTAL REQUESTS",
       compact(dead.reduce((sum, item) => sum + item.request_count, 0)),
@@ -1085,12 +1678,55 @@ function renderDeadAccounts() {
   $("#dead-accounts-body").innerHTML = paginatedItems("dead", dead)
     .map((item) => {
       const actions = isAdmin()
-        ? `<span class="row-actions"><button data-auth-account="${item.id}" class="attention" title="重新授权"><i data-lucide="key-round"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button></span>`
+        ? state.deadStatus === "archived"
+          ? `<span class="row-actions"><button data-restore-account="${item.id}" title="移出归档"><i data-lucide="archive-restore"></i></button></span>`
+          : `<span class="row-actions"><button data-auth-account="${item.id}" class="attention" title="重新授权"><i data-lucide="key-round"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button data-archive-account="${item.id}" title="归档并释放 IP"><i data-lucide="archive"></i></button></span>`
         : '<span class="muted">只读</span>';
-      return `<tr><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle">${escapeHTML(item.credential_hint)}</span></td><td>${escapeHTML(subscriptionName(item.subscription_type))}</td><td><span class="row-title">${escapeHTML(item.proxy_name || "未绑定")}</span><span class="row-subtitle mono">${escapeHTML(item.proxy_hint || "—")}</span></td><td class="mono">${dateTime(item.onboarded_at)}</td><td class="mono">${dateTime(item.invalidated_at)}</td><td>${survivalCell(item)}</td><td class="num mono">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="num money-cell">${money(item.total_billed_cost)}</td><td class="error-copy">${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}</td><td class="actions">${actions}</td></tr>`;
+      const selectable = isAdmin() && state.deadStatus === "pending";
+      const proxyHint = item.proxy_hint || "—";
+      const proxyDetail =
+        item.proxy_ip && !proxyHint.includes(item.proxy_ip)
+          ? `${proxyHint} · ${item.proxy_ip}`
+          : proxyHint;
+      return `<tr><td class="select-column admin-only-column">${selectable ? `<input type="checkbox" data-dead-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedDeadAccountIDs.has(item.id) ? "checked" : ""} />` : "—"}</td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle">${escapeHTML(item.credential_hint)}</span></td><td>${escapeHTML(accountSubscriptionName(item))}</td><td><span class="row-title" title="${escapeHTML(item.proxy_name || "未绑定")}">${escapeHTML(item.proxy_name || "未绑定")}</span><span class="row-subtitle mono" title="${escapeHTML(proxyDetail)}">${escapeHTML(proxyDetail)}</span></td><td class="mono time-cell">${dateTime(item.onboarded_at)}</td><td class="mono time-cell">${dateTime(item.invalidated_at)}</td><td class="mono time-cell">${dateTime(item.archived_at)}</td><td>${survivalCell(item)}</td><td class="num mono">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="num money-cell">${money(item.total_billed_cost)}</td><td class="error-copy" title="${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}">${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}</td><td class="actions">${actions}</td></tr>`;
     })
     .join("");
+  syncDeadSelection();
   refreshIcons();
+}
+
+function deadAccountMatchesSearch(item) {
+  const search = state.deadSearch.trim().toLowerCase();
+  if (!search) return true;
+  return [
+    item.id,
+    item.name,
+    item.credential_hint,
+    item.source_sk_hint,
+    item.proxy_name,
+    item.proxy_hint,
+    item.proxy_ip,
+  ]
+    .filter((value) => value !== null && value !== undefined)
+    .join(" ")
+    .toLowerCase()
+    .includes(search);
+}
+
+function syncDeadSelection() {
+  const pending = state.accounts.filter(
+    (item) => item.dispatch_status === "error" && deadAccountMatchesSearch(item),
+  );
+  const selected = pending.filter((item) => state.selectedDeadAccountIDs.has(item.id));
+  $("#selected-dead-count").textContent = selected.length;
+  const archiveButton = $("#archive-selected-accounts");
+  archiveButton.hidden = state.deadStatus !== "pending";
+  archiveButton.disabled = !isAdmin() || state.deadStatus !== "pending" || selected.length === 0;
+  const selectAll = $("#select-all-dead");
+  selectAll.hidden = state.deadStatus !== "pending";
+  selectAll.disabled = !isAdmin() || state.deadStatus !== "pending" || pending.length === 0;
+  selectAll.checked = pending.length > 0 && selected.length === pending.length;
+  selectAll.indeterminate = selected.length > 0 && selected.length < pending.length;
 }
 
 function renderDaily() {
@@ -1127,6 +1763,194 @@ function renderAuthorization() {
     .join("");
 }
 
+const deauthWindowLabels = {
+  15: "15 分钟",
+  60: "1 小时",
+  360: "6 小时",
+  1440: "24 小时",
+  10080: "7 天",
+};
+
+async function loadDeauthMonitor() {
+  if (!canView("authorization")) return;
+  try {
+    state.deauth = await api(
+      `/api/authorization-deauth?window=${state.deauthWindow}`,
+    );
+    renderDeauthMonitor();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderDeauthMonitor() {
+  const data = state.deauth;
+  if (!data) return;
+  const label = deauthWindowLabels[data.window_minutes] || `${data.window_minutes} 分钟`;
+  const still401 = data.accounts_401 - data.recovered_401;
+  $("#deauth-metrics").innerHTML = [
+    metric(
+      "401 DE-AUTH",
+      data.accounts_401,
+      `近 ${label} 因 401 掉授权的账号数`,
+      data.accounts_401 > 0 ? "b" : "",
+    ),
+    metric("STILL DOWN", still401, `其中仍未恢复 · 已恢复 ${data.recovered_401}`),
+    metric("ALL CAUSES", data.total, `近 ${label} 全部掉授权次数`),
+    metric(
+      "PENDING REAUTH",
+      data.pending_reauth,
+      "当前等待重新授权的账号总数",
+      "a",
+    ),
+  ].join("");
+  $("#deauth-causes").innerHTML = data.causes
+    .map(
+      (item) =>
+        `<span class="deauth-cause ${item.count > 0 ? "active" : ""}"><b>${item.count}</b>${escapeHTML(item.label)}</span>`,
+    )
+    .join("");
+  $("#deauth-body").innerHTML = data.events.length
+    ? data.events
+        .map(
+          (item) =>
+            `<tr><td class="mono">${dateTime(item.at)}</td><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle">#${item.account_id}</span></td><td>${(item.group_ids ? item.group_ids.split(",") : []).map((id) => groupMark(id, "pill")).join("") || "—"}</td><td><span class="pill ${item.cause === "oauth_401" ? "error" : ""}">${escapeHTML(item.label)}</span></td><td><span class="pill ${item.recovered ? "ok" : "error"}">${item.recovered ? "已恢复" : "待授权"}</span></td><td class="error-copy deauth-reason-cell">${escapeHTML(item.reason || "—")}</td></tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="6" class="muted">近 ${escapeHTML(label)} 没有账号掉授权</td></tr>`;
+}
+
+function renderErrors() {
+  const data = state.errors;
+  if (!data) return;
+  const summary = data.summary;
+  $("#error-count").textContent = `${summary.total} 条记录`;
+  $("#error-empty").hidden = data.items.length > 0;
+  $("#error-metrics").innerHTML = [
+    metric("TOTAL", summary.total, "当前筛选报错"),
+    metric("GATEWAY", summary.gateway, "API 请求失败", "b"),
+    metric("ACCOUNTS", summary.accounts, "账号状态异常"),
+    metric("AUTHORIZATION", summary.authorization, "授权失败"),
+    metric(
+      "OTHER",
+      summary.proxies + summary.system + summary.audit,
+      "代理、系统与后台操作",
+    ),
+  ].join("");
+  const sourceNames = {
+    account: "账号",
+    authorization: "授权",
+    gateway: "API",
+    proxy: "代理",
+    audit: "操作",
+    system: "系统",
+  };
+  const categoryNames = {
+    account_auth: "授权 / Token",
+    account_state: "账号状态",
+    authorization: "授权流程",
+    gateway_request: "API 请求",
+    gateway_capacity: "调度容量不足",
+    upstream_bad_request: "上游参数错误",
+    upstream_authentication_rejected: "上游认证拒绝",
+    upstream_authentication_revoked: "上游 Token 撤销",
+    upstream_forbidden: "上游禁止访问",
+    upstream_forbidden_proxy_challenge: "代理出口验证",
+    upstream_forbidden_identity_verification: "身份验证要求",
+    upstream_forbidden_oauth_policy: "组织 OAuth 策略",
+    upstream_rate_limited: "上游限流 / 配额",
+    upstream_overloaded: "上游过载",
+    upstream_service_error: "上游服务错误",
+    upstream_error: "上游错误",
+    client_canceled: "调用方取消",
+    timeout: "请求超时",
+    proxy_test: "代理检测",
+    proxy_pool_sync: "代理池同步",
+    admin_request: "后台请求",
+    pricing_sync: "价格同步",
+  };
+  $("#error-body").innerHTML = paginatedItems("errors", data.items)
+    .map((item) => {
+      const target =
+        item.account_name ||
+        (item.source === "audit" ? item.actor : "") ||
+        "系统";
+      const targetNote = item.account_id
+        ? `#${item.account_id}`
+        : item.source === "audit" && item.actor
+          ? "操作用户"
+          : "—";
+      const context = [item.method, item.path].filter(Boolean).join(" ");
+      const category = categoryNames[item.category] || item.category;
+      const contextTitle = context || category;
+      const elapsed = item.duration_ms
+        ? item.duration_ms < 1000
+          ? `${item.duration_ms} ms`
+          : `${(item.duration_ms / 1000).toFixed(2)} s`
+        : "";
+      const requestTrace = [
+        item.client_request_id
+          ? `NewAPI ${item.client_request_id}`
+          : item.request_id
+            ? `请求 ${item.request_id}`
+            : "",
+        item.trace_id ? `CCMAX ${item.trace_id}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const dispatchNote = dispatchDiagnosticsText(item.dispatch_diagnostics);
+      const contextNote = [
+        context ? category : "",
+        elapsed,
+        dispatchNote,
+        requestTrace,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "—";
+      const contextTooltip = [
+        contextTitle,
+        contextNote,
+        item.upstream_request_id
+          ? `上游 ${item.upstream_request_id}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const groups = item.group_ids?.length
+        ? item.group_ids.map((groupID) => groupMark(groupID, "pill")).join(" ")
+        : '<span class="muted">—</span>';
+      const status = item.status_code
+        ? `<span class="pill error">HTTP ${item.status_code}</span>`
+        : '<span class="pill error">错误</span>';
+      return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="pill error-source ${escapeHTML(item.source)}">${escapeHTML(sourceNames[item.source] || item.source)}</span></td><td>${status}</td><td><span class="row-title truncate-cell" title="${escapeHTML(target)}">${escapeHTML(target)}</span><span class="row-subtitle">${escapeHTML(targetNote)}</span></td><td>${groups}</td><td class="mono truncate-cell" title="${escapeHTML(item.proxy_ip || "")}">${escapeHTML(item.proxy_ip || "—")}</td><td title="${escapeHTML(contextTooltip)}"><span class="row-title truncate-cell">${escapeHTML(contextTitle)}</span><span class="row-subtitle">${escapeHTML(contextNote)}</span></td><td class="error-message-cell" title="${escapeHTML(item.message)}">${escapeHTML(item.message)}</td></tr>`;
+    })
+    .join("");
+}
+
+function dispatchDiagnosticsText(value) {
+  if (!value) return "";
+  try {
+    const item = typeof value === "string" ? JSON.parse(value) : value;
+    return [
+      `候选 ${Number(item.candidates || 0)}`,
+      item.excluded ? `重试排除 ${item.excluded}` : "",
+      item.strategy_missing ? `策略未绑定 ${item.strategy_missing}` : "",
+      item.model_cooldown ? `模型冷却 ${item.model_cooldown}` : "",
+      item.model_unsupported ? `模型不支持 ${item.model_unsupported}` : "",
+      item.concurrency_blocked ? `并发阻塞 ${item.concurrency_blocked}` : "",
+      item.temporary_rpm_blocked
+        ? `临时 RPM ${item.temporary_rpm_blocked}`
+        : "",
+      item.rpm_blocked ? `RPM 阻塞 ${item.rpm_blocked}` : "",
+      item.tpm_blocked ? `TPM 阻塞 ${item.tpm_blocked}` : "",
+    ]
+      .filter(Boolean)
+      .join(" / ");
+  } catch {
+    return "";
+  }
+}
+
 function renderProxies() {
   $("#nav-proxy-count").textContent = state.proxies.length;
   $("#proxy-pool-list").innerHTML = state.proxyPools
@@ -1135,22 +1959,72 @@ function renderProxies() {
         `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small>${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${isAdmin() && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${isAdmin() ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button><button class="danger" data-delete-pool="${pool.id}" title="删除代理池">✕</button>` : ""}</div></article>`,
     )
     .join("");
-  const selected = state.proxyPoolFilter
-    ? state.proxies.filter(
-        (item) => String(item.pool_id) === String(state.proxyPoolFilter),
-      )
-    : state.proxies;
+  const selected = filteredProxies();
+  const visibleIDs = new Set(selected.map((item) => item.id));
+  state.selectedProxyIDs = new Set(
+    [...state.selectedProxyIDs].filter((id) => visibleIDs.has(id)),
+  );
   $("#proxies-empty").hidden = selected.length > 0;
   $("#proxies-body").innerHTML = paginatedItems("proxies", selected)
     .map(
       (item) =>
-        `<tr><td><span class="row-title">${escapeHTML(item.name)}</span><span class="row-subtitle mono">${escapeHTML(item.host)}:${item.port}</span></td><td><span class="pill">${item.protocol.toUpperCase()}</span></td><td class="mono">${escapeHTML(item.exit_ip || "未检测")}</td><td class="num mono">${item.latency_ms == null ? "—" : `${item.latency_ms} ms`}</td><td>${escapeHTML(item.assigned_to || "未占用")}</td><td><span class="pill ${item.status === "active" ? "ok" : item.status === "error" ? "error" : "off"}">${item.status === "active" ? "正常" : item.status === "error" ? "异常" : "停用"}</span></td><td class="mono">${dateTime(item.last_test_at)}</td><td class="actions">${isAdmin() ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="删除代理"><i data-lucide="trash-2"></i></button></span>` : '<span class="muted">只读</span>'}</td></tr>`,
+        `<tr>
+          <td class="select-column admin-only-column"><input type="checkbox" data-proxy-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedProxyIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td>
+          <td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle mono" title="${escapeHTML(item.host)}:${item.port}">${escapeHTML(item.host)}:${item.port}</span></td>
+          <td><span class="pill">${item.protocol.toUpperCase()}</span></td>
+          <td class="mono" title="${escapeHTML(item.exit_ip || "未检测")}">${escapeHTML(item.exit_ip || "未检测")}</td>
+          <td class="num mono">${item.latency_ms == null ? "—" : `${item.latency_ms} ms`}</td>
+          <td title="${escapeHTML(item.assigned_to || "未占用")}">${escapeHTML(item.assigned_to || "未占用")}</td>
+          <td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
+          <td><span class="pill ${item.status === "active" ? "ok" : item.status === "error" ? "error" : "off"}">${item.status === "active" ? "正常" : item.status === "error" ? "异常" : "停用"}</span></td>
+          <td class="mono" title="${escapeHTML(dateTime(item.last_test_at))}">${dateTime(item.last_test_at)}</td>
+          <td class="actions">${isAdmin() ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="删除代理"><i data-lucide="trash-2"></i></button></span>` : '<span class="muted">只读</span>'}</td>
+        </tr>`,
     )
     .join("");
   const options = `<option value="">全部代理池</option>${state.proxyPools.map((pool) => `<option value="${pool.id}">${escapeHTML(pool.name)}</option>`).join("")}`;
   $("#proxy-pool-filter").innerHTML = options;
   $("#proxy-pool-filter").value = state.proxyPoolFilter;
+  syncProxySelection(selected);
   refreshIcons();
+}
+
+function filteredProxies() {
+  const search = state.proxySearch.trim().toLowerCase();
+  return state.proxies.filter((item) => {
+    if (
+      state.proxyPoolFilter &&
+      String(item.pool_id) !== String(state.proxyPoolFilter)
+    )
+      return false;
+    if (!search) return true;
+    return [
+      item.id,
+      item.name,
+      item.pool_name,
+      item.protocol,
+      item.host,
+      item.port,
+      item.exit_ip,
+      item.assigned_to,
+      item.status,
+    ]
+      .filter((value) => value !== null && value !== undefined)
+      .join(" ")
+      .toLowerCase()
+      .includes(search);
+  });
+}
+
+function syncProxySelection(scope = filteredProxies()) {
+  const selectable = isAdmin() ? scope : [];
+  const selected = selectable.filter((item) => state.selectedProxyIDs.has(item.id));
+  const selectAll = $("#select-all-proxies");
+  selectAll.disabled = !isAdmin() || selectable.length === 0;
+  selectAll.checked = selectable.length > 0 && selected.length === selectable.length;
+  selectAll.indeterminate = selected.length > 0 && selected.length < selectable.length;
+  $("#selected-proxy-count").textContent = selected.length;
+  $("#delete-proxies-batch").disabled = !isAdmin() || selected.length === 0;
 }
 
 function renderAccess() {
@@ -1327,7 +2201,23 @@ function usageRows(items, compactMode) {
         item.cache_read_tokens;
       if (compactMode)
         return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(total)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td></tr>`;
-      return `<tr><td><span class="mono row-title" title="${escapeHTML(item.request_id)}">${escapeHTML(item.request_id)}</span><span class="row-subtitle">${dateTime(item.created_at)}</span></td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
+      const requestTooltip = [
+        item.client_request_id
+          ? `NewAPI: ${item.client_request_id}`
+          : `请求: ${item.request_id}`,
+        item.trace_id ? `CCMAX: ${item.trace_id}` : "",
+        item.upstream_request_id ? `上游: ${item.upstream_request_id}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const requestNote = [
+        dateTime(item.created_at),
+        item.trace_id ? `CCMAX ${item.trace_id}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const displayedRequestID = item.client_request_id || item.request_id;
+      return `<tr><td title="${escapeHTML(requestTooltip)}"><span class="mono row-title">${escapeHTML(displayedRequestID)}</span><span class="row-subtitle mono">${escapeHTML(requestNote)}</span></td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
     })
     .join("");
 }
@@ -1339,7 +2229,7 @@ function renderBatchResults() {
   )
     .map(
       (item) =>
-        `<tr><td class="mono">${item.index}</td><td><span class="row-title">${escapeHTML(item.name || "未创建")}</span>${item.account_id ? `<span class="row-subtitle mono">#${item.account_id}</span>` : ""}</td><td>${escapeHTML(subscriptionName(item.subscription_type))}</td><td class="mono">${escapeHTML(item.proxy_ip || "—")}</td><td><span class="pill ${item.skipped ? "off" : item.success ? "ok" : "error"}">${item.skipped ? "已存在" : item.success ? "成功" : "失败"}</span></td><td class="${item.success || item.skipped ? "" : "error-copy"}">${escapeHTML(item.error || "授权完成")}</td></tr>`,
+        `<tr><td class="mono">${item.index}</td><td><span class="row-title">${escapeHTML(item.name || "未创建")}</span>${item.account_id ? `<span class="row-subtitle mono">#${item.account_id}</span>` : ""}</td><td>${escapeHTML(subscriptionName(item.subscription_type))}</td><td class="mono">${escapeHTML(item.proxy_ip || "—")}</td><td><span class="pill ${item.skipped ? "off" : item.success ? "ok" : "error"}">${item.updated ? "已更新" : item.skipped ? "已跳过" : item.success ? "成功" : "失败"}</span></td><td class="${item.success || item.skipped ? "" : "error-copy"}">${escapeHTML(item.error || "授权完成")}</td></tr>`,
     )
     .join("");
   refreshIcons();
@@ -1414,7 +2304,16 @@ function setView(view) {
     loadRealtime();
   }
   if (view === "daily") loadDaily();
-  if (view === "authorization") loadAuthorization();
+  if (view === "authorization") {
+    loadAuthorization();
+    loadDeauthMonitor();
+  }
+  if (view === "errors") loadErrors();
+  if (view === "strategies") loadStrategies();
+  if (view === "onboarding")
+    ensureStrategiesLoaded().then(() =>
+      fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value),
+    );
   refreshIcons();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -1449,6 +2348,10 @@ function openAccount(account = null) {
   $("#account-rpm-enabled").checked = (account?.base_rpm || 0) > 0;
   $("#account-rpm-strategy").value = account?.rpm_strategy || "tiered";
   $("#account-rpm-buffer").value = account?.rpm_sticky_buffer || 0;
+  fillStrategySelect($("#account-strategy"), account?.strategy_id);
+  ensureStrategiesLoaded().then(() =>
+    fillStrategySelect($("#account-strategy"), account?.strategy_id),
+  );
   $("#account-queue-mode").value = account?.user_msg_queue_mode || "off";
   $("#account-request-passthrough").checked =
     account?.extra?.request_passthrough === true;
@@ -1469,13 +2372,89 @@ function openAccount(account = null) {
   $$('input[name="account-group"]').forEach((node) => {
     node.checked = account
       ? account.group_ids.includes(node.value)
-      : node.value === "a";
+      : node.value === availableGroups(true)[0]?.id;
   });
   $("#credential-help").textContent = account?.has_credentials
     ? `当前凭证：${account.credential_hint}；留空保持不变。`
     : "保存后凭证不会在管理列表中返回。";
   syncAccountControls();
   showInitializedDialog("#account-dialog");
+}
+function strategyName(id) {
+  if (!id) return "跟随分组";
+  const item = (state.strategies || []).find((entry) => entry.id === id);
+  return item ? item.name : `#${id}`;
+}
+function batchEditCommonValue(accounts, key, normalize = (value) => value) {
+  const values = accounts.map((account) => normalize(account[key]));
+  const first = values[0];
+  return {
+    value: first,
+    mixed: values.some((value) => JSON.stringify(value) !== JSON.stringify(first)),
+  };
+}
+function openBatchAccountEdit() {
+  const accounts = selectedAccountIDs()
+    .map((id) => state.accounts.find((item) => item.id === id))
+    .filter(Boolean);
+  if (!accounts.length) return;
+  $("#batch-account-form").reset();
+  $("#batch-edit-count").textContent = `已选择 ${accounts.length} 个账号`;
+  const fields = [
+    ["concurrency", "#batch-edit-concurrency"],
+    ["base_rpm", "#batch-edit-base-rpm"],
+    ["rpm_strategy", "#batch-edit-rpm-strategy"],
+    ["rpm_sticky_buffer", "#batch-edit-rpm-buffer"],
+    ["user_msg_queue_mode", "#batch-edit-queue-mode"],
+    ["priority", "#batch-edit-priority"],
+    ["rate_multiplier", "#batch-edit-rate"],
+    ["account_price", "#batch-edit-price"],
+  ];
+  fields.forEach(([key, selector]) => {
+    const current = batchEditCommonValue(accounts, key);
+    $(selector).value = current.value ?? "";
+    $(`[data-batch-edit-hint="${key}"]`).textContent = current.mixed
+      ? "已选账号当前值不一致"
+      : `当前值：${current.value ?? "—"}`;
+  });
+  const strategy = batchEditCommonValue(
+    accounts,
+    "strategy_id",
+    (value) => value || 0,
+  );
+  const showStrategy = () => {
+    fillStrategySelect(
+      $("#batch-edit-strategy"),
+      strategy.mixed ? 0 : strategy.value,
+    );
+    $('[data-batch-edit-hint="strategy_id"]').textContent = strategy.mixed
+      ? "已选账号当前策略不一致"
+      : `当前策略：${strategyName(strategy.value)}`;
+  };
+  showStrategy();
+  ensureStrategiesLoaded().then(showStrategy);
+  const groups = batchEditCommonValue(accounts, "group_ids", (value) =>
+    [...(value || [])].sort(),
+  );
+  $$('.batch-edit-value[name="batch-edit-group"]').forEach((node) => {
+    node.checked = groups.value.includes(node.value);
+  });
+  $('[data-batch-edit-hint="group_ids"]').textContent = groups.mixed
+    ? "已选账号当前分组不一致"
+    : `当前分组：${groups.value.map((value) => value.toUpperCase()).join("、")}`;
+  syncBatchEditControls();
+  showInitializedDialog("#batch-account-dialog");
+}
+function syncBatchEditControls() {
+  $$('[data-batch-edit-apply]').forEach((apply) => {
+    const container =
+      apply.dataset.batchEditApply === "group_ids"
+        ? apply.closest("fieldset")
+        : apply.closest(".batch-edit-field");
+    $$(".batch-edit-value", container).forEach((node) => {
+      node.disabled = !apply.checked;
+    });
+  });
 }
 function syncAccountControls() {
   const hasPool = Boolean($("#account-proxy-pool").value);
@@ -1489,6 +2468,10 @@ function syncAccountControls() {
   $("#account-base-rpm").disabled = !$("#account-rpm-enabled").checked;
   $("#account-rpm-strategy").disabled = !$("#account-rpm-enabled").checked;
   $("#account-rpm-buffer").disabled = !$("#account-rpm-enabled").checked;
+  $("#account-rpm-buffer-hint").textContent =
+    $("#account-rpm-strategy").value === "fixed"
+      ? "固定硬限：n = 粘性会话豁免额度，0 表示完全硬限不豁免"
+      : "0 使用并发数与基础 RPM 自动计算";
   syncAccountAuthFields();
   stabilizeAccountDialogViewport();
 }
@@ -1551,28 +2534,92 @@ function openPurpose(item = null) {
   $("#purpose-dialog-title").textContent = item ? "编辑用途" : "新增用途";
   $("#purpose-key").value = item?.key || "";
   $("#purpose-name").value = item?.name || "";
-  $("#purpose-group").value = item?.active_group_id || "a";
+  const fallbackGroup = availableGroups(true).find(
+    (group) => !group.reserve_pool_enabled,
+  )?.id || "";
+  const selectedGroup = item?.active_group_id || fallbackGroup;
+  $("#purpose-group").innerHTML = state.groups
+    .filter(
+      (group) =>
+        !group.reserve_pool_enabled &&
+        (group.status === "active" || group.id === selectedGroup),
+    )
+    .map((group) => groupOption(group, selectedGroup))
+    .join("");
+  $("#purpose-group").value = selectedGroup;
   $("#purpose-description").value = item?.description || "";
   showInitializedDialog("#purpose-dialog");
 }
-function openGroup(item) {
+async function switchPurposeGroup(purposeID, groupID) {
+  const item = state.purposes.find((value) => value.id === Number(purposeID));
+  if (!item || item.active_group_id === groupID) return;
+  await api(`/api/purposes/${item.id}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      key: item.key,
+      name: item.name,
+      description: item.description,
+      active_group_id: groupID,
+    }),
+  });
+  const group = state.groups.find((value) => value.id === groupID);
+  toast(`${item.name} 已切换到 ${group?.name || groupID}`);
+  await loadCore();
+}
+function openGroup(item = null) {
   $("#group-form").reset();
-  $("#group-id").value = item.id;
-  $("#group-dialog-title").textContent = `编辑 ${item.id.toUpperCase()} 分组`;
-  $("#group-name").value = item.name;
-  $("#group-description").value = item.description || "";
-  $("#group-rate").value = item.rate_multiplier;
-  $("#group-status").value = item.status;
-  $("#group-daily").value = item.daily_limit_usd ?? "";
-  $("#group-monthly").value = item.monthly_limit_usd ?? "";
-  $("#group-normal-request-mode").checked = Boolean(item.normal_request_mode);
-  $("#group-mcp-tool-names").checked = Boolean(item.mcp_tool_names_enabled);
-  $("#group-rpm-dispatch-enabled").checked = Boolean(
-    item.rpm_dispatch_enabled,
+  $("#group-id").value = item?.id || "";
+  $("#group-dialog-title").textContent = item ? "编辑分组" : "新增分组";
+  $("#group-name").value = item?.name || "";
+  $("#group-description").value = item?.description || "";
+  $("#group-rate").value = item?.rate_multiplier ?? 1;
+  $("#group-status").value = item?.status || "active";
+  $("#group-daily").value = item?.daily_limit_usd ?? "";
+  $("#group-monthly").value = item?.monthly_limit_usd ?? "";
+  $("#group-reserve-pool").checked = Boolean(item?.reserve_pool_enabled);
+  fillStrategySelect($("#group-strategy"), item?.strategy_id);
+  ensureStrategiesLoaded().then(() =>
+    fillStrategySelect($("#group-strategy"), item?.strategy_id),
   );
-  $("#group-stream-hedge-enabled").checked = Boolean(item.stream_hedge_enabled);
+  $("#group-normal-request-mode").checked = Boolean(item?.normal_request_mode);
+  $("#group-claude-code-identity").checked = Boolean(
+    item?.claude_code_identity_enabled,
+  );
+  $("#group-reject-anthropic-downgrade").checked = Boolean(
+    item?.reject_anthropic_downgrade_enabled,
+  );
+  $("#group-reject-distillation").checked = Boolean(
+    item?.reject_distillation_enabled,
+  );
+  $("#group-mcp-tool-names").checked = Boolean(item?.mcp_tool_names_enabled);
+  $("#group-passthrough-service-tier").checked = Boolean(
+    item?.service_tier_passthrough_enabled,
+  );
+  $("#group-passthrough-inference-geo").checked = Boolean(
+    item?.inference_geo_passthrough_enabled,
+  );
+  $("#group-passthrough-speed").checked = Boolean(
+    item?.speed_passthrough_enabled,
+  );
+  $("#group-passthrough-anthropic-beta").checked = Boolean(
+    item?.anthropic_beta_passthrough_enabled,
+  );
+  $("#group-rpm-dispatch-enabled").checked = Boolean(
+    item ? item.rpm_dispatch_enabled : true,
+  );
+  $("#group-overload-cooldown").value = Number(
+    item?.overload_cooldown_seconds || 10,
+  );
+  $("#group-strategy-required").checked = Boolean(item?.strategy_required_enabled);
+  $("#group-capacity-queue-enabled").checked = Boolean(
+    item?.capacity_queue_enabled,
+  );
+  $("#group-capacity-queue-timeout").value = Number(
+    item?.capacity_queue_timeout_seconds || 30,
+  );
+  $("#group-stream-hedge-enabled").checked = Boolean(item?.stream_hedge_enabled);
   $("#group-adaptive-hedge-enabled").checked = Boolean(
-    item.adaptive_hedge_enabled,
+    item?.adaptive_hedge_enabled,
   );
   showInitializedDialog("#group-dialog");
 }
@@ -1611,7 +2658,7 @@ function openUser(item = null) {
   $$('input[name="user-group"]').forEach((node) => {
     node.checked = item
       ? item.allowed_group_ids.includes(node.value)
-      : node.value === "a";
+      : node.value === availableGroups(true)[0]?.id;
   });
   const visiblePages =
     item?.visible_pages || rolePageDefaults[$("#user-role").value] || [];
@@ -1641,11 +2688,17 @@ function syncKeyGroups(selected = "") {
       : state.users.find(
           (user) => String(user.id) === String($("#key-user").value),
         );
-  const groups = owner?.role === "user" ? owner.allowed_group_ids : ["a", "b"];
+  const allowed = new Set(owner?.allowed_group_ids || []);
+  const groups = availableGroups().filter(
+    (group) =>
+      !group.reserve_pool_enabled &&
+      (owner?.role !== "user" || allowed.has(group.id)),
+  );
   $("#key-group").innerHTML = groups
-    .map((id) => `<option value="${id}">${id.toUpperCase()} 分组</option>`)
+    .map((group) => groupOption(group, selected))
     .join("");
-  $("#key-group").value = groups.includes(selected) ? selected : groups[0];
+  const ids = groups.map((group) => group.id);
+  $("#key-group").value = ids.includes(selected) ? selected : ids[0] || "";
 }
 function openKey(item = null) {
   $("#key-form").reset();
@@ -1660,7 +2713,9 @@ function openKey(item = null) {
   else if (state.users.length)
     $("#key-user").value =
       state.users.find((user) => user.role === "user")?.id || state.users[0].id;
-  syncKeyGroups(item?.group_id || state.me.allowed_group_ids?.[0] || "a");
+  syncKeyGroups(
+    item?.group_id || state.me.allowed_group_ids?.[0] || state.groups[0]?.id || "",
+  );
   showInitializedDialog("#key-dialog");
 }
 function openPrice(item = null) {
@@ -1724,6 +2779,14 @@ document.addEventListener("click", async (event) => {
     else paginationTables[key].render();
     return;
   }
+  if (target.dataset.paginationGo) {
+    const key = target.dataset.paginationGo;
+    await goToPaginationPage(
+      key,
+      document.querySelector(`input[data-pagination-jump="${key}"]`)?.value,
+    );
+    return;
+  }
   if (target.hasAttribute("data-close-dialog")) {
     target.closest("dialog")?.close();
     return;
@@ -1731,6 +2794,7 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.view) setView(target.dataset.view);
   if (target.dataset.viewJump) setView(target.dataset.viewJump);
   if (target.hasAttribute("data-open-purpose")) openPurpose();
+  if (target.hasAttribute("data-open-group")) openGroup();
   if (target.dataset.editAccount)
     openAccount(
       state.accounts.find(
@@ -1751,7 +2815,7 @@ document.addEventListener("click", async (event) => {
     );
   if (target.dataset.editGroup)
     openGroup(
-      state.dashboard.groups.find(
+      state.groups.find(
         (item) => item.id === target.dataset.editGroup,
       ),
     );
@@ -1804,32 +2868,24 @@ document.addEventListener("click", async (event) => {
   }
   try {
     if (target.dataset.purposeSwitch) {
-      const item = state.dashboard.purposes.find(
-        (value) => value.id === Number(target.dataset.purposeSwitch),
+      await switchPurposeGroup(
+        target.dataset.purposeSwitch,
+        target.dataset.group,
       );
-      await api(`/api/purposes/${item.id}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          key: item.key,
-          name: item.name,
-          description: item.description,
-          active_group_id: target.dataset.group,
-        }),
-      });
-      toast(`${item.name} 已切换到 ${target.dataset.group.toUpperCase()} 分组`);
-      await loadCore();
     }
     if (target.dataset.toggleAccount) {
       const item = state.accounts.find(
         (value) => value.id === Number(target.dataset.toggleAccount),
       );
-      await api(`/api/accounts/${item.id}`, {
-        method: "PUT",
-        body: JSON.stringify(
-          accountPayload(item, { schedulable: !item.schedulable }),
-        ),
+      const schedulable = target.dataset.resumeAccount === "true";
+      const result = await api("/api/accounts/batch-schedule", {
+        method: "POST",
+        body: JSON.stringify({ ids: [item.id], schedulable }),
       });
-      toast(item.schedulable ? "账号已暂停调度" : "账号已恢复调度");
+      if (schedulable && Number(result.updated || 0) === 0) {
+        throw new Error("账号授权或代理状态无效，无法恢复调度");
+      }
+      toast(schedulable ? "账号已恢复调度" : "账号已暂停调度");
       await loadCore();
     }
     if (target.dataset.refreshQuota) {
@@ -1839,6 +2895,45 @@ document.addEventListener("click", async (event) => {
       });
       toast("账号配额已刷新");
       await loadCore();
+    }
+    if (target.dataset.archiveAccount) {
+      const item = state.accounts.find(
+        (value) => value.id === Number(target.dataset.archiveAccount),
+      );
+      if (!item) return;
+      const confirmed = await confirmAction(
+        `归档“${item.name}”`,
+        `账号会退出当前账号池并释放 ${item.proxy_hint || "已绑定的代理 IP"}。历史计费、请求和授权记录会继续保留。`,
+        "确认归档",
+      );
+      if (!confirmed) return;
+      await api(`/api/accounts/${item.id}/archive`, {
+        method: "POST",
+        body: "{}",
+      });
+      state.selectedDeadAccountIDs.delete(item.id);
+      toast("账号已归档，代理 IP 已释放");
+      await loadCore();
+      return;
+    }
+    if (target.dataset.restoreAccount) {
+      const item = state.archivedAccounts.find(
+        (value) => value.id === Number(target.dataset.restoreAccount),
+      );
+      if (!item) return;
+      const confirmed = await confirmAction(
+        `移出归档“${item.name}”`,
+        "账号会回到账号池并保持暂停调度，旧代理 IP 不会自动重新绑定。",
+        "确认移出",
+      );
+      if (!confirmed) return;
+      await api(`/api/accounts/${item.id}/restore`, {
+        method: "POST",
+        body: "{}",
+      });
+      toast("账号已移出归档，请重新分配代理或授权后再打开调度");
+      await loadCore();
+      return;
     }
     if (target.dataset.copyKey) {
       const item = state.keys.find(
@@ -1971,6 +3066,34 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  const accountGroupChoice = event.target.closest(
+    'input[name="account-group"], input[name="batch-group"], input[name="batch-edit-group"]',
+  );
+  if (accountGroupChoice?.checked) {
+    const selectedGroup = state.groups.find(
+      (group) => group.id === accountGroupChoice.value,
+    );
+    const picker = accountGroupChoice.closest("fieldset");
+    $$(`input[name="${accountGroupChoice.name}"]`, picker).forEach((node) => {
+      const group = state.groups.find((item) => item.id === node.value);
+      if (
+        node !== accountGroupChoice &&
+        (selectedGroup?.reserve_pool_enabled || group?.reserve_pool_enabled)
+      ) {
+        node.checked = false;
+      }
+    });
+  }
+  const purpose = event.target.closest("select[data-purpose-switch]");
+  if (purpose) {
+    try {
+      await switchPurposeGroup(purpose.dataset.purposeSwitch, purpose.value);
+    } catch (error) {
+      toast(error.message, "error");
+      await loadCore();
+    }
+    return;
+  }
   const select = event.target.closest("select[data-pagination-size]");
   if (!select) return;
   const key = select.dataset.paginationSize;
@@ -1978,6 +3101,13 @@ document.addEventListener("change", async (event) => {
   resetPagination(key);
   if (state.serverPagination[key]) await loadServerPage(key);
   else paginationTables[key].render();
+});
+
+document.addEventListener("keydown", async (event) => {
+  const input = event.target.closest("input[data-pagination-jump]");
+  if (!input || event.key !== "Enter") return;
+  event.preventDefault();
+  await goToPaginationPage(input.dataset.paginationJump, input.value);
 });
 
 $("#login-form").addEventListener("submit", async (event) => {
@@ -2005,6 +3135,7 @@ $("#logout-button").addEventListener("click", async () => {
   } finally {
     state.me = null;
     state.selectedAccountIDs.clear();
+    state.selectedDeadAccountIDs.clear();
     showLogin();
   }
 });
@@ -2023,13 +3154,19 @@ $("#primary-action").addEventListener("click", () => {
   if (state.view === "proxies") openProxyImport();
   if (state.view === "access") openKey();
   if (state.view === "billing") openUsage();
+  if (state.view === "strategies") openStrategy();
 });
 $("#refresh-button").addEventListener("click", async () => {
   await loadCore();
   if (state.view === "billing") await loadBilling();
   if (state.view === "audit") await loadAudit();
   if (state.view === "daily") await loadDaily();
-  if (state.view === "authorization") await loadAuthorization();
+  if (state.view === "authorization") {
+    await loadAuthorization();
+    await loadDeauthMonitor();
+  }
+  if (state.view === "errors") await loadErrors();
+  if (state.view === "strategies") await loadStrategies();
   toast("数据已刷新");
 });
 $("#refresh-accounts").addEventListener("click", async (event) => {
@@ -2091,6 +3228,40 @@ $("#delete-selected-accounts").addEventListener("click", async (event) => {
   }
 });
 
+$("#archive-selected-accounts").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const ids = [...state.selectedDeadAccountIDs];
+  if (!ids.length) return;
+  const selectedNames = ids
+    .map((id) => state.accounts.find((item) => item.id === id)?.name)
+    .filter(Boolean);
+  const preview = selectedNames.slice(0, 3).join("、");
+  const remainder = selectedNames.length > 3 ? ` 等 ${ids.length} 个账号` : "";
+  const confirmed = await confirmAction(
+    `归档 ${ids.length} 个死亡账号`,
+    `将归档 ${preview}${remainder}，立即释放各账号当前绑定的代理 IP，并保留历史计费、请求和授权记录。`,
+    `确认归档 ${ids.length} 个`,
+  );
+  if (!confirmed) return;
+  try {
+    button.disabled = true;
+    const result = await api("/api/accounts/batch-archive", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    state.selectedDeadAccountIDs.clear();
+    toast(
+      `已归档 ${result.archived} 个账号并释放 IP${result.skipped ? `，跳过 ${result.skipped} 个非死亡账号` : ""}`,
+      result.skipped ? "error" : "success",
+    );
+    await loadCore();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    syncDeadSelection();
+  }
+});
+
 async function updateSelectedAccountSchedule(schedulable) {
   const ids = selectedAccountIDs();
   if (!ids.length) return;
@@ -2132,6 +3303,10 @@ $("#schedule-selected-accounts").addEventListener("click", () =>
 $("#pause-selected-accounts").addEventListener("click", () =>
   updateSelectedAccountSchedule(false),
 );
+$("#edit-selected-accounts").addEventListener("click", openBatchAccountEdit);
+$$('[data-batch-edit-apply]').forEach((node) =>
+  node.addEventListener("change", syncBatchEditControls),
+);
 $("#add-proxy-pool").addEventListener("click", () => openPool());
 $("#import-proxies").addEventListener("click", openProxyImport);
 $("#test-proxies-batch").addEventListener("click", async (event) => {
@@ -2166,6 +3341,40 @@ $("#test-proxies-batch").addEventListener("click", async (event) => {
     label.textContent = "批量检测";
   }
 });
+$("#delete-proxies-batch").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const ids = [...state.selectedProxyIDs];
+  if (!ids.length) return;
+  const names = ids
+    .map((id) => state.proxies.find((item) => item.id === id)?.name)
+    .filter(Boolean);
+  const preview = names.slice(0, 3).join("、");
+  const suffix = names.length > 3 ? ` 等 ${ids.length} 个代理` : "";
+  const confirmed = await confirmAction(
+    `删除 ${ids.length} 个代理`,
+    `将删除 ${preview}${suffix}。已占用代理会触发自动账号换 IP，无法换 IP 的账号会暂停调度。`,
+    `确认删除 ${ids.length} 个`,
+  );
+  if (!confirmed) return;
+  try {
+    button.disabled = true;
+    const result = await api("/api/proxies/batch-delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    state.selectedProxyIDs.clear();
+    resetPagination("proxies");
+    toast(
+      `已删除 ${result.deleted} 个代理，换 IP ${result.reassigned_accounts} 个，暂停 ${result.paused_accounts} 个账号`,
+      result.paused_accounts ? "error" : "success",
+    );
+    await loadCore();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    syncProxySelection();
+  }
+});
 $("#add-user").addEventListener("click", () => openUser());
 $("#add-api-key").addEventListener("click", () => openKey());
 $("#add-price").addEventListener("click", () => openPrice());
@@ -2185,7 +3394,25 @@ $("#apply-authorization-filters").addEventListener(
     loadAuthorization();
   },
 );
-$("#daily-days").addEventListener("change", () => {
+$("#deauth-window").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-window]");
+  if (!button) return;
+  state.deauthWindow = Number(button.dataset.window);
+  $$("#deauth-window button").forEach((node) =>
+    node.classList.toggle("active", node === button),
+  );
+  loadDeauthMonitor();
+});
+$("#refresh-deauth").addEventListener("click", async () => {
+  await loadDeauthMonitor();
+  toast("掉授权监控已刷新");
+});
+$("#apply-error-filters").addEventListener("click", () => {
+  resetPagination("errors");
+  loadErrors();
+});
+$("#insight-status").addEventListener("change", loadErrorInsights);
+$("#apply-daily-range").addEventListener("click", () => {
   resetPagination("daily");
   loadDaily();
 });
@@ -2207,6 +3434,23 @@ $("#account-status-tabs").addEventListener("click", (event) => {
   renderAccounts();
   loadAccountSummary();
 });
+$("#dead-status-tabs").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-dead-status]");
+  if (!button) return;
+  state.deadStatus = button.dataset.deadStatus;
+  state.selectedDeadAccountIDs.clear();
+  resetPagination("dead");
+  $$("#dead-status-tabs button").forEach((node) =>
+    node.classList.toggle("active", node === button),
+  );
+  renderDeadAccounts();
+});
+$("#dead-search").addEventListener("input", (event) => {
+  state.deadSearch = event.target.value;
+  state.selectedDeadAccountIDs.clear();
+  resetPagination("dead");
+  renderDeadAccounts();
+});
 $("#select-all-accounts").addEventListener("change", (event) => {
   const search = state.accountSearch.toLowerCase();
   state.accounts
@@ -2217,7 +3461,7 @@ $("#select-all-accounts").addEventListener("change", (event) => {
           `${item.name} ${item.notes} ${item.credential_hint}`
             .toLowerCase()
             .includes(search)) &&
-        (!state.accountStatus || item.dispatch_status === state.accountStatus),
+        accountMatchesStatus(item, state.accountStatus),
     )
     .forEach((item) =>
       event.target.checked
@@ -2237,12 +3481,53 @@ $("#accounts-body").addEventListener("change", (event) => {
     syncAccountSelection();
   }
 });
+$("#select-all-dead").addEventListener("change", (event) => {
+  const pending = state.accounts.filter(
+    (item) =>
+      item.dispatch_status === "error" && deadAccountMatchesSearch(item),
+  );
+  pending.forEach((item) =>
+    event.target.checked
+      ? state.selectedDeadAccountIDs.add(item.id)
+      : state.selectedDeadAccountIDs.delete(item.id),
+  );
+  renderDeadAccounts();
+});
+$("#dead-accounts-body").addEventListener("change", (event) => {
+  if (!event.target.matches("input[data-dead-select]")) return;
+  const id = Number(event.target.dataset.deadSelect);
+  if (event.target.checked) state.selectedDeadAccountIDs.add(id);
+  else state.selectedDeadAccountIDs.delete(id);
+  syncDeadSelection();
+});
 $("#account-from").addEventListener("change", loadAccountSummary);
 $("#account-to").addEventListener("change", loadAccountSummary);
 $("#proxy-pool-filter").addEventListener("change", (event) => {
   state.proxyPoolFilter = event.target.value;
+  state.selectedProxyIDs.clear();
   resetPagination("proxies");
   renderProxies();
+});
+$("#proxy-search").addEventListener("input", (event) => {
+  state.proxySearch = event.target.value;
+  state.selectedProxyIDs.clear();
+  resetPagination("proxies");
+  renderProxies();
+});
+$("#select-all-proxies").addEventListener("change", (event) => {
+  filteredProxies().forEach((item) =>
+    event.target.checked
+      ? state.selectedProxyIDs.add(item.id)
+      : state.selectedProxyIDs.delete(item.id),
+  );
+  renderProxies();
+});
+$("#proxies-body").addEventListener("change", (event) => {
+  if (!event.target.matches("input[data-proxy-select]")) return;
+  const id = Number(event.target.dataset.proxySelect);
+  if (event.target.checked) state.selectedProxyIDs.add(id);
+  else state.selectedProxyIDs.delete(id);
+  syncProxySelection();
 });
 $("#account-proxy-pool").addEventListener("change", (event) => {
   fillProxyOptions(event.target.value);
@@ -2259,6 +3544,7 @@ $("#account-proxy-text").addEventListener("input", () => {
     !hasPool || hasManualProxy || $("#account-auto-proxy").checked;
 });
 $("#account-rpm-enabled").addEventListener("change", syncAccountControls);
+$("#account-rpm-strategy").addEventListener("change", syncAccountControls);
 $("#account-auth-type").addEventListener("change", syncAccountAuthFields);
 $("#account-session-key").addEventListener("input", syncAccountAuthFields);
 $("#proxy-pool-source").addEventListener("change", toggleAPISource);
@@ -2267,11 +3553,12 @@ $("#key-user").addEventListener("change", () => syncKeyGroups());
 
 $("#session-auth-submit").addEventListener("click", async () => {
   const button = $("#session-auth-submit");
+  const finishRequest = beginButtonRequest(button, "正在更新授权…");
+  if (!finishRequest) return;
   try {
     const accountID = $("#auth-account-id").value;
     const sessionKey = $("#auth-session-key").value.trim();
     if (!sessionKey) throw new Error("请输入 Claude Session Key");
-    button.disabled = true;
     await api(`/api/accounts/${accountID}/session-auth`, {
       method: "POST",
       body: JSON.stringify({
@@ -2285,13 +3572,14 @@ $("#session-auth-submit").addEventListener("click", async () => {
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    button.disabled = false;
+    finishRequest();
   }
 });
 $("#oauth-start").addEventListener("click", async () => {
   const button = $("#oauth-start");
+  const finishRequest = beginButtonRequest(button, "正在生成…");
+  if (!finishRequest) return;
   try {
-    button.disabled = true;
     const result = await api(
       `/api/accounts/${$("#auth-account-id").value}/auth-url`,
       { method: "POST", body: JSON.stringify({ mode: $("#auth-mode").value }) },
@@ -2308,7 +3596,7 @@ $("#oauth-start").addEventListener("click", async () => {
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    button.disabled = false;
+    finishRequest();
   }
 });
 $("#copy-oauth-link").addEventListener("click", async () => {
@@ -2321,10 +3609,11 @@ $("#copy-oauth-link").addEventListener("click", async () => {
 });
 $("#oauth-exchange").addEventListener("click", async () => {
   const button = $("#oauth-exchange");
+  const finishRequest = beginButtonRequest(button, "正在保存授权…");
+  if (!finishRequest) return;
   try {
     if (!state.oauthSessionID || !$("#oauth-code").value.trim())
       throw new Error("请先完成 OAuth 并填写授权码");
-    button.disabled = true;
     await api(`/api/accounts/${$("#auth-account-id").value}/oauth-exchange`, {
       method: "POST",
       body: JSON.stringify({
@@ -2338,13 +3627,15 @@ $("#oauth-exchange").addEventListener("click", async () => {
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    button.disabled = false;
+    finishRequest();
   }
 });
 
 $("#batch-auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = $("#batch-auth-submit");
+  const finishRequest = beginButtonRequest(button, "正在准备授权…");
+  if (!finishRequest) return;
   try {
     const sessionKeys = $("#batch-session-keys")
       .value.split(/[\n\r,]+/)
@@ -2355,7 +3646,6 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
     );
     if (!sessionKeys.length) throw new Error("至少输入一个 Claude Session Key");
     if (!groupIDs.length) throw new Error("至少选择一个分组");
-    button.disabled = true;
     button.querySelector("span").textContent = `正在授权 0 / ${sessionKeys.length}`;
     const result = await api("/api/accounts/batch-authorize", {
       method: "POST",
@@ -2367,31 +3657,97 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
         account_price: Number($("#batch-account-price").value || 0),
         concurrency: Number($("#batch-concurrency").value || 10),
         base_rpm: Number($("#batch-base-rpm").value || 0),
+        rpm_strategy: $("#batch-rpm-strategy").value,
+        rpm_sticky_buffer: Number($("#batch-rpm-buffer").value || 0),
+        strategy_id: strategySelectPayload($("#batch-strategy")),
       }),
     });
     $("#batch-result-panel").hidden = false;
     $("#batch-result-summary").textContent =
-      `${result.success} 成功 · ${result.skipped || 0} 已存在 · ${result.failed} 失败 · 共 ${result.total}`;
+      `${result.success} 成功 · ${result.updated || 0} 更新 · ${result.skipped || 0} 跳过 · ${result.failed} 失败 · 共 ${result.total}`;
     state.batchResults = result.items;
     resetPagination("batch");
     renderBatchResults();
     toast(
-      `批量授权完成：成功 ${result.success}，已存在 ${result.skipped || 0}，失败 ${result.failed}`,
+      `批量授权完成：成功 ${result.success}，更新 ${result.updated || 0}，失败 ${result.failed}`,
     );
     await loadCore();
   } catch (error) {
     toast(error.message, "error");
   } finally {
+    finishRequest();
+  }
+});
+
+$("#batch-account-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#batch-account-submit");
+  const ids = selectedAccountIDs();
+  if (!ids.length) {
+    $("#batch-account-dialog").close();
+    return;
+  }
+  const applies = (key) =>
+    $(`[data-batch-edit-apply="${key}"]`).checked;
+  const payload = { ids };
+  const numberFields = [
+    ["concurrency", "#batch-edit-concurrency"],
+    ["base_rpm", "#batch-edit-base-rpm"],
+    ["rpm_sticky_buffer", "#batch-edit-rpm-buffer"],
+    ["priority", "#batch-edit-priority"],
+    ["rate_multiplier", "#batch-edit-rate"],
+    ["account_price", "#batch-edit-price"],
+  ];
+  numberFields.forEach(([key, selector]) => {
+    if (applies(key)) payload[key] = Number($(selector).value);
+  });
+  if (applies("rpm_strategy"))
+    payload.rpm_strategy = $("#batch-edit-rpm-strategy").value;
+  if (applies("user_msg_queue_mode"))
+    payload.user_msg_queue_mode = $("#batch-edit-queue-mode").value;
+  if (applies("strategy_id")) {
+    if (!state.strategiesLoaded) {
+      toast("策略列表不可用，无法批量修改调度策略", "error");
+      return;
+    }
+    payload.strategy_id = Number($("#batch-edit-strategy").value || 0);
+  }
+  if (applies("group_ids"))
+    payload.group_ids = $$('input[name="batch-edit-group"]:checked').map(
+      (node) => node.value,
+    );
+  if (Object.keys(payload).length === 1) {
+    toast("至少勾选一个需要应用的字段", "error");
+    return;
+  }
+  if (applies("group_ids") && !payload.group_ids.length) {
+    toast("批量修改分组时至少选择一个分组", "error");
+    return;
+  }
+  try {
+    button.disabled = true;
+    const result = await api("/api/accounts/batch-update", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    $("#batch-account-dialog").close();
+    state.selectedAccountIDs.clear();
+    await loadCore();
+    toast(`已更新 ${result.updated} 个账号的共有配置`);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
     button.disabled = false;
-    button.querySelector("span").textContent = "开始批量授权";
+    syncAccountSelection();
   }
 });
 
 $("#account-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = $("#account-submit");
+  const finishRequest = beginButtonRequest(button);
+  if (!finishRequest) return;
   try {
-    button.disabled = true;
     const id = $("#account-id").value;
     const sessionKey =
       !id && $("#account-auth-type").value !== "api_key"
@@ -2439,6 +3795,7 @@ $("#account-form").addEventListener("submit", async (event) => {
         : 0,
       rpm_strategy: $("#account-rpm-strategy").value,
       rpm_sticky_buffer: Number($("#account-rpm-buffer").value),
+      strategy_id: strategySelectPayload($("#account-strategy")),
       user_msg_queue_mode: $("#account-queue-mode").value,
     };
     if (sessionKey) payload.session_key = sessionKey;
@@ -2459,7 +3816,7 @@ $("#account-form").addEventListener("submit", async (event) => {
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    button.disabled = false;
+    finishRequest();
     syncAccountAuthFields();
   }
 });
@@ -2508,8 +3865,8 @@ $("#group-form").addEventListener("submit", async (event) => {
     const optional = (selector) =>
       $(selector).value === "" ? null : Number($(selector).value);
     const id = $("#group-id").value;
-    await api(`/api/groups/${id}`, {
-      method: "PUT",
+    await api(id ? `/api/groups/${id}` : "/api/groups", {
+      method: id ? "PUT" : "POST",
       body: JSON.stringify({
         name: $("#group-name").value,
         description: $("#group-description").value,
@@ -2517,18 +3874,149 @@ $("#group-form").addEventListener("submit", async (event) => {
         status: $("#group-status").value,
         daily_limit_usd: optional("#group-daily"),
         monthly_limit_usd: optional("#group-monthly"),
+        reserve_pool_enabled: $("#group-reserve-pool").checked,
         normal_request_mode: $("#group-normal-request-mode").checked,
+        claude_code_identity_enabled: $("#group-claude-code-identity").checked,
+        reject_anthropic_downgrade_enabled: $(
+          "#group-reject-anthropic-downgrade",
+        ).checked,
+        reject_distillation_enabled: $("#group-reject-distillation").checked,
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
         adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
         rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
         mcp_tool_names_enabled: $("#group-mcp-tool-names").checked,
+        service_tier_passthrough_enabled: $(
+          "#group-passthrough-service-tier",
+        ).checked,
+        inference_geo_passthrough_enabled: $(
+          "#group-passthrough-inference-geo",
+        ).checked,
+        speed_passthrough_enabled: $("#group-passthrough-speed").checked,
+        anthropic_beta_passthrough_enabled: $(
+          "#group-passthrough-anthropic-beta",
+        ).checked,
+        overload_cooldown_seconds: Number($("#group-overload-cooldown").value),
+        strategy_required_enabled: $("#group-strategy-required").checked,
+        capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,
+        capacity_queue_timeout_seconds: Number(
+          $("#group-capacity-queue-timeout").value,
+        ),
+        strategy_id: strategySelectPayload($("#group-strategy")),
       }),
     });
     $("#group-dialog").close();
-    toast("分组已更新");
+    toast(id ? "分组已更新" : "分组已创建");
     await loadCore();
   } catch (error) {
     toast(error.message, "error");
+  }
+});
+$("#add-strategy").addEventListener("click", () => openStrategy());
+$("#refresh-strategies").addEventListener("click", async () => {
+  await loadStrategies();
+  toast("策略数据已刷新");
+});
+$("#strategy-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const id = $("#strategy-id").value;
+    await api(id ? `/api/strategies/${id}` : "/api/strategies", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify({
+        name: $("#strategy-name").value,
+        description: $("#strategy-description").value,
+        rpm_limit: Number($("#strategy-rpm").value),
+        tpm_limit: Number($("#strategy-tpm").value),
+        concurrency_limit: Number($("#strategy-concurrency").value),
+        rpm_strategy: $("#strategy-rpm-mode").value,
+        rpm_sticky_buffer: Number($("#strategy-buffer").value),
+        dispatch_mode: $("#strategy-dispatch-mode").value,
+      }),
+    });
+    $("#strategy-dialog").close();
+    toast(id ? "策略已更新" : "策略已创建");
+    await loadStrategies();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+$("#strategy-cards").addEventListener("click", async (event) => {
+  const bindButton = event.target.closest("[data-bind-strategy]");
+  if (bindButton) {
+    await openStrategyAccountDialog(bindButton.dataset.bindStrategy, "bind");
+    return;
+  }
+  const unbindButton = event.target.closest("[data-unbind-strategy]");
+  if (unbindButton) {
+    await openStrategyAccountDialog(unbindButton.dataset.unbindStrategy, "unbind");
+    return;
+  }
+  const editButton = event.target.closest("[data-edit-strategy]");
+  if (editButton) {
+    const item = state.strategies.find(
+      (entry) => String(entry.id) === editButton.dataset.editStrategy,
+    );
+    if (item) openStrategy(item);
+    return;
+  }
+  const deleteButton = event.target.closest("[data-delete-strategy]");
+  if (!deleteButton) return;
+  const item = state.strategies.find(
+    (entry) => String(entry.id) === deleteButton.dataset.deleteStrategy,
+  );
+  if (!item) return;
+  const confirmed = await confirmAction(
+    `删除策略“${item.name}”`,
+    "仍被分组或账号绑定的策略无法删除，请先在分组/账号编辑中解绑。",
+    "确认删除",
+  );
+  if (!confirmed) return;
+  try {
+    await api(`/api/strategies/${item.id}`, { method: "DELETE" });
+    toast("策略已删除");
+    await loadStrategies();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+$("#strategy-account-search").addEventListener("input", () => {
+  state.selectedStrategyAccountIDs.clear();
+  renderStrategyAccountList();
+});
+$("#strategy-account-list").addEventListener("change", (event) => {
+  if (!event.target.matches("input[data-strategy-account-select]")) return;
+  const id = Number(event.target.dataset.strategyAccountSelect);
+  if (event.target.checked) state.selectedStrategyAccountIDs.add(id);
+  else state.selectedStrategyAccountIDs.delete(id);
+  renderStrategyAccountList();
+});
+$("#strategy-account-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const ids = [...state.selectedStrategyAccountIDs];
+  if (!ids.length) {
+    toast("请选择账号", "error");
+    return;
+  }
+  const strategyID = Number($("#strategy-account-id").value);
+  const mode = $("#strategy-account-mode").value;
+  const button = $("#strategy-account-submit");
+  try {
+    button.disabled = true;
+    await api("/api/accounts/batch-update", {
+      method: "POST",
+      body: JSON.stringify({
+        ids,
+        strategy_id: mode === "unbind" ? 0 : strategyID,
+      }),
+    });
+    $("#strategy-account-dialog").close();
+    state.selectedStrategyAccountIDs.clear();
+    toast(mode === "unbind" ? "账号已移出策略池" : "账号已导入策略池");
+    await Promise.all([loadAccounts(), loadStrategies()]);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
   }
 });
 $("#proxy-pool-form").addEventListener("submit", async (event) => {
@@ -2693,12 +4181,17 @@ $("#usage-form").addEventListener("submit", async (event) => {
 function initializeDates() {
   const now = new Date();
   const first = new Date(now.getFullYear(), now.getMonth(), 1);
+  const dailyStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
   const local = (date) =>
     new Date(date.getTime() - date.getTimezoneOffset() * 60000)
       .toISOString()
-      .slice(0, 10);
+      .slice(0, 16);
+  const localDate = (date) => local(date).slice(0, 10);
   const from = local(first);
   const to = local(now);
+  $("#daily-from").value = localDate(dailyStart);
+  $("#daily-to").value = localDate(now);
+  $("#daily-to").max = localDate(now);
   $("#billing-from").value = from;
   $("#billing-to").value = to;
   $("#account-from").value = from;
@@ -2707,6 +4200,8 @@ function initializeDates() {
   $("#audit-to").value = to;
   $("#authorization-from").value = from;
   $("#authorization-to").value = to;
+  $("#error-from").value = from;
+  $("#error-to").value = to;
 }
 initializeAccountAutoRefresh();
 initializeRealtimeRefresh();

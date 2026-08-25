@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,22 +48,24 @@ type proxyPoolInput struct {
 }
 
 type proxyRecord struct {
-	ID          int64  `json:"id"`
-	PoolID      int64  `json:"pool_id"`
-	PoolName    string `json:"pool_name"`
-	Name        string `json:"name"`
-	Protocol    string `json:"protocol"`
-	Host        string `json:"host"`
-	Port        int    `json:"port"`
-	Username    string `json:"username"`
-	PasswordSet bool   `json:"password_set"`
-	Status      string `json:"status"`
-	ExitIP      string `json:"exit_ip"`
-	LatencyMS   *int64 `json:"latency_ms"`
-	LastTestAt  string `json:"last_test_at"`
-	AssignedTo  string `json:"assigned_to"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID               int64  `json:"id"`
+	PoolID           int64  `json:"pool_id"`
+	PoolName         string `json:"pool_name"`
+	Name             string `json:"name"`
+	Protocol         string `json:"protocol"`
+	Host             string `json:"host"`
+	Port             int    `json:"port"`
+	Username         string `json:"username"`
+	PasswordSet      bool   `json:"password_set"`
+	Status           string `json:"status"`
+	ExitIP           string `json:"exit_ip"`
+	LatencyMS        *int64 `json:"latency_ms"`
+	LastTestAt       string `json:"last_test_at"`
+	LastError        string `json:"last_error"`
+	AssignedTo       string `json:"assigned_to"`
+	UsedAccountCount int    `json:"used_account_count"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 type parsedProxy struct {
@@ -89,7 +92,34 @@ type proxyBatchTestResponse struct {
 	Items   []proxyTestResult `json:"items"`
 }
 
+type proxyBatchDeleteInput struct {
+	IDs []int64 `json:"ids"`
+}
+
+type proxyBatchDeleteResponse struct {
+	Matched            int64 `json:"matched"`
+	Deleted            int64 `json:"deleted"`
+	ReassignedAccounts int   `json:"reassigned_accounts"`
+	PausedAccounts     int   `json:"paused_accounts"`
+}
+
 var proxyTestEndpoint = "https://api.ipify.org?format=json"
+
+const (
+	defaultUpstreamResponseHeaderTimeout = 15 * time.Minute
+	defaultUpstreamRequestTimeout        = 0
+	deadProxyPoolKind                    = "dead"
+	deadProxyPoolName                    = "死亡 IP 池"
+	deadProxyReason                      = "死亡账号释放，禁止重新分配"
+)
+
+type upstreamProxyClientKey struct {
+	proxyURLHash          string
+	responseHeaderTimeout time.Duration
+	requestTimeout        time.Duration
+}
+
+var upstreamProxyClients sync.Map
 
 func (a *app) migrateProxyFeatures() error {
 	statements := []string{
@@ -99,7 +129,7 @@ func (a *app) migrateProxyFeatures() error {
 			source_type TEXT NOT NULL DEFAULT 'manual' CHECK (source_type IN ('manual', 'api')),
 			api_url TEXT NOT NULL DEFAULT '',
 			api_headers_json TEXT NOT NULL DEFAULT '{}',
-			default_protocol TEXT NOT NULL DEFAULT 'socks5' CHECK (default_protocol IN ('socks5', 'http', 'https')),
+			default_protocol TEXT NOT NULL DEFAULT 'socks5' CHECK (default_protocol IN (` + proxyProtocolCheckList + `)),
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			last_sync_at TEXT,
 			last_error TEXT NOT NULL DEFAULT '',
@@ -111,7 +141,7 @@ func (a *app) migrateProxyFeatures() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			pool_id INTEGER NOT NULL REFERENCES proxy_pools(id) ON DELETE CASCADE,
 			name TEXT NOT NULL,
-			protocol TEXT NOT NULL CHECK (protocol IN ('socks5', 'http', 'https')),
+			protocol TEXT NOT NULL CHECK (protocol IN (` + proxyProtocolCheckList + `)),
 			host TEXT NOT NULL,
 			port INTEGER NOT NULL CHECK (port > 0 AND port < 65536),
 			username TEXT NOT NULL DEFAULT '',
@@ -120,6 +150,7 @@ func (a *app) migrateProxyFeatures() error {
 			exit_ip TEXT NOT NULL DEFAULT '',
 			latency_ms INTEGER,
 			last_test_at TEXT,
+			last_error TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			updated_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			deleted_at TEXT
@@ -142,11 +173,32 @@ func (a *app) migrateProxyFeatures() error {
 			account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
 			requests INTEGER NOT NULL DEFAULT 0 CHECK (requests >= 0)
 		)`,
+		`CREATE TABLE IF NOT EXISTS proxy_account_history (
+			proxy_id INTEGER NOT NULL REFERENCES proxies(id) ON DELETE CASCADE,
+			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			first_bound_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
+			last_bound_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
+			bind_count INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (proxy_id, account_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_proxy_account_history_account ON proxy_account_history(account_id, last_bound_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := a.db.Exec(statement); err != nil {
 			return fmt.Errorf("migrate proxy features: %w", err)
 		}
+	}
+	if err := addColumnIfMissing(a.db, "proxies", "last_error", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "proxy_pools", "system_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_pools_system_kind ON proxy_pools(system_kind) WHERE system_kind != ''`); err != nil {
+		return fmt.Errorf("index system proxy pools: %w", err)
+	}
+	if err := a.migrateProxyProtocols(); err != nil {
+		return err
 	}
 	// In-flight counters are process leases. A previous process cannot release
 	// them after a crash or restart, so never carry them into this process.
@@ -167,8 +219,169 @@ func (a *app) migrateProxyFeatures() error {
 			return err
 		}
 	}
+	triggers := []string{
+		`CREATE TRIGGER IF NOT EXISTS trg_account_proxy_history_insert
+		AFTER INSERT ON accounts WHEN NEW.proxy_id IS NOT NULL
+		BEGIN
+			INSERT INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+			VALUES (NEW.proxy_id, NEW.id, NEW.created_at, NEW.updated_at, 1)
+			ON CONFLICT(proxy_id, account_id) DO UPDATE SET
+				last_bound_at = excluded.last_bound_at,
+				bind_count = proxy_account_history.bind_count + 1;
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_account_proxy_history_update
+		AFTER UPDATE OF proxy_id ON accounts
+		WHEN NEW.proxy_id IS NOT NULL AND (OLD.proxy_id IS NULL OR OLD.proxy_id != NEW.proxy_id)
+		BEGIN
+			INSERT INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+			VALUES (NEW.proxy_id, NEW.id, NEW.updated_at, NEW.updated_at, 1)
+			ON CONFLICT(proxy_id, account_id) DO UPDATE SET
+				last_bound_at = excluded.last_bound_at,
+				bind_count = proxy_account_history.bind_count + 1;
+		END`,
+	}
+	for _, trigger := range triggers {
+		if _, err := a.db.Exec(trigger); err != nil {
+			return fmt.Errorf("migrate proxy assignment history: %w", err)
+		}
+	}
+	if _, err := a.db.Exec(`INSERT OR IGNORE INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+		SELECT proxy_id, id, created_at, updated_at, 1 FROM accounts WHERE proxy_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("backfill proxy assignment history: %w", err)
+	}
 	if _, err := a.db.Exec(`INSERT OR IGNORE INTO proxy_pools (id, name, source_type, default_protocol) VALUES (1, 'default', 'manual', 'socks5')`); err != nil {
 		return err
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := ensureDeadProxyPool(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create dead proxy pool: %w", err)
+	}
+	return nil
+}
+
+func ensureDeadProxyPool(tx *sql.Tx) (int64, error) {
+	var id int64
+	err := tx.QueryRow(`SELECT id FROM proxy_pools WHERE system_kind = ? ORDER BY id LIMIT 1`, deadProxyPoolKind).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO proxy_pools
+			(name, source_type, api_headers_json, default_protocol, status, system_kind)
+			VALUES (?, 'manual', '{}', 'socks5', 'disabled', ?)`, deadProxyPoolName, deadProxyPoolKind); err != nil {
+			return 0, fmt.Errorf("insert dead proxy pool: %w", err)
+		}
+		err = tx.QueryRow(`SELECT id FROM proxy_pools WHERE name = ?`, deadProxyPoolName).Scan(&id)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find dead proxy pool: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE proxy_pools SET
+		system_kind = ?, source_type = 'manual', api_url = '', api_headers_json = '{}',
+		status = 'disabled', last_error = '', deleted_at = NULL, updated_at = `+nowSQL+`
+		WHERE id = ?`, deadProxyPoolKind, id); err != nil {
+		return 0, fmt.Errorf("lock dead proxy pool: %w", err)
+	}
+	return id, nil
+}
+
+func (a *app) migrateDeadProxyAssignments() error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT DISTINCT archived_proxy_id FROM accounts
+		WHERE archived_at IS NOT NULL AND archived_proxy_id IS NOT NULL AND deleted_at IS NULL`)
+	if err != nil {
+		return fmt.Errorf("list archived account proxies: %w", err)
+	}
+	proxyIDs := []int64{}
+	for rows.Next() {
+		var proxyID int64
+		if err := rows.Scan(&proxyID); err != nil {
+			rows.Close()
+			return err
+		}
+		proxyIDs = append(proxyIDs, proxyID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := quarantineProxyIDs(tx, proxyIDs); err != nil {
+		return fmt.Errorf("migrate archived account proxies: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit dead proxy migration: %w", err)
+	}
+	return nil
+}
+
+func quarantineProxyIDs(tx *sql.Tx, proxyIDs []int64) error {
+	if len(proxyIDs) == 0 {
+		return nil
+	}
+	deadPoolID, err := ensureDeadProxyPool(tx)
+	if err != nil {
+		return err
+	}
+	for _, proxyID := range proxyIDs {
+		var liveOwners int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM accounts
+			WHERE proxy_id = ? AND deleted_at IS NULL AND archived_at IS NULL`, proxyID).Scan(&liveOwners); err != nil {
+			return err
+		}
+		if liveOwners > 0 {
+			continue
+		}
+
+		var duplicateID int64
+		err := tx.QueryRow(`SELECT target.id
+			FROM proxies source
+			JOIN proxies target ON target.pool_id = ? AND target.id != source.id
+				AND target.protocol = source.protocol AND target.host = source.host AND target.port = source.port
+				AND target.username = source.username AND target.password = source.password
+			WHERE source.id = ? AND source.deleted_at IS NULL AND target.deleted_at IS NULL
+			LIMIT 1`, deadPoolID, proxyID).Scan(&duplicateID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			if _, err := tx.Exec(`UPDATE accounts SET archived_proxy_id = ?
+				WHERE archived_proxy_id = ? AND archived_at IS NOT NULL`, duplicateID, proxyID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO proxy_account_history
+				(proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+				SELECT ?, account_id, first_bound_at, last_bound_at, bind_count
+				FROM proxy_account_history WHERE proxy_id = ?
+				ON CONFLICT(proxy_id, account_id) DO UPDATE SET
+					first_bound_at = MIN(proxy_account_history.first_bound_at, excluded.first_bound_at),
+					last_bound_at = MAX(proxy_account_history.last_bound_at, excluded.last_bound_at),
+					bind_count = proxy_account_history.bind_count + excluded.bind_count`, duplicateID, proxyID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM proxy_account_history WHERE proxy_id = ?`, proxyID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`UPDATE proxies SET status = 'disabled', last_error = ?, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+`
+				WHERE id = ? AND deleted_at IS NULL`, deadProxyReason, proxyID); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if _, err := tx.Exec(`UPDATE proxies SET pool_id = ?, status = 'disabled', last_error = ?, updated_at = `+nowSQL+`
+			WHERE id = ? AND deleted_at IS NULL`, deadPoolID, deadProxyReason, proxyID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -214,8 +427,11 @@ func normalizeProxyPool(input *proxyPoolInput) error {
 	if input.APIHeaders == "" {
 		input.APIHeaders = "{}"
 	}
-	if input.Name == "" || (input.SourceType != "manual" && input.SourceType != "api") || (input.DefaultProtocol != "socks5" && input.DefaultProtocol != "http" && input.DefaultProtocol != "https") || (input.Status != "active" && input.Status != "disabled") {
+	if input.Name == "" || (input.SourceType != "manual" && input.SourceType != "api") || !validProxyProtocol(input.DefaultProtocol) || (input.Status != "active" && input.Status != "disabled") {
 		return errors.New("invalid proxy pool fields")
+	}
+	if input.Name == deadProxyPoolName {
+		return errors.New("proxy pool name is reserved")
 	}
 	var headers map[string]string
 	if err := json.Unmarshal([]byte(input.APIHeaders), &headers); err != nil {
@@ -230,10 +446,21 @@ func normalizeProxyPool(input *proxyPoolInput) error {
 	return nil
 }
 
-const proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_headers_json, p.default_protocol, p.status,
-	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.deleted_at IS NULL),
-	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.status = 'active' AND x.deleted_at IS NULL),
-	(SELECT COUNT(DISTINCT a.id) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.proxy_id IS NOT NULL AND a.deleted_at IS NULL),
+func proxyNotQuarantinedPredicate(alias string) string {
+	return `NOT EXISTS (SELECT 1 FROM proxies dead_proxy
+		JOIN proxy_pools dead_pool ON dead_pool.id = dead_proxy.pool_id
+		WHERE dead_pool.system_kind = 'dead' AND dead_proxy.deleted_at IS NULL
+		AND dead_proxy.protocol = ` + alias + `.protocol AND dead_proxy.host = ` + alias + `.host
+		AND dead_proxy.port = ` + alias + `.port AND dead_proxy.username = ` + alias + `.username
+		AND dead_proxy.password = ` + alias + `.password)`
+}
+
+var proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_headers_json, p.default_protocol, p.status,
+	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.deleted_at IS NULL AND ` + proxyNotQuarantinedPredicate("x") + `),
+	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.status = 'active' AND x.deleted_at IS NULL
+		AND ` + proxyNotQuarantinedPredicate("x") + `
+		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL AND a.archived_at IS NULL)),
+	(SELECT COUNT(DISTINCT a.id) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.proxy_id IS NOT NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL),
 	p.last_sync_at, p.last_error, p.created_at, p.updated_at FROM proxy_pools p`
 
 func scanProxyPool(row scanner) (proxyPool, error) {
@@ -245,12 +472,12 @@ func scanProxyPool(row scanner) (proxyPool, error) {
 }
 
 func (a *app) handleProxyPools(w http.ResponseWriter, r *http.Request) {
-	query := proxyPoolSelect + ` WHERE p.deleted_at IS NULL`
+	query := proxyPoolSelect + ` WHERE p.deleted_at IS NULL AND p.system_kind = ''`
 	args := []any{}
 	user := currentUser(r)
 	if user.Role == "user" {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
-		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_pool_id = p.id AND scope_account.deleted_at IS NULL AND ` + condition + `)`
+		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_pool_id = p.id AND scope_account.deleted_at IS NULL AND scope_account.archived_at IS NULL AND ` + condition + `)`
 		args = append(args, scopeArgs...)
 	}
 	query += ` ORDER BY p.id`
@@ -319,12 +546,12 @@ func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, err := a.db.Exec(`UPDATE proxy_pools SET name = ?, source_type = ?, api_url = ?, api_headers_json = ?, default_protocol = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, id)
+	_, err := a.db.Exec(`UPDATE proxy_pools SET name = ?, source_type = ?, api_url = ?, api_headers_json = ?, default_protocol = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	item, err := scanProxyPool(a.db.QueryRow(proxyPoolSelect+` WHERE p.id = ? AND p.deleted_at IS NULL`, id))
+	item, err := scanProxyPool(a.db.QueryRow(proxyPoolSelect+` WHERE p.id = ? AND p.deleted_at IS NULL AND p.system_kind = ''`, id))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "proxy pool not found")
 		return
@@ -338,7 +565,7 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var assigned int
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE proxy_pool_id = ? AND deleted_at IS NULL`, id).Scan(&assigned)
+	_ = a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE proxy_pool_id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(&assigned)
 	if assigned > 0 {
 		writeError(w, http.StatusConflict, fmt.Sprintf("代理池仍被 %d 个账号占用，请先解绑账号", assigned))
 		return
@@ -350,7 +577,7 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var name string
-	if err := tx.QueryRow(`SELECT name FROM proxy_pools WHERE id = ? AND deleted_at IS NULL`, id).Scan(&name); err != nil {
+	if err := tx.QueryRow(`SELECT name FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, id).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "proxy pool not found")
 			return
@@ -379,26 +606,28 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-const proxySelect = `SELECT x.id, x.pool_id, p.name, x.name, x.protocol, x.host, x.port, x.username, x.password != '', x.status, x.exit_ip, x.latency_ms, x.last_test_at,
-	COALESCE((SELECT GROUP_CONCAT(a.name, ', ') FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL), ''), x.created_at, x.updated_at
+const proxySelect = `SELECT x.id, x.pool_id, p.name, x.name, x.protocol, x.host, x.port, x.username, x.password != '', x.status, x.exit_ip, x.latency_ms, x.last_test_at, x.last_error,
+	COALESCE((SELECT GROUP_CONCAT(a.name, ', ') FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL AND a.archived_at IS NULL), ''),
+	(SELECT COUNT(*) FROM proxy_account_history h WHERE h.proxy_id = x.id), x.created_at, x.updated_at
 	FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id`
 
 func scanProxy(row scanner) (proxyRecord, error) {
 	var item proxyRecord
 	var latency sql.NullInt64
 	var lastTest sql.NullString
-	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.UsedAccountCount, &item.CreatedAt, &item.UpdatedAt)
 	item.LatencyMS = nullIntPointer(latency)
 	item.LastTestAt = nullText(lastTest)
 	return item, err
 }
 
 func (a *app) handleProxies(w http.ResponseWriter, r *http.Request) {
-	query := proxySelect + ` WHERE x.deleted_at IS NULL`
+	query := proxySelect + ` WHERE x.deleted_at IS NULL AND p.system_kind = ''`
 	args := []any{}
+	query += ` AND ` + proxyNotQuarantinedPredicate("x")
 	if user := currentUser(r); user.Role == "user" {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
-		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_id = x.id AND scope_account.deleted_at IS NULL AND ` + condition + `)`
+		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_id = x.id AND scope_account.deleted_at IS NULL AND scope_account.archived_at IS NULL AND ` + condition + `)`
 		args = append(args, scopeArgs...)
 	}
 	if poolID, _ := strconv.ParseInt(r.URL.Query().Get("pool_id"), 10, 64); poolID > 0 {
@@ -437,8 +666,14 @@ func (a *app) handleProxyBatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select a proxy pool")
 		return
 	}
+	var poolProtocol string
+	if err := a.db.QueryRow(`SELECT default_protocol FROM proxy_pools
+		WHERE id = ? AND status = 'active' AND deleted_at IS NULL AND system_kind = ''`, input.PoolID).Scan(&poolProtocol); err != nil {
+		writeError(w, http.StatusBadRequest, "selected proxy pool is unavailable")
+		return
+	}
 	if input.DefaultProtocol == "" {
-		_ = a.db.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ? AND deleted_at IS NULL`, input.PoolID).Scan(&input.DefaultProtocol)
+		input.DefaultProtocol = poolProtocol
 	}
 	created, skipped, invalid, err := a.importProxyText(input.PoolID, input.DefaultProtocol, input.Text)
 	if err != nil {
@@ -446,6 +681,28 @@ func (a *app) handleProxyBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]int{"created": created, "skipped": skipped, "invalid": invalid})
+}
+
+func (a *app) handleProxyBatchDelete(w http.ResponseWriter, r *http.Request) {
+	var input proxyBatchDeleteInput
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	ids := uniquePositiveIDs(input.IDs, 501)
+	if len(ids) == 0 || len(ids) > 500 {
+		writeError(w, http.StatusBadRequest, "select between 1 and 500 proxies")
+		return
+	}
+	result, err := a.deleteProxies(ids)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if result.Matched == 0 {
+		writeError(w, http.StatusNotFound, "no selected proxies were found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) importProxyText(poolID int64, defaultProtocol, text string) (created, skipped, invalid int, err error) {
@@ -483,6 +740,27 @@ func (a *app) importProxyText(poolID int64, defaultProtocol, text string) (creat
 }
 
 func storeProxy(tx *sql.Tx, poolID int64, item parsedProxy) (int64, bool, error) {
+	var poolAvailable int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxy_pools
+		WHERE id = ? AND status = 'active' AND deleted_at IS NULL AND system_kind = ''`, poolID).Scan(&poolAvailable); err != nil {
+		return 0, false, err
+	}
+	if poolAvailable == 0 {
+		return 0, false, errors.New("selected proxy pool is unavailable")
+	}
+	var quarantinedID int64
+	err := tx.QueryRow(`SELECT dead_proxy.id FROM proxies dead_proxy
+		JOIN proxy_pools dead_pool ON dead_pool.id = dead_proxy.pool_id
+		WHERE dead_pool.system_kind = ? AND dead_proxy.deleted_at IS NULL
+		AND dead_proxy.protocol = ? AND dead_proxy.host = ? AND dead_proxy.port = ?
+		AND dead_proxy.username = ? AND dead_proxy.password = ? LIMIT 1`, deadProxyPoolKind,
+		item.Protocol, item.Host, item.Port, item.Username, item.Password).Scan(&quarantinedID)
+	if err == nil {
+		return quarantinedID, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
 	name := item.Host + ":" + strconv.Itoa(item.Port)
 	result, err := tx.Exec(`INSERT OR IGNORE INTO proxies (pool_id, name, protocol, host, port, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)`, poolID, name, item.Protocol, item.Host, item.Port, item.Username, item.Password)
 	if err != nil {
@@ -499,7 +777,7 @@ func (a *app) ensureProxyInPool(poolID *int64, value string) (*int64, error) {
 		return nil, errors.New("select a proxy pool before entering a manual proxy")
 	}
 	var defaultProtocol string
-	if err := a.db.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ? AND status = 'active' AND deleted_at IS NULL`, *poolID).Scan(&defaultProtocol); err != nil {
+	if err := a.db.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ? AND status = 'active' AND deleted_at IS NULL AND system_kind = ''`, *poolID).Scan(&defaultProtocol); err != nil {
 		return nil, errors.New("selected proxy pool is unavailable")
 	}
 	item, err := parseProxyLine(value, defaultProtocol)
@@ -613,10 +891,19 @@ func normalizeProxyProtocol(protocol string) (string, error) {
 	if protocol == "socks5h" {
 		protocol = "socks5"
 	}
-	if protocol != "socks5" && protocol != "http" && protocol != "https" {
+	if !validProxyProtocol(protocol) {
 		return "", errors.New("invalid proxy")
 	}
 	return protocol, nil
+}
+
+func validProxyProtocol(protocol string) bool {
+	switch protocol {
+	case "socks5", "http", "https", sshProxyScheme:
+		return true
+	default:
+		return false
+	}
 }
 
 func parseProxyEndpoint(value string) (string, int, bool) {
@@ -697,7 +984,7 @@ func (a *app) handleProxyPoolSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var apiURL, headersJSON, protocol, sourceType string
-	if err := a.db.QueryRow(`SELECT api_url, api_headers_json, default_protocol, source_type FROM proxy_pools WHERE id = ? AND deleted_at IS NULL`, id).Scan(&apiURL, &headersJSON, &protocol, &sourceType); err != nil {
+	if err := a.db.QueryRow(`SELECT api_url, api_headers_json, default_protocol, source_type FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, id).Scan(&apiURL, &headersJSON, &protocol, &sourceType); err != nil {
 		writeError(w, http.StatusNotFound, "proxy pool not found")
 		return
 	}
@@ -808,11 +1095,13 @@ func (a *app) handleProxyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Password == "" {
-		_, _ = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), id)
+		_, _ = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+			AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), id)
 	} else {
-		_, _ = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, password = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), input.Password, id)
+		_, _ = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, password = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+			AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), input.Password, id)
 	}
-	item, err := scanProxy(a.db.QueryRow(proxySelect+` WHERE x.id = ? AND x.deleted_at IS NULL`, id))
+	item, err := scanProxy(a.db.QueryRow(proxySelect+` WHERE x.id = ? AND x.deleted_at IS NULL AND p.system_kind = ''`, id))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "proxy not found")
 		return
@@ -825,87 +1114,106 @@ func (a *app) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tx, err := a.db.Begin()
+	result, err := a.deleteProxies([]int64{id})
 	if err != nil {
 		writeDBError(w, err)
 		return
+	}
+	if result.Matched == 0 {
+		writeError(w, http.StatusNotFound, "proxy not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted":             true,
+		"reassigned_accounts": result.ReassignedAccounts,
+		"paused_accounts":     result.PausedAccounts,
+	})
+}
+
+func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
+	result := proxyBatchDeleteResponse{}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return result, err
 	}
 	defer tx.Rollback()
 
-	var poolID int64
-	if err := tx.QueryRow(`SELECT pool_id FROM proxies WHERE id = ? AND deleted_at IS NULL`, id).Scan(&poolID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "proxy not found")
-			return
-		}
-		writeDBError(w, err)
-		return
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		args[index] = id
 	}
+
 	type assignedAccount struct {
 		ID        int64
 		Name      string
+		PoolID    int64
 		AutoProxy bool
 	}
-	rows, err := tx.Query(`SELECT id, name, auto_proxy FROM accounts WHERE proxy_id = ? AND deleted_at IS NULL`, id)
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE p.deleted_at IS NULL AND pool.system_kind = '' AND p.id IN (`+placeholders+`)`, args...).Scan(&result.Matched); err != nil {
+		return result, err
+	}
+	if result.Matched == 0 {
+		return result, nil
+	}
+	rows, err := tx.Query(`SELECT a.id, a.name, p.pool_id, a.auto_proxy
+		FROM accounts a JOIN proxies p ON p.id = a.proxy_id JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND pool.system_kind = '' AND a.proxy_id IN (`+placeholders+`)`, args...)
 	if err != nil {
-		writeDBError(w, err)
-		return
+		return result, err
 	}
 	assigned := []assignedAccount{}
 	for rows.Next() {
 		var item assignedAccount
 		var autoProxy int
-		if err := rows.Scan(&item.ID, &item.Name, &autoProxy); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.PoolID, &autoProxy); err != nil {
 			rows.Close()
-			writeDBError(w, err)
-			return
+			return result, err
 		}
 		item.AutoProxy = autoProxy == 1
 		assigned = append(assigned, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		writeDBError(w, err)
-		return
+		return result, err
 	}
 	if err := rows.Close(); err != nil {
-		writeDBError(w, err)
-		return
+		return result, err
 	}
-	if _, err := tx.Exec(`UPDATE proxies SET status = 'disabled', deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, id); err != nil {
-		writeDBError(w, err)
-		return
+	updateResult, err := tx.Exec(`UPDATE proxies SET status = 'disabled', deleted_at = `+nowSQL+`, updated_at = `+nowSQL+`
+		WHERE deleted_at IS NULL AND id IN (`+placeholders+`)
+		AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, args...)
+	if err != nil {
+		return result, err
+	}
+	result.Deleted, err = updateResult.RowsAffected()
+	if err != nil {
+		return result, err
 	}
 
-	reassigned, paused := 0, 0
 	for _, account := range assigned {
 		if account.AutoProxy {
+			poolID := account.PoolID
 			replacement, assignErr := assignAccountProxy(tx, account.ID, &poolID, nil, true)
 			if assignErr == nil && replacement != nil {
 				if _, err := tx.Exec(`UPDATE accounts SET proxy_id = ?, updated_at = `+nowSQL+` WHERE id = ?`, replacement, account.ID); err != nil {
-					writeDBError(w, err)
-					return
+					return result, err
 				}
-				reassigned++
+				result.ReassignedAccounts++
 				continue
 			}
 		}
 		message := "绑定代理已删除，请重新分配独享 IP"
 		if _, err := tx.Exec(`UPDATE accounts SET proxy_id = NULL, schedulable = 0, error_message = ?, updated_at = `+nowSQL+` WHERE id = ?`, message, account.ID); err != nil {
-			writeDBError(w, err)
-			return
+			return result, err
 		}
-		paused++
+		result.PausedAccounts++
 	}
 	if err := tx.Commit(); err != nil {
-		writeDBError(w, err)
-		return
+		return result, err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"deleted":             true,
-		"reassigned_accounts": reassigned,
-		"paused_accounts":     paused,
-	})
+	return result, nil
 }
 
 func (a *app) handleProxyTest(w http.ResponseWriter, r *http.Request) {
@@ -940,10 +1248,12 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 	if input.Concurrency > 20 {
 		input.Concurrency = 20
 	}
-	query := `SELECT id, name FROM proxies WHERE deleted_at IS NULL AND status != 'disabled'`
+	query := `SELECT p.id, p.name FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE p.deleted_at IS NULL AND p.status != 'disabled' AND pool.system_kind = ''`
+	query += ` AND ` + proxyNotQuarantinedPredicate("p")
 	args := []any{}
 	if input.PoolID > 0 {
-		query += ` AND pool_id = ?`
+		query += ` AND p.pool_id = ?`
 		args = append(args, input.PoolID)
 	}
 	if len(input.IDs) > 0 {
@@ -952,12 +1262,12 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "select between 1 and 500 proxies")
 			return
 		}
-		query += ` AND id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`
+		query += ` AND p.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`
 		for _, id := range ids {
 			args = append(args, id)
 		}
 	}
-	query += ` ORDER BY id`
+	query += ` ORDER BY p.id`
 	rows, err := a.db.Query(query, args...)
 	if err != nil {
 		writeDBError(w, err)
@@ -1024,7 +1334,7 @@ func (a *app) testProxy(parent context.Context, id int64, name string) proxyTest
 	client, err := clientForProxy(proxyURL)
 	if err != nil {
 		result.Error = err.Error()
-		a.markProxyTestFailed(id)
+		a.markProxyTestFailed(id, result.Error)
 		return result
 	}
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
@@ -1035,7 +1345,7 @@ func (a *app) testProxy(parent context.Context, id int64, name string) proxyTest
 	result.LatencyMS = time.Since(started).Milliseconds()
 	if err != nil {
 		result.Error = "proxy test failed: " + err.Error()
-		a.markProxyTestFailed(id)
+		a.markProxyTestFailed(id, result.Error)
 		return result
 	}
 	defer resp.Body.Close()
@@ -1044,23 +1354,26 @@ func (a *app) testProxy(parent context.Context, id int64, name string) proxyTest
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || strings.TrimSpace(payload.IP) == "" {
 		result.Error = "proxy test returned an invalid response"
-		a.markProxyTestFailed(id)
+		a.markProxyTestFailed(id, result.Error)
 		return result
 	}
 	result.Success = true
 	result.IP = strings.TrimSpace(payload.IP)
-	_, _ = a.db.Exec(`UPDATE proxies SET status = 'active', exit_ip = ?, latency_ms = ?, last_test_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, result.IP, result.LatencyMS, id)
+	_, _ = a.db.Exec(`UPDATE proxies SET status = 'active', exit_ip = ?, latency_ms = ?, last_test_at = `+nowSQL+`, last_error = '', updated_at = `+nowSQL+` WHERE id = ?`, result.IP, result.LatencyMS, id)
 	return result
 }
 
-func (a *app) markProxyTestFailed(id int64) {
-	_, _ = a.db.Exec(`UPDATE proxies SET status = 'error', last_test_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, id)
+func (a *app) markProxyTestFailed(id int64, message string) {
+	_, _ = a.db.Exec(`UPDATE proxies SET status = 'error', last_test_at = `+nowSQL+`, last_error = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, sanitizeErrorMessage(message), id)
 }
 
 func (a *app) proxyURLForTest(id int64) (*url.URL, error) {
 	var protocol, host, username, password string
 	var port int
-	if err := a.db.QueryRow(`SELECT protocol, host, port, username, password FROM proxies WHERE id = ? AND status != 'disabled' AND deleted_at IS NULL`, id).Scan(&protocol, &host, &port, &username, &password); err != nil {
+	if err := a.db.QueryRow(`SELECT p.protocol, p.host, p.port, p.username, p.password
+		FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE p.id = ? AND p.status != 'disabled' AND p.deleted_at IS NULL AND pool.system_kind = ''
+		AND `+proxyNotQuarantinedPredicate("p"), id).Scan(&protocol, &host, &port, &username, &password); err != nil {
 		return nil, err
 	}
 	u := &url.URL{Scheme: protocol, Host: net.JoinHostPort(host, strconv.Itoa(port))}
@@ -1073,7 +1386,11 @@ func (a *app) proxyURLForTest(id int64) (*url.URL, error) {
 func (a *app) proxyURL(id int64) (*url.URL, error) {
 	var protocol, host, username, password string
 	var port int
-	if err := a.db.QueryRow(`SELECT protocol, host, port, username, password FROM proxies WHERE id = ? AND status = 'active' AND deleted_at IS NULL`, id).Scan(&protocol, &host, &port, &username, &password); err != nil {
+	if err := a.db.QueryRow(`SELECT p.protocol, p.host, p.port, p.username, p.password
+		FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE p.id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+		AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+		AND `+proxyNotQuarantinedPredicate("p"), id).Scan(&protocol, &host, &port, &username, &password); err != nil {
 		return nil, err
 	}
 	u := &url.URL{Scheme: protocol, Host: net.JoinHostPort(host, strconv.Itoa(port))}
@@ -1093,7 +1410,10 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 	}
 	if selected != nil {
 		var available int
-		err := a.db.QueryRow(`SELECT COUNT(*) FROM proxies p WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+		err := a.db.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+			WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+			AND `+proxyNotQuarantinedPredicate("p")+`
 			AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)`, *selected, *poolID).Scan(&available)
 		if err != nil {
 			return nil, "", err
@@ -1107,7 +1427,10 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 	}
 	if selected == nil {
 		var id int64
-		err := a.db.QueryRow(`SELECT p.id FROM proxies p WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+		err := a.db.QueryRow(`SELECT p.id FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+			WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+			AND `+proxyNotQuarantinedPredicate("p")+`
 			AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)
 			ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID).Scan(&id)
 		if err != nil {
@@ -1123,7 +1446,51 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 }
 
 func clientForProxy(proxyURL *url.URL) (*http.Client, error) {
-	transport := &http.Transport{DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, ForceAttemptHTTP2: true, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 60 * time.Second}
+	responseHeaderTimeout := durationFromEnv("CCMAX_UPSTREAM_RESPONSE_HEADER_TIMEOUT", defaultUpstreamResponseHeaderTimeout)
+	requestTimeout := durationFromEnv("CCMAX_UPSTREAM_REQUEST_TIMEOUT", defaultUpstreamRequestTimeout)
+	key := upstreamProxyClientKey{responseHeaderTimeout: responseHeaderTimeout, requestTimeout: requestTimeout}
+	if proxyURL != nil {
+		key.proxyURLHash = hashToken(proxyURL.String())
+	}
+	if cached, ok := upstreamProxyClients.Load(key); ok {
+		return cached.(*http.Client), nil
+	}
+
+	client, err := newClientForProxy(proxyURL, responseHeaderTimeout, requestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	actual, loaded := upstreamProxyClients.LoadOrStore(key, client)
+	if loaded {
+		client.CloseIdleConnections()
+		return actual.(*http.Client), nil
+	}
+	return client, nil
+}
+
+func durationFromEnv(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value < 0 {
+		return fallback
+	}
+	return value
+}
+
+func newClientForProxy(proxyURL *url.URL, responseHeaderTimeout, requestTimeout time.Duration) (*http.Client, error) {
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		MaxIdleConns:          1024,
+		MaxIdleConnsPerHost:   128,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 	if proxyURL != nil {
 		switch strings.ToLower(proxyURL.Scheme) {
 		case "http", "https":
@@ -1140,11 +1507,13 @@ func clientForProxy(proxyURL *url.URL) (*http.Client, error) {
 					return dialer.Dial(network, address)
 				}
 			}
+		case sshProxyScheme:
+			transport.DialContext = sshProxyDialContext(proxyURL)
 		default:
 			return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 		}
 	}
-	return &http.Client{Transport: decompressingRoundTripper{base: transport}, Timeout: 5 * time.Minute}, nil
+	return &http.Client{Transport: decompressingRoundTripper{base: transport}, Timeout: requestTimeout}, nil
 }
 
 func assignAccountProxy(tx *sql.Tx, accountID int64, poolID, requestedProxyID *int64, auto bool) (*int64, error) {
@@ -1156,7 +1525,10 @@ func assignAccountProxy(tx *sql.Tx, accountID int64, poolID, requestedProxyID *i
 			return nil, nil
 		}
 		var exists int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies WHERE id = ? AND pool_id = ? AND status = 'active' AND deleted_at IS NULL`, *requestedProxyID, *poolID).Scan(&exists); err != nil || exists == 0 {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+			WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+			AND `+proxyNotQuarantinedPredicate("p"), *requestedProxyID, *poolID).Scan(&exists); err != nil || exists == 0 {
 			return nil, errors.New("selected proxy is unavailable")
 		}
 		var exclusiveOwner int
@@ -1173,14 +1545,20 @@ func assignAccountProxy(tx *sql.Tx, accountID int64, poolID, requestedProxyID *i
 		err := tx.QueryRow(`SELECT COUNT(*) FROM accounts WHERE proxy_id = ? AND id != ? AND deleted_at IS NULL`, *requestedProxyID, accountID).Scan(&occupied)
 		if err == nil && occupied == 0 {
 			var valid int
-			_ = tx.QueryRow(`SELECT COUNT(*) FROM proxies WHERE id = ? AND pool_id = ? AND status = 'active' AND deleted_at IS NULL`, *requestedProxyID, *poolID).Scan(&valid)
+			_ = tx.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+				WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+				AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+				AND `+proxyNotQuarantinedPredicate("p"), *requestedProxyID, *poolID).Scan(&valid)
 			if valid > 0 {
 				return requestedProxyID, nil
 			}
 		}
 	}
 	var id int64
-	err := tx.QueryRow(`SELECT p.id FROM proxies p WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+	err := tx.QueryRow(`SELECT p.id FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
+		WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
+		AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
+		AND `+proxyNotQuarantinedPredicate("p")+`
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.id != ? AND a.deleted_at IS NULL)
 		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID, accountID).Scan(&id)
 	if err != nil {

@@ -119,6 +119,7 @@ type gatewayHedgeTerminal struct {
 	status       int
 	body         []byte
 	plainMessage string
+	accountID    int64
 }
 
 type gatewayHedgeOutcome struct {
@@ -260,6 +261,7 @@ func (a *app) handleGatewayStreamHedge(w http.ResponseWriter, r *http.Request, k
 	}
 
 	if terminal != nil {
+		attributeGatewayErrorAccount(w, terminal.accountID)
 		if terminal.plainMessage != "" {
 			writeError(w, terminal.status, terminal.plainMessage)
 		} else {
@@ -297,8 +299,9 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	}
 	prepared, err := prepareClaudeRequest(r, body, account, model, false)
 	if err != nil {
-		return gatewayHedgeOutcome{terminal: &gatewayHedgeTerminal{status: http.StatusBadRequest, plainMessage: err.Error()}, err: err}
+		return gatewayHedgeOutcome{terminal: &gatewayHedgeTerminal{status: http.StatusBadRequest, plainMessage: err.Error(), accountID: account.ID}, err: err}
 	}
+	prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
 	upstreamURL, err := upstreamClaudeURL(account.ExtraJSON, "/v1/messages")
 	if err != nil {
 		return gatewayHedgeOutcome{err: err}
@@ -328,7 +331,9 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	started := time.Now()
 	// Every candidate consumes upstream request capacity even when it loses the
 	// race and is canceled. Logical usage and billing are still winner-only.
-	a.recordGatewayAccountRPM(account.ID)
+	if !account.RPMReserved {
+		a.recordGatewayAccountRPM(account.ID)
+	}
 	response, err = doGatewayUpstreamRequest(r, client, upstreamRequest, prepared)
 	if err != nil {
 		return gatewayHedgeOutcome{err: err}
@@ -337,7 +342,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	queueRelease()
 	queueRelease = func() {}
 	if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
-		a.captureAccountUpstreamState(account.ID, response)
+		a.captureGatewayUpstreamState(account.ID, model, key.OverloadCooldownSeconds, response)
 	}
 	if retryableGatewayStatus(response.StatusCode) {
 		failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
@@ -351,7 +356,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 		if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 			a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 		}
-		return gatewayHedgeOutcome{terminal: &gatewayHedgeTerminal{status: response.StatusCode, body: failureBody}}
+		return gatewayHedgeOutcome{terminal: &gatewayHedgeTerminal{status: response.StatusCode, body: failureBody, accountID: account.ID}}
 	}
 
 	buffered, reader, bootstrapErr := readGatewayStreamBootstrap(response.Body)
@@ -359,6 +364,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(bootstrapErr, &preOutputErr) {
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
+				a.captureGatewayUpstreamState(account.ID, model, key.OverloadCooldownSeconds, &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
 				a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
 			}
 			return gatewayHedgeOutcome{failure: &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account}, err: bootstrapErr}
@@ -424,12 +430,37 @@ func (a *app) drainGatewayHedgeOutcomes(results <-chan gatewayHedgeOutcome, coun
 func (a *app) forwardGatewayHedgeWinner(w http.ResponseWriter, r *http.Request, key gatewayKey, model string, attempt *gatewayHedgeAttempt, drained <-chan struct{}) {
 	defer a.releaseGatewayAccount(attempt.account.ID)
 	defer attempt.response.Body.Close()
+	attributeGatewayErrorAccount(w, attempt.account.ID)
 	usage, forwardErr := forwardGatewayResponse(w, attempt.response, true, attempt.account, key.GroupID, attempt.prepared)
 	select {
 	case <-drained:
 	case <-time.After(2 * time.Second):
 	}
-	if forwardErr == nil || usage.hasUsage() {
-		a.recordGatewayUsage(key, attempt.account, model, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
+	var downgradeErr *gatewayModelDowngradeError
+	if errors.As(forwardErr, &downgradeErr) {
+		if usage.hasUsage() {
+			a.recordGatewayRejectedDowngradeUsage(r.Context(), key, attempt.account, downgradeErr.actual, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
+		}
+	} else if forwardErr == nil || usage.hasUsage() {
+		a.recordGatewayUsage(r.Context(), key, attempt.account, model, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
+	}
+	if errors.As(forwardErr, &downgradeErr) && !downgradeErr.committed {
+		copyGatewayRequestID(w.Header(), attempt.response.Header)
+		writeAnthropicGatewayError(w, http.StatusBadGateway, "api_error", downgradeErr.Error())
+	}
+	var idleErr *gatewayStreamIdleError
+	if errors.As(forwardErr, &idleErr) {
+		a.captureGatewayStreamIdle(attempt.account.ID, idleErr.idle)
+		attributeGatewayErrorEvent(w, "upstream_stream_idle", http.StatusGatewayTimeout, idleErr.Error())
+		// The hedge lane owns the response, so a stalled winner cannot fall back
+		// to the account loop; tell the client instead of hanging up silently.
+		if !idleErr.streamed {
+			if gatewayResponseStatus(w) != 0 {
+				flusher, _ := w.(http.Flusher)
+				writeGatewaySSEError(w, flusher, "upstream_stream_idle", idleErr.Error())
+				return
+			}
+			writeAnthropicGatewayError(w, http.StatusGatewayTimeout, "timeout_error", idleErr.Error())
+		}
 	}
 }
