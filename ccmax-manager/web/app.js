@@ -909,9 +909,17 @@ async function loadErrors() {
 }
 
 let insightChart = null;
+let insightTimelineChart = null;
 async function loadErrorInsights() {
+  const source = $("#error-source").value;
+  $("#error-insight-panel").hidden = Boolean(source && source !== "gateway");
+  if (source && source !== "gateway") return;
   const params = new URLSearchParams();
   params.set("status", $("#insight-status").value || "401");
+  if ($("#error-search").value)
+    params.set("search", $("#error-search").value.trim());
+  if ($("#error-group").value)
+    params.set("group_id", $("#error-group").value);
   if ($("#error-from").value) params.set("from", $("#error-from").value);
   if ($("#error-to").value) params.set("to", $("#error-to").value);
   try {
@@ -925,7 +933,9 @@ async function loadErrorInsights() {
 function renderErrorInsights(data) {
   const accounts = data.accounts || [];
   const events = data.events || [];
-  $("#insight-empty").hidden = accounts.length > 0 || events.length > 0;
+  const timeline = data.timeline || [];
+  $("#insight-empty").hidden =
+    accounts.length > 0 || events.length > 0 || timeline.length > 0;
   $("#insight-body").innerHTML = events
     .map(
       (item) => `<tr>
@@ -943,7 +953,43 @@ function renderErrorInsights(data) {
     insightChart.destroy();
     insightChart = null;
   }
-  if (!accounts.length || typeof Chart === "undefined") return;
+  if (insightTimelineChart) {
+    insightTimelineChart.destroy();
+    insightTimelineChart = null;
+  }
+  const granularity = data.timeline_granularity === "hour" ? "hour" : "day";
+  $("#insight-timeline-granularity").textContent =
+    granularity === "hour" ? "按小时" : "按天";
+  if (typeof Chart === "undefined") return;
+  if (timeline.length) {
+    insightTimelineChart = new Chart($("#insight-timeline-chart"), {
+      type: "bar",
+      data: {
+        labels: timeline.map((item) => dateTime(item.bucket)),
+        datasets: [
+          {
+            label: `${data.status} 报错`,
+            data: timeline.map((item) => item.count),
+            backgroundColor: "rgba(196, 65, 59, 0.72)",
+            borderColor: "rgba(153, 45, 41, 0.95)",
+            borderWidth: 1,
+            borderRadius: 4,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        scales: {
+          x: { grid: { display: false }, ticks: { maxRotation: 0 } },
+          y: { beginAtZero: true, ticks: { precision: 0 } },
+        },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+  if (!accounts.length) return;
   insightChart = new Chart(canvas, {
     type: "bar",
     data: {
@@ -1007,7 +1053,8 @@ const strategyRPMModeLabels = {
   tiered: "三区模型",
   sticky_exempt: "粘性豁免",
 };
-let strategyTable = null;
+let expandedStrategyID = "";
+let strategyAccordionInitialized = false;
 
 async function loadStrategies() {
   if (!canView("strategies")) return;
@@ -1062,7 +1109,7 @@ function renderStrategies() {
       </article>`;
     })
     .join("");
-  renderStrategyTree(strategies);
+  renderStrategyAccordion(strategies);
   refreshIcons();
 }
 
@@ -1145,56 +1192,178 @@ async function openStrategyAccountDialog(strategyID, mode) {
   showInitializedDialog("#strategy-account-dialog");
 }
 
-function renderStrategyTree(strategies) {
-  if (typeof Tabulator === "undefined") return;
-  const rows = strategies.map((item) => ({
-    name: item.name,
-    kind: "策略",
-    rpm: `${item.current_rpm} / ${strategyLimitText(item.rpm_limit)}`,
-    tpm: `${Number(item.current_tpm).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}`,
-    inflight: `${item.current_inflight} / ${strategyLimitText(item.concurrency_limit)}`,
-    status: item.accounts_pending
-      ? `${item.accounts_alive}/${item.bound_accounts} 存活 · ${item.accounts_pending} 待调度`
-      : `${item.accounts_alive}/${item.bound_accounts} 存活`,
-    binding: strategyModeLabels[item.dispatch_mode] ?? item.dispatch_mode,
-    _children: (item.accounts || []).map((account) => ({
-      name: account.name,
-      kind: "账号",
-      rpm: `${account.rpm}${item.rpm_limit > 0 ? ` / ${item.rpm_limit}` : account.base_rpm > 0 ? ` / ${account.base_rpm}` : ""}`,
-      tpm: Number(account.tpm).toLocaleString("zh-CN"),
-      inflight: `${account.inflight} / ${item.concurrency_limit > 0 ? Math.min(account.concurrency, item.concurrency_limit) : account.concurrency}`,
-      status:
+function strategySummaryStatus(item) {
+  if (!item.bound_accounts) {
+    return { label: "未绑定", className: "off" };
+  }
+  if (!item.accounts_alive) {
+    return { label: "无可用账号", className: "error" };
+  }
+  if (item.accounts_pending) {
+    return { label: `${item.accounts_pending} 个待调度`, className: "warn" };
+  }
+  return { label: "运行正常", className: "ok" };
+}
+
+function strategyAccountRows(item) {
+  const accounts = item.accounts || [];
+  if (!accounts.length) {
+    return `<tr class="strategy-account-empty">
+      <td colspan="7"><i data-lucide="inbox"></i><span>该策略暂未绑定账号</span></td>
+    </tr>`;
+  }
+  return accounts
+    .map((account) => {
+      const dispatchLabel =
         account.dispatch === "pending"
           ? "待调度"
           : account.alive
             ? "存活"
-            : `不可用（${account.status}）`,
-      binding:
-        (account.direct_binding ? "账号直绑" : "分组继承") +
-        (account.group_ids?.length ? ` · ${account.group_ids.join(",")}` : ""),
-    })),
-  }));
-  if (strategyTable) {
-    strategyTable.replaceData(rows);
+            : "不可用";
+      const dispatchClass =
+        account.dispatch === "pending"
+          ? "warn"
+          : account.alive
+            ? "ok"
+            : "error";
+      const groups = account.group_ids?.length
+        ? account.group_ids.join("、")
+        : "未分组";
+      const bindingSource = account.direct_binding ? "账号直绑" : "分组继承";
+      const rpmLimit =
+        item.rpm_limit > 0
+          ? item.rpm_limit
+          : account.base_rpm > 0
+            ? account.base_rpm
+            : 0;
+      const accountConcurrency = Number(account.concurrency || 0);
+      const concurrencyLimit =
+        item.concurrency_limit > 0
+          ? Math.min(accountConcurrency, item.concurrency_limit)
+          : accountConcurrency;
+      return `<tr>
+        <td><strong class="strategy-account-name" title="${escapeHTML(account.name)}">${escapeHTML(account.name)}</strong></td>
+        <td><span class="strategy-account-groups" title="${escapeHTML(groups)}">${escapeHTML(groups)}</span></td>
+        <td>${Number(account.rpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(rpmLimit)}</td>
+        <td>${Number(account.tpm || 0).toLocaleString("zh-CN")}</td>
+        <td>${Number(account.inflight || 0).toLocaleString("zh-CN")} / ${strategyLimitText(concurrencyLimit)}</td>
+        <td><span class="pill ${dispatchClass}" title="${escapeHTML(account.status || dispatchLabel)}">${dispatchLabel}</span></td>
+        <td><span class="strategy-binding-source" title="${escapeHTML(`${bindingSource} · ${groups}`)}">${bindingSource}</span></td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function renderStrategyAccordion(strategies) {
+  const root = $("#strategy-accordion");
+  if (!root) return;
+  if (!strategies.length) {
+    expandedStrategyID = "";
+    strategyAccordionInitialized = false;
+    root.innerHTML = `<div class="strategy-accordion-placeholder">
+      <i data-lucide="list-tree"></i>
+      <span>暂无策略数据</span>
+    </div>`;
     return;
   }
-  strategyTable = new Tabulator("#strategy-tree", {
-    data: rows,
-    layout: "fitColumns",
-    dataTree: true,
-    dataTreeChildField: "_children",
-    dataTreeStartExpanded: true,
-    placeholder: "暂无策略数据",
-    columns: [
-      { title: "名称", field: "name", widthGrow: 2, minWidth: 160, tooltip: true },
-      { title: "类型", field: "kind", width: 80, tooltip: true },
-      { title: "RPM（当前 / 限制）", field: "rpm", widthGrow: 1, tooltip: true },
-      { title: "TPM（当前 / 限制）", field: "tpm", widthGrow: 1, tooltip: true },
-      { title: "在途 / 并发", field: "inflight", widthGrow: 1, tooltip: true },
-      { title: "状态", field: "status", widthGrow: 1, tooltip: true },
-      { title: "算法 / 绑定", field: "binding", widthGrow: 1, tooltip: true },
-    ],
-  });
+
+  if (!strategyAccordionInitialized) {
+    expandedStrategyID = String(strategies[0].id);
+    strategyAccordionInitialized = true;
+  } else if (
+    expandedStrategyID &&
+    !strategies.some((item) => String(item.id) === expandedStrategyID)
+  ) {
+    expandedStrategyID = String(strategies[0].id);
+  }
+
+  root.innerHTML = `<div class="strategy-accordion-scroll">
+    <table class="strategy-accordion-table">
+      <colgroup>
+        <col class="strategy-col-name" />
+        <col />
+        <col />
+        <col />
+        <col />
+        <col class="strategy-col-status" />
+        <col class="strategy-col-binding" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th>RPM（当前 / 限制）</th>
+          <th>TPM（当前 / 限制）</th>
+          <th>在途 / 并发</th>
+          <th>存活 / 绑定</th>
+          <th>状态</th>
+          <th>算法 / 绑定</th>
+        </tr>
+      </thead>
+      ${strategies
+        .map((item) => {
+          const strategyID = String(item.id);
+          const open = expandedStrategyID === strategyID;
+          const status = strategySummaryStatus(item);
+          const rpmMode =
+            strategyRPMModeLabels[item.rpm_strategy] || item.rpm_strategy;
+          const dispatchMode =
+            strategyModeLabels[item.dispatch_mode] ?? item.dispatch_mode;
+          const description = item.description || dispatchMode || "未填写说明";
+          const accountCount = (item.accounts || []).length;
+          return `<tbody class="strategy-accordion-group ${open ? "is-open" : ""}">
+            <tr class="strategy-summary-row">
+              <td>
+                <button class="strategy-accordion-trigger" type="button" data-strategy-toggle="${item.id}" aria-expanded="${open}" aria-controls="strategy-detail-${item.id}" title="${open ? "收起账号详情" : "展开账号详情"}">
+                  <span class="strategy-trigger-icon"><i data-lucide="chevron-right"></i></span>
+                  <span class="strategy-trigger-copy">
+                    <strong title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</strong>
+                    <small title="${escapeHTML(description)}">${escapeHTML(description)}</small>
+                  </span>
+                </button>
+              </td>
+              <td title="${item.current_rpm} / ${strategyLimitText(item.rpm_limit)}">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.rpm_limit)}</td>
+              <td title="${Number(item.current_tpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}">${Number(item.current_tpm || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}</td>
+              <td>${Number(item.current_inflight || 0).toLocaleString("zh-CN")} / ${strategyLimitText(item.concurrency_limit)}</td>
+              <td title="${item.accounts_alive} 个存活，${item.bound_accounts} 个已绑定">${item.accounts_alive} / ${item.bound_accounts}</td>
+              <td><span class="pill ${status.className}" title="${escapeHTML(status.label)}">${escapeHTML(status.label)}</span></td>
+              <td>
+                <span class="strategy-mode" title="${escapeHTML(`${rpmMode} / ${dispatchMode} / ${item.bound_groups} 个分组`)}">
+                  <strong>${escapeHTML(dispatchMode)}</strong>
+                  <small>${escapeHTML(rpmMode)} · ${item.bound_groups} 组</small>
+                </span>
+              </td>
+            </tr>
+            <tr class="strategy-detail-row" id="strategy-detail-${item.id}" ${open ? "" : "hidden"}>
+              <td colspan="7">
+                <div class="strategy-detail-panel">
+                  <div class="strategy-detail-head">
+                    <strong>账号明细</strong>
+                    <span>${accountCount} 个账号</span>
+                  </div>
+                  <div class="strategy-account-table-wrap">
+                    <table class="strategy-account-table">
+                      <thead>
+                        <tr>
+                          <th>账号</th>
+                          <th>分组</th>
+                          <th>RPM</th>
+                          <th>TPM</th>
+                          <th>在途 / 并发</th>
+                          <th>调度状态</th>
+                          <th>绑定来源</th>
+                        </tr>
+                      </thead>
+                      <tbody>${strategyAccountRows(item)}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </tbody>`;
+        })
+        .join("")}
+    </table>
+  </div>`;
 }
 
 function openStrategy(item = null) {
@@ -1293,7 +1462,7 @@ function renderDashboard() {
         item.speed_passthrough_enabled,
         item.anthropic_beta_passthrough_enabled,
       ].filter(Boolean).length;
-      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 重试</span><strong>${item.rate_limit_wait_enabled ? `${Number(item.rate_limit_wait_seconds || 5)}s` : "立即切换"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -1827,7 +1996,11 @@ function renderErrors() {
   $("#error-count").textContent = `${summary.total} 条记录`;
   $("#error-empty").hidden = data.items.length > 0;
   $("#error-metrics").innerHTML = [
-    metric("TOTAL", summary.total, "当前筛选报错"),
+    metric(
+      "TOTAL",
+      summary.total,
+      `当前筛选 · 默认保留 ${data.retention_days || 7} 天`,
+    ),
     metric("GATEWAY", summary.gateway, "API 请求失败", "b"),
     metric("ACCOUNTS", summary.accounts, "账号状态异常"),
     metric("AUTHORIZATION", summary.authorization, "授权失败"),
@@ -2566,6 +2739,11 @@ async function switchPurposeGroup(purposeID, groupID) {
   toast(`${item.name} 已切换到 ${group?.name || groupID}`);
   await loadCore();
 }
+function syncGroupRateLimitWaitFields() {
+  $("#group-rate-limit-wait-seconds").disabled = !$(
+    "#group-rate-limit-wait-enabled",
+  ).checked;
+}
 function openGroup(item = null) {
   $("#group-form").reset();
   $("#group-id").value = item?.id || "";
@@ -2610,6 +2788,13 @@ function openGroup(item = null) {
   $("#group-overload-cooldown").value = Number(
     item?.overload_cooldown_seconds || 10,
   );
+  $("#group-rate-limit-wait-enabled").checked = Boolean(
+    item?.rate_limit_wait_enabled,
+  );
+  $("#group-rate-limit-wait-seconds").value = Number(
+    item?.rate_limit_wait_seconds || 5,
+  );
+  syncGroupRateLimitWaitFields();
   $("#group-strategy-required").checked = Boolean(item?.strategy_required_enabled);
   $("#group-capacity-queue-enabled").checked = Boolean(
     item?.capacity_queue_enabled,
@@ -2761,6 +2946,14 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("button, [data-select-pool]");
   if (!target) {
     if (!event.target.closest("#account-action-menu")) closeAccountActionMenu();
+    return;
+  }
+  if (target.dataset.strategyToggle) {
+    const strategyID = String(target.dataset.strategyToggle);
+    expandedStrategyID =
+      expandedStrategyID === strategyID ? "" : strategyID;
+    renderStrategyAccordion(state.strategies || []);
+    refreshIcons();
     return;
   }
   if (target.dataset.accountMenu) {
@@ -3411,6 +3604,21 @@ $("#apply-error-filters").addEventListener("click", () => {
   resetPagination("errors");
   loadErrors();
 });
+let errorSearchTimer;
+$("#error-search").addEventListener("input", () => {
+  clearTimeout(errorSearchTimer);
+  errorSearchTimer = setTimeout(() => {
+    resetPagination("errors");
+    loadErrors();
+  }, 300);
+});
+$("#error-search").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  clearTimeout(errorSearchTimer);
+  resetPagination("errors");
+  loadErrors();
+});
 $("#insight-status").addEventListener("change", loadErrorInsights);
 $("#apply-daily-range").addEventListener("click", () => {
   resetPagination("daily");
@@ -3859,6 +4067,10 @@ $("#group-rpm-dispatch-enabled").addEventListener("change", (event) => {
     $("#group-adaptive-hedge-enabled").checked = false;
   }
 });
+$("#group-rate-limit-wait-enabled").addEventListener(
+  "change",
+  syncGroupRateLimitWaitFields,
+);
 $("#group-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -3896,6 +4108,10 @@ $("#group-form").addEventListener("submit", async (event) => {
           "#group-passthrough-anthropic-beta",
         ).checked,
         overload_cooldown_seconds: Number($("#group-overload-cooldown").value),
+        rate_limit_wait_enabled: $("#group-rate-limit-wait-enabled").checked,
+        rate_limit_wait_seconds: Number(
+          $("#group-rate-limit-wait-seconds").value,
+        ),
         strategy_required_enabled: $("#group-strategy-required").checked,
         capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,
         capacity_queue_timeout_seconds: Number(
@@ -4031,12 +4247,16 @@ $("#proxy-pool-form").addEventListener("submit", async (event) => {
       api_url: $("#proxy-pool-api-url").value,
       api_headers: $("#proxy-pool-headers").value || "{}",
     };
-    await api(id ? `/api/proxy-pools/${id}` : "/api/proxy-pools", {
+    const saved = await api(id ? `/api/proxy-pools/${id}` : "/api/proxy-pools", {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(payload),
     });
     $("#proxy-pool-dialog").close();
-    toast("代理池已保存");
+    toast(
+      saved.protocol_synced
+        ? `代理池已保存，已同步 ${saved.protocol_synced} 个代理`
+        : "代理池已保存",
+    );
     await loadCore();
   } catch (error) {
     toast(error.message, "error");
@@ -4182,6 +4402,7 @@ function initializeDates() {
   const now = new Date();
   const first = new Date(now.getFullYear(), now.getMonth(), 1);
   const dailyStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
+  const errorStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const local = (date) =>
     new Date(date.getTime() - date.getTimezoneOffset() * 60000)
       .toISOString()
@@ -4200,7 +4421,7 @@ function initializeDates() {
   $("#audit-to").value = to;
   $("#authorization-from").value = from;
   $("#authorization-to").value = to;
-  $("#error-from").value = from;
+  $("#error-from").value = local(errorStart);
   $("#error-to").value = to;
 }
 initializeAccountAutoRefresh();

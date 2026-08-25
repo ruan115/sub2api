@@ -227,31 +227,41 @@ func quotaFromHeaders(headers http.Header) (accountQuota, bool) {
 	return quota, found
 }
 
-// exhaustedQuotaWindow reports which unified rate-limit window the upstream says
-// is exhausted. It mirrors the shared adapter's precedence (7d outranks 5h)
-// because a weekly exhaustion is the more restrictive of the two.
-func exhaustedQuotaWindow(headers http.Header) string {
-	if quotaWindowExceeded(headers, "7d") {
+func quotaWindowMatchingReset(rateLimitResetAt, fiveHourResetAt, sevenDayResetAt string) string {
+	limitReset, ok := parseQuotaResetTime(rateLimitResetAt)
+	if !ok {
+		return ""
+	}
+	matches := func(raw string) bool {
+		reset, ok := parseQuotaResetTime(raw)
+		return ok && absDuration(limitReset.Sub(reset)) <= time.Second
+	}
+	if matches(sevenDayResetAt) {
 		return "7d"
 	}
-	if quotaWindowExceeded(headers, "5h") {
+	if matches(fiveHourResetAt) {
 		return "5h"
 	}
 	return ""
 }
 
-func quotaWindowExceeded(headers http.Header, window string) bool {
-	prefix := "anthropic-ratelimit-unified-" + window + "-"
-	if strings.EqualFold(strings.TrimSpace(headers.Get(prefix+"status")), "rejected") {
-		return true
+func parseQuotaResetTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
 	}
-	if strings.EqualFold(strings.TrimSpace(headers.Get(prefix+"surpassed-threshold")), "true") {
-		return true
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		parsed, err = time.Parse(time.RFC3339, raw)
 	}
-	if value, err := strconv.ParseFloat(strings.TrimSpace(headers.Get(prefix+"utilization")), 64); err == nil {
-		return value >= 1.0-1e-9
+	return parsed, err == nil
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
 	}
-	return false
+	return value
 }
 
 func resetHeaderTime(raw string) string {
@@ -275,10 +285,10 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 	if quota, ok := quotaFromHeaders(response.Header); ok {
 		_ = a.persistAccountQuota(accountID, quota, false)
 	}
-	if resetAt, ok := sub2service.ResolveCCMaxCompatibilityCooldown(response.StatusCode, response.Header); ok {
+	if resetAt, window, ok := sub2service.ResolveCCMaxCompatibilityCooldownWindow(response.StatusCode, response.Header); ok {
 		// The cooldown itself only carries a reset time, so record which window
 		// caused it while the response headers are still at hand.
-		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), exhaustedQuotaWindow(response.Header), accountID)
+		_, _ = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, resetAt.UTC().Format(time.RFC3339Nano), window, accountID)
 	}
 }
 

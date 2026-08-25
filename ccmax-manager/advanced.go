@@ -78,6 +78,12 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "overload_cooldown_seconds", "INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600)"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_wait_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_wait_seconds", "INTEGER NOT NULL DEFAULT 5 CHECK (rate_limit_wait_seconds BETWEEN 1 AND 600)"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(a.db, "groups", "strategy_id", "INTEGER REFERENCES dispatch_strategies(id) ON DELETE SET NULL"); err != nil {
 		return err
 	}
@@ -251,9 +257,6 @@ func (a *app) migrateAdvancedFeatures() error {
 	// and accounts.auth_error is cleared.
 	if err := addColumnIfMissing(a.db, "account_lifecycle_events", "reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
-	}
-	if _, err := a.db.Exec(`DELETE FROM gateway_error_logs WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-90 days')`); err != nil {
-		return fmt.Errorf("prune gateway error logs: %w", err)
 	}
 	accountColumns := []struct{ name, definition string }{
 		{"source_sk_hint", "TEXT NOT NULL DEFAULT ''"},

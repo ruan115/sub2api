@@ -159,6 +159,37 @@ func TestGroupFieldPassthroughSettingsPersistAndSurviveLegacyUpdate(t *testing.T
 	}
 }
 
+func TestGroupRateLimitWaitSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "429 等待", "rate_multiplier": 1, "status": "active",
+		"rate_limit_wait_enabled": true, "rate_limit_wait_seconds": 7,
+	}, http.StatusOK, &updated)
+	if !updated.RateLimitWaitEnabled || updated.RateLimitWaitSeconds != 7 {
+		t.Fatalf("group 429 wait settings were not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.RateLimitWaitEnabled || updated.RateLimitWaitSeconds != 7 {
+		t.Fatalf("legacy update reset group 429 wait settings: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "无效等待", "rate_multiplier": 1, "status": "active",
+		"rate_limit_wait_seconds": 0,
+	}, http.StatusBadRequest, nil)
+}
+
 func TestGroupRejectAnthropicDowngradePersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

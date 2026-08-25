@@ -7,7 +7,6 @@
     <title>CCMAX Control</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/lib/choices.min.css?v=__ASSET_VERSION__" />
-    <link rel="stylesheet" href="/lib/tabulator.min.css?v=__ASSET_VERSION__" />
     <link rel="stylesheet" href="/styles.css?v=__ASSET_VERSION__" />
   </head>
   <body>
@@ -559,7 +558,7 @@
               ><input
                 id="error-search"
                 type="search"
-                placeholder="账号、IP 或错误内容" /></label
+                placeholder="账号、IP、错误或请求 ID" /></label
             ><select id="error-source" data-choice>
               <option value="">全部来源</option>
               <option value="account">账号状态</option>
@@ -600,8 +599,25 @@
               每次网关报错都会记录该账号当时的瞬时 RPM / TPM
               与历史总请求，用于观察限流压力与报错的相关性。
             </p>
-            <div class="insight-chart-wrap">
-              <canvas id="insight-chart" height="230"></canvas>
+            <div class="insight-chart-grid">
+              <section class="insight-chart-section">
+                <div class="insight-chart-heading">
+                  <strong>时间分布</strong>
+                  <span id="insight-timeline-granularity">按天</span>
+                </div>
+                <div class="insight-chart-wrap">
+                  <canvas id="insight-timeline-chart" height="230"></canvas>
+                </div>
+              </section>
+              <section class="insight-chart-section">
+                <div class="insight-chart-heading">
+                  <strong>账号与 RPM</strong>
+                  <span>报错次数 / 平均瞬时 RPM</span>
+                </div>
+                <div class="insight-chart-wrap">
+                  <canvas id="insight-chart" height="230"></canvas>
+                </div>
+              </section>
             </div>
             <div class="table-wrap">
               <table class="error-table insight-table">
@@ -693,7 +709,7 @@
               </div>
               <span class="section-count" id="strategy-count">0 个策略</span>
             </div>
-            <div id="strategy-tree"></div>
+            <div id="strategy-accordion"></div>
           </section>
         </section>
 
@@ -1636,6 +1652,37 @@
           </div>
           <div class="group-mode-setting">
             <div>
+              <strong>429 重试等待</strong>
+              <small>收到上游 429 后释放当前账号，等待指定时间再切换其他账号重试；关闭时立即切换</small>
+            </div>
+            <label class="compact-toggle" title="429 重试等待">
+              <input
+                id="group-rate-limit-wait-enabled"
+                type="checkbox"
+                aria-label="429 重试等待" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>429 等待时间</strong>
+              <small>仅在开启 429 重试等待且仍有切号重试机会时生效</small>
+            </div>
+            <label class="compact-number" title="429 等待时间">
+              <input
+                id="group-rate-limit-wait-seconds"
+                type="number"
+                min="1"
+                max="600"
+                step="1"
+                value="5"
+                required
+                aria-label="429 等待秒数" />
+              <span>秒</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
               <strong>529 模型熔断</strong>
               <small title="同一账号与模型收到上游 529 后短暂暂停；该账号的其他模型不受影响">同一账号与模型收到上游 529 后短暂暂停，其他模型仍可调度</small>
             </div>
@@ -2291,7 +2338,6 @@
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
     <script src="/lib/choices.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/lib/chart.umd.min.js?v=__ASSET_VERSION__" defer></script>
-    <script src="/lib/tabulator.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/lib/lucide.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/app.js?v=__ASSET_VERSION__" defer></script>
   </body>

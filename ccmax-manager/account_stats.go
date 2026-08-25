@@ -145,12 +145,10 @@ func accountDispatchState(item account) string {
 }
 
 // accountLimitWindow reports which quota window is holding the account back, so
-// the UI can split "暂不可调度" into 5h and 7d buckets. It only answers while the
-// cooldown is still in the future; a stale window value is ignored.
+// the UI can split "暂不可调度" into 5h and 7d buckets. Older rows may not have
+// rate_limit_window populated, so matching the selected cooldown reset to the
+// sampled quota reset keeps those accounts classified correctly.
 func accountLimitWindow(item account) string {
-	if item.RateLimitWindow != "5h" && item.RateLimitWindow != "7d" {
-		return ""
-	}
 	if item.RateLimitResetAt == "" {
 		return ""
 	}
@@ -158,7 +156,10 @@ func accountLimitWindow(item account) string {
 	if err != nil || !reset.After(time.Now().UTC()) {
 		return ""
 	}
-	return item.RateLimitWindow
+	if item.RateLimitWindow == "5h" || item.RateLimitWindow == "7d" {
+		return item.RateLimitWindow
+	}
+	return quotaWindowMatchingReset(item.RateLimitResetAt, item.Quota5HResetAt, item.Quota7DResetAt)
 }
 
 func accountStatePredicate(alias, state string) string {
@@ -169,10 +170,23 @@ func accountStatePredicate(alias, state string) string {
 		"AND (" + alias + ".rate_limit_reset_at IS NULL OR " + alias + ".rate_limit_reset_at <= " + nowSQL + ") " +
 		"AND EXISTS (SELECT 1 FROM proxies state_proxy WHERE state_proxy.id = " + alias + ".proxy_id AND state_proxy.status = 'active' AND state_proxy.deleted_at IS NULL))"
 	unavailableState := "(NOT " + errorState + " AND NOT " + normalState + ")"
-	// A window bucket is a strict subset of "unavailable": the cooldown must
-	// still be active and the upstream must have told us which window it was.
+	resetMatches := func(quotaResetColumn string) string {
+		return "(" + alias + "." + quotaResetColumn + " IS NOT NULL" +
+			" AND ABS(strftime('%s', " + alias + ".rate_limit_reset_at) - strftime('%s', " + alias + "." + quotaResetColumn + ")) <= 1)"
+	}
+	fiveHourResetMatches := resetMatches("quota_5h_reset_at")
+	sevenDayResetMatches := resetMatches("quota_7d_reset_at")
+	// A window bucket is a strict subset of "unavailable". Prefer the explicit
+	// value, but infer old/ambiguous rows from the reset selected by the 429
+	// scheduler. If both resets happen to match, 7d remains the stricter window.
 	limitedState := func(window string) string {
-		return "(" + unavailableState + " AND " + alias + ".rate_limit_window = '" + window + "'" +
+		windowState := alias + ".rate_limit_window = '" + window + "'"
+		if window == "7d" {
+			windowState += " OR (" + alias + ".rate_limit_window NOT IN ('5h', '7d') AND " + sevenDayResetMatches + ")"
+		} else {
+			windowState += " OR (" + alias + ".rate_limit_window NOT IN ('5h', '7d') AND " + fiveHourResetMatches + " AND NOT " + sevenDayResetMatches + ")"
+		}
+		return "(" + unavailableState + " AND (" + windowState + ")" +
 			" AND " + alias + ".rate_limit_reset_at IS NOT NULL AND " + alias + ".rate_limit_reset_at > " + nowSQL + ")"
 	}
 	switch state {

@@ -296,16 +296,21 @@ func TestDistilledCompatibilityAccountFailoverKeepsRequestedModel(t *testing.T) 
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "蒸馏兼容", "rate_multiplier": 1,
 		"status": "active", "normal_request_mode": true,
+		"rate_limit_wait_enabled": true, "rate_limit_wait_seconds": 1,
 	}, http.StatusOK, nil)
 	key := createGatewayTestKey(t, handler)
 	limitedAccount := createGatewayTestAccount(t, a, handler, "limited-fable", limited.URL, 0, nil, map[string]any{"access_token": "first-token"})
 	availableAccount := createGatewayTestAccount(t, a, handler, "available-fable", available.URL, 1, nil, map[string]any{"access_token": "second-token"})
 
 	var response map[string]any
+	started := time.Now()
 	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
 		"model": "claude-fable-5", "max_tokens": 64,
 		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 	}, nil, key.Key, http.StatusOK, &response)
+	if elapsed := time.Since(started); elapsed < 900*time.Millisecond {
+		t.Fatalf("429 failover elapsed=%s, want configured wait", elapsed)
+	}
 	if response["model"] != "claude-fable-5" {
 		t.Fatalf("response model=%#v", response["model"])
 	}
@@ -678,6 +683,22 @@ func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
 	}
 	if got := <-captured; !bytes.Equal(got, rawBody) {
 		t.Fatalf("raw body changed\n got: %s\nwant: %s", got, rawBody)
+	}
+}
+
+func TestGatewayRateLimitWaitCanBeDisabledAndCanceled(t *testing.T) {
+	started := time.Now()
+	if err := waitForGatewayRateLimit(context.Background(), false, 600); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("disabled 429 wait took %s", elapsed)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForGatewayRateLimit(ctx, true, 600); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled 429 wait error=%v", err)
 	}
 }
 
@@ -1137,6 +1158,10 @@ func TestGatewayPassthroughStreamRateLimitLearnsRPMAndFailsOver(t *testing.T) {
 
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "流式 429 等待", "rate_multiplier": 1, "status": "active",
+		"rate_limit_wait_enabled": true, "rate_limit_wait_seconds": 1,
+	}, http.StatusOK, nil)
 	key := createGatewayTestKey(t, handler)
 	first := createGatewayTestAccount(t, a, handler, "passthrough-limited", limited.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token-a"})
 	second := createGatewayTestAccount(t, a, handler, "passthrough-healthy", healthy.URL, 1, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token-b"})
@@ -1144,7 +1169,11 @@ func TestGatewayPassthroughStreamRateLimitLearnsRPMAndFailsOver(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer "+key.Key)
 	response := httptest.NewRecorder()
 
+	started := time.Now()
 	handler.ServeHTTP(response, request)
+	if elapsed := time.Since(started); elapsed < 900*time.Millisecond {
+		t.Fatalf("stream 429 failover elapsed=%s, want configured wait", elapsed)
+	}
 
 	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != second.Name {
 		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
@@ -2215,6 +2244,31 @@ func TestGatewayChoosesSub2ExceededAnthropicWindow(t *testing.T) {
 	}
 	if !resetAt.Equal(sevenDayReset) {
 		t.Fatalf("reset at %s, want exceeded 7d window %s", resetAt, sevenDayReset)
+	}
+}
+
+func TestGatewayRecordsSelectedFiveHourWindow(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "five-hour-limited", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	now := time.Now().UTC()
+	fiveHourReset := now.Add(2 * time.Hour).Truncate(time.Second)
+	sevenDayReset := now.Add(4 * 24 * time.Hour).Truncate(time.Second)
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(fiveHourReset.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(sevenDayReset.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "1")
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", "0.41")
+
+	a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers})
+
+	var resetAt, window string
+	if err := a.db.QueryRow(`SELECT rate_limit_reset_at, rate_limit_window FROM accounts WHERE id = ?`, created.ID).Scan(&resetAt, &window); err != nil {
+		t.Fatal(err)
+	}
+	if resetAt != fiveHourReset.Format(time.RFC3339Nano) || window != "5h" {
+		t.Fatalf("stored cooldown = %s/%s, want %s/5h", resetAt, window, fiveHourReset.Format(time.RFC3339Nano))
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -85,6 +86,108 @@ func TestErrorLogsAggregateFilterPaginateAndRedact(t *testing.T) {
 
 	putJSON(t, a.routes(), http.MethodGet, "/api/error-logs?source=unknown", nil, http.StatusBadRequest, nil)
 	putJSON(t, a.routes(), http.MethodGet, "/api/error-logs?group_id=c", nil, http.StatusBadRequest, nil)
+}
+
+func TestErrorLogsDefaultToRetentionWindowAndPruneExpiredGatewayRows(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+
+	now := time.Now().UTC()
+	for _, item := range []struct {
+		requestID string
+		createdAt time.Time
+	}{
+		{requestID: "req-retention-recent", createdAt: now.AddDate(0, 0, -1)},
+		{requestID: "req-retention-expired", createdAt: now.AddDate(0, 0, -8)},
+	} {
+		if _, err := a.db.Exec(`INSERT INTO gateway_error_logs (request_id, group_id, status_code, category, method, path, message, created_at)
+			VALUES (?, 'a', 429, 'upstream_rate_limited', 'POST', '/v1/messages', 'retention marker', ?)`, item.requestID, item.createdAt.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var result errorLogResponse
+	putJSON(t, a.routes(), http.MethodGet, "/api/error-logs?source=gateway&search=req-retention", nil, http.StatusOK, &result)
+	if result.RetentionDays != 7 || result.Summary.Total != 1 || len(result.Items) != 1 || result.Items[0].RequestID != "req-retention-recent" {
+		t.Fatalf("default retention query = %+v", result)
+	}
+
+	if err := a.pruneGatewayErrorLogs(true); err != nil {
+		t.Fatal(err)
+	}
+	var expired, recent int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM gateway_error_logs WHERE request_id = 'req-retention-expired'`).Scan(&expired); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM gateway_error_logs WHERE request_id = 'req-retention-recent'`).Scan(&recent); err != nil {
+		t.Fatal(err)
+	}
+	if expired != 0 || recent != 1 {
+		t.Fatalf("pruned rows expired=%d recent=%d", expired, recent)
+	}
+}
+
+func TestErrorInsightsIncludeFilteredTimeDistribution(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+
+	createAccount := func(name, groupID string) int64 {
+		result, err := a.db.Exec(`INSERT INTO accounts (name, base_rpm) VALUES (?, 10)`, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accountID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.db.Exec(`INSERT INTO account_groups (account_id, group_id) VALUES (?, ?)`, accountID, groupID); err != nil {
+			t.Fatal(err)
+		}
+		return accountID
+	}
+	targetID := createAccount("timeline-hit-account", "a")
+	otherID := createAccount("timeline-other-account", "b")
+	hour := time.Now().UTC().Truncate(time.Hour)
+	insertEvent := func(accountID int64, groupID string, createdAt time.Time) {
+		if _, err := a.db.Exec(`INSERT INTO gateway_error_logs (request_id, account_id, group_id, status_code, category, method, path, message, rpm_snapshot, tpm_snapshot, total_requests, created_at)
+			VALUES (?, ?, ?, 429, 'upstream_rate_limited', 'POST', '/v1/messages', 'timeline marker', 8, 1200, 99, ?)`, newRequestID(), accountID, groupID, createdAt.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertEvent(targetID, "a", hour.Add(-2*time.Hour))
+	insertEvent(targetID, "a", hour.Add(-time.Hour))
+	insertEvent(otherID, "b", hour.Add(-time.Hour))
+
+	query := url.Values{
+		"status":   {"429"},
+		"group_id": {"a"},
+		"search":   {"timeline-hit"},
+		"from":     {hour.Add(-3 * time.Hour).Format(time.RFC3339Nano)},
+		"to":       {hour.Add(time.Hour).Format(time.RFC3339Nano)},
+	}
+	var result errorInsightResponse
+	putJSON(t, a.routes(), http.MethodGet, "/api/error-insights?"+query.Encode(), nil, http.StatusOK, &result)
+	if result.TimelineGranularity != "hour" || len(result.Accounts) != 1 || result.Accounts[0].AccountID != targetID || result.Accounts[0].Count != 2 {
+		t.Fatalf("filtered insight accounts = %+v", result)
+	}
+	if len(result.Events) != 2 || len(result.Timeline) != 2 {
+		t.Fatalf("filtered insight events=%d timeline=%+v", len(result.Events), result.Timeline)
+	}
+	var timelineTotal int64
+	for _, point := range result.Timeline {
+		timelineTotal += point.Count
+	}
+	if timelineTotal != 2 {
+		t.Fatalf("timeline total=%d, want 2", timelineTotal)
+	}
 }
 
 func TestErrorLogsPagePermission(t *testing.T) {

@@ -60,6 +60,8 @@ type gatewayKey struct {
 	RejectAnthropicDowngrade  bool
 	RejectDistillation        bool
 	OverloadCooldownSeconds   int
+	RateLimitWaitEnabled      bool
+	RateLimitWaitSeconds      int
 	CapacityQueueEnabled      bool
 	CapacityQueueTimeout      int
 	StrategyRequiredEnabled   bool
@@ -441,6 +443,12 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 					break
 				}
 			}
+			if response.StatusCode == http.StatusTooManyRequests && attempt+1 < maxAccountAttempts {
+				if waitErr := waitForGatewayRateLimit(r.Context(), key.RateLimitWaitEnabled, key.RateLimitWaitSeconds); waitErr != nil {
+					recordGatewayContextFailure(w, r, waitErr)
+					return
+				}
+			}
 			continue
 		}
 		if response.StatusCode >= 400 && !prepared.Passthrough {
@@ -476,6 +484,12 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				forbiddenFailures++
 				if forbiddenFailures >= gatewayForbiddenFailoverAttempts {
 					break
+				}
+			}
+			if preOutputErr.status == http.StatusTooManyRequests && attempt+1 < maxAccountAttempts {
+				if waitErr := waitForGatewayRateLimit(r.Context(), key.RateLimitWaitEnabled, key.RateLimitWaitSeconds); waitErr != nil {
+					recordGatewayContextFailure(w, r, waitErr)
+					return
 				}
 			}
 			continue
@@ -584,6 +598,25 @@ func recordGatewayContextFailure(w http.ResponseWriter, r *http.Request, err err
 		return true
 	}
 	return false
+}
+
+func waitForGatewayRateLimit(ctx context.Context, enabled bool, seconds int) error {
+	if !enabled {
+		return nil
+	}
+	if seconds < 1 {
+		seconds = 5
+	} else if seconds > 600 {
+		seconds = 600
+	}
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (a *app) classifyGatewayNoAccount(groupID, model string, cause error) (int, string, string) {
@@ -1450,11 +1483,11 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.overload_cooldown_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, rateLimitWaitEnabled, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.overload_cooldown_seconds, g.rate_limit_wait_enabled, g.rate_limit_wait_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &key.OverloadCooldownSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &key.OverloadCooldownSeconds, &rateLimitWaitEnabled, &key.RateLimitWaitSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
@@ -1466,6 +1499,7 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	key.AnthropicBetaPassthrough = anthropicBetaPassthrough == 1
 	key.RejectAnthropicDowngrade = rejectAnthropicDowngrade == 1
 	key.RejectDistillation = rejectDistillation == 1
+	key.RateLimitWaitEnabled = rateLimitWaitEnabled == 1
 	key.CapacityQueueEnabled = capacityQueueEnabled == 1
 	key.StrategyRequiredEnabled = strategyRequired == 1
 	return key, err
@@ -1806,6 +1840,14 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		if !rpmSchedulable(candidate.account, candidate.rpm, sticky) {
 			diagnostics.RPMBlocked++
 			continue
+		}
+		if sticky && candidate.strategyMode == "round_robin" {
+			// Keep an eligible conversation on its bound account so upstream
+			// prompt-cache reads survive round-robin dispatch. The reservation
+			// below still increments this account's RPM, so sticky traffic uses
+			// its normal share and new sessions fill the lower-load accounts.
+			selectedIndex = index
+			break
 		}
 		if selectedIndex < 0 {
 			selectedIndex = index

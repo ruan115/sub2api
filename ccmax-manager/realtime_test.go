@@ -202,6 +202,64 @@ func TestDispatchStrategyRoundRobinSpreadsRPM(t *testing.T) {
 	}
 }
 
+func TestDispatchStrategyRoundRobinKeepsStickyTrafficInItsShare(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	var strategy struct {
+		ID int64 `json:"id"`
+	}
+	putJSON(t, handler, http.MethodPost, "/api/strategies", map[string]any{
+		"name": "round-robin-sticky", "rpm_limit": 100, "rpm_strategy": "fixed", "dispatch_mode": "round_robin",
+	}, http.StatusCreated, &strategy)
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "round robin sticky", "rate_multiplier": 1,
+		"status": "active", "rpm_dispatch_enabled": true, "strategy_id": strategy.ID,
+	}, http.StatusOK, nil)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := createGatewayTestAccount(t, a, handler, "rr-sticky-first", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	second := createGatewayTestAccount(t, a, handler, "rr-sticky-second", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	third := createGatewayTestAccount(t, a, handler, "rr-sticky-third", "https://third.example.test", 0, nil, map[string]any{"access_token": "token-c"})
+
+	selectAccount := func(session string) int64 {
+		t.Helper()
+		selected, acquireErr := a.acquireGatewayAccount(key, session, "claude-test", map[int64]bool{})
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		a.releaseGatewayAccount(selected.ID)
+		return selected.ID
+	}
+	selectedIDs := []int64{
+		selectAccount("conversation-a"),
+		selectAccount("conversation-a"),
+		selectAccount("conversation-b"),
+		selectAccount("conversation-c"),
+		selectAccount("conversation-d"),
+		selectAccount("conversation-e"),
+	}
+	want := []int64{first.ID, first.ID, second.ID, third.ID, second.ID, third.ID}
+	for index, id := range want {
+		if selectedIDs[index] != id {
+			t.Fatalf("round-robin sticky selections = %v, want %v", selectedIDs, want)
+		}
+	}
+
+	for _, accountID := range []int64{first.ID, second.ID, third.ID} {
+		var rpm int
+		if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ?`, accountID).Scan(&rpm); err != nil {
+			t.Fatal(err)
+		}
+		if rpm != 2 {
+			t.Fatalf("account %d reserved RPM = %d, want 2", accountID, rpm)
+		}
+	}
+}
+
 func TestDispatchStrategyRoundRobinReservesRPMWithoutGroupDispatch(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)

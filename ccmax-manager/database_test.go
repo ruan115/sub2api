@@ -60,3 +60,19 @@ func TestMySQLQueryRewriteQuotesGroupsTable(t *testing.T) {
 		t.Fatalf("rewriteQuery() changed an already quoted identifier: %q", got)
 	}
 }
+
+func TestMySQLQueryRewriteErrorLogConcatenations(t *testing.T) {
+	input := `SELECT (',' || group_ids || ','), al.action || ' · ' || al.method || ' ' || al.path || ' 返回 HTTP ' || al.status_code FROM groups`
+	want := "SELECT CONCAT(',', group_ids, ','), CONCAT(al.action, ' · ', al.method, ' ', al.path, ' 返回 HTTP ', al.status_code) FROM `groups`"
+	if got := rewriteQuery(dialectMySQL, input); got != want {
+		t.Fatalf("rewriteQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestMySQLQueryRewriteAccountLimitResetDifference(t *testing.T) {
+	input := `SELECT ABS(strftime('%s', a.rate_limit_reset_at) - strftime('%s', a.quota_5h_reset_at)) FROM accounts a`
+	want := `SELECT ABS(TIMESTAMPDIFF(SECOND, a.rate_limit_reset_at, a.quota_5h_reset_at)) FROM accounts a`
+	if got := rewriteQuery(dialectMySQL, input); got != want {
+		t.Fatalf("rewriteQuery() = %q, want %q", got, want)
+	}
+}

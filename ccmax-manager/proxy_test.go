@@ -104,6 +104,96 @@ func TestProxyPoolDeleteRemovesPoolProxies(t *testing.T) {
 	}
 }
 
+func TestProxyPoolUpdateSynchronizesExistingProxyProtocols(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var pool proxyPool
+	putJSON(t, handler, http.MethodPost, "/api/proxy-pools", map[string]any{
+		"name": "servers", "source_type": "manual", "default_protocol": "socks5", "status": "active",
+	}, http.StatusCreated, &pool)
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": pool.ID,
+		"text":    "192.0.2.10:22:root:first-password\n192.0.2.11:22:root:second-password",
+	}, http.StatusCreated, nil)
+
+	var updated proxyPool
+	putJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/proxy-pools/%d", pool.ID), map[string]any{
+		"name": "servers", "source_type": "manual", "default_protocol": "ssh", "status": "active",
+	}, http.StatusOK, &updated)
+	if updated.DefaultProtocol != "ssh" || updated.ProtocolSynced != 2 {
+		t.Fatalf("updated pool = %+v, want ssh with 2 synchronized proxies", updated)
+	}
+
+	rows, err := a.db.Query(`SELECT protocol, username, password FROM proxies WHERE pool_id = ? AND deleted_at IS NULL ORDER BY id`, pool.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	passwords := []string{"first-password", "second-password"}
+	index := 0
+	for rows.Next() {
+		var protocol, username, password string
+		if err := rows.Scan(&protocol, &username, &password); err != nil {
+			t.Fatal(err)
+		}
+		if protocol != "ssh" || username != "root" || index >= len(passwords) || password != passwords[index] {
+			t.Fatalf("proxy %d = %s://%s:%s", index, protocol, username, password)
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if index != 2 {
+		t.Fatalf("synchronized proxies = %d, want 2", index)
+	}
+}
+
+func TestProxyPoolUpdateRejectsProtocolMergeCollision(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var pool proxyPool
+	putJSON(t, handler, http.MethodPost, "/api/proxy-pools", map[string]any{
+		"name": "mixed", "source_type": "manual", "default_protocol": "socks5", "status": "active",
+	}, http.StatusCreated, &pool)
+	for _, protocol := range []string{"socks5", "http"} {
+		if _, err := a.db.Exec(`INSERT INTO proxies (pool_id, name, protocol, host, port, username, password) VALUES (?, ?, ?, '192.0.2.20', 8080, 'user', 'password')`, pool.ID, protocol, protocol); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	putJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/proxy-pools/%d", pool.ID), map[string]any{
+		"name": "mixed", "source_type": "manual", "default_protocol": "https", "status": "active",
+	}, http.StatusConflict, nil)
+
+	var defaultProtocol string
+	if err := a.db.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ?`, pool.ID).Scan(&defaultProtocol); err != nil {
+		t.Fatal(err)
+	}
+	if defaultProtocol != "socks5" {
+		t.Fatalf("default protocol = %q after rejected update, want socks5", defaultProtocol)
+	}
+	var distinctProtocols int
+	if err := a.db.QueryRow(`SELECT COUNT(DISTINCT protocol) FROM proxies WHERE pool_id = ? AND deleted_at IS NULL`, pool.ID).Scan(&distinctProtocols); err != nil {
+		t.Fatal(err)
+	}
+	if distinctProtocols != 2 {
+		t.Fatalf("protocols after rejected update = %d, want 2", distinctProtocols)
+	}
+}
+
 func TestProxyPoolDeleteRejectsAssignedPool(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

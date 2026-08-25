@@ -3375,10 +3375,54 @@ label small {
   color: var(--muted);
   font-size: 12px;
 }
+.insight-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-bottom: 14px;
+}
+.insight-chart-section {
+  min-width: 0;
+}
+.insight-chart-section + .insight-chart-section {
+  padding-left: 18px;
+  border-left: 1px solid var(--line);
+}
+.insight-chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  margin-bottom: 8px;
+  gap: 12px;
+}
+.insight-chart-heading strong,
+.insight-chart-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insight-chart-heading strong {
+  font-size: 13px;
+}
+.insight-chart-heading span {
+  color: var(--muted);
+  font-size: 11px;
+}
 .insight-chart-wrap {
   position: relative;
-  height: 260px;
-  margin-bottom: 14px;
+  height: 240px;
+}
+@media (max-width: 980px) {
+  .insight-chart-grid {
+    grid-template-columns: 1fr;
+  }
+  .insight-chart-section + .insight-chart-section {
+    padding-top: 16px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
 }
 .insight-table .error-message-cell {
   max-width: 420px;
@@ -3590,56 +3634,231 @@ label small {
 .empty-state.compact {
   min-height: 180px;
 }
-#strategy-tree {
+#strategy-accordion {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--panel);
 }
-#strategy-tree .tabulator {
+.strategy-accordion-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+.strategy-accordion-table {
+  width: 100%;
+  min-width: 1080px;
+  table-layout: fixed;
+}
+.strategy-accordion-table .strategy-col-name {
+  width: 24%;
+}
+.strategy-accordion-table .strategy-col-status {
+  width: 12%;
+}
+.strategy-accordion-table .strategy-col-binding {
+  width: 15%;
+}
+.strategy-accordion-table > thead th {
+  height: 40px;
+  padding: 0 14px;
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strategy-summary-row td {
+  height: 62px;
+  padding: 8px 14px;
+  overflow: hidden;
+  background: var(--panel);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 160ms ease;
+}
+.strategy-accordion-group:not(:last-child) .strategy-summary-row td {
+  border-bottom: 1px solid var(--line);
+}
+.strategy-summary-row:hover td {
+  background: #fafbf9;
+}
+.strategy-accordion-group.is-open .strategy-summary-row td {
+  border-bottom: 1px solid var(--line);
+  background: #f7faf8;
+}
+.strategy-accordion-trigger {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 0;
   border: 0;
-  border-radius: 10px;
-  background: var(--panel);
-  font-size: 12px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
 }
-#strategy-tree .tabulator-header,
-#strategy-tree .tabulator-header .tabulator-col {
-  border-color: var(--line);
-  background: var(--panel-muted);
+.strategy-trigger-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
   color: var(--muted);
 }
-#strategy-tree .tabulator-header .tabulator-col,
-#strategy-tree .tabulator-row .tabulator-cell {
+.strategy-trigger-icon svg {
+  width: 15px;
+  height: 15px;
+  transition: transform 180ms ease;
+}
+.strategy-accordion-group.is-open .strategy-trigger-icon {
+  border-color: rgba(22, 119, 84, 0.25);
+  color: var(--a);
+}
+.strategy-accordion-group.is-open .strategy-trigger-icon svg {
+  transform: rotate(90deg);
+}
+.strategy-trigger-copy,
+.strategy-mode {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+}
+.strategy-trigger-copy strong,
+.strategy-trigger-copy small,
+.strategy-mode strong,
+.strategy-mode small {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#strategy-tree .tabulator-header .tabulator-col-title {
-  overflow: hidden;
-  font-family: var(--font-ui);
-  font-size: 11px;
+.strategy-trigger-copy strong,
+.strategy-mode strong {
+  font-size: 12px;
   font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-#strategy-tree .tabulator-row {
-  background: var(--panel);
-  color: var(--ink);
+.strategy-trigger-copy small,
+.strategy-mode small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
 }
-#strategy-tree .tabulator-row.tabulator-row-even {
-  background: #fbfbfc;
+.strategy-detail-row[hidden] {
+  display: none;
 }
-#strategy-tree .tabulator-row .tabulator-cell {
+.strategy-detail-row > td {
+  height: auto;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  background: #f5f7f6;
+}
+.strategy-detail-panel {
+  padding: 12px 14px 16px 52px;
+  animation: strategy-accordion-reveal 180ms ease-out;
+}
+.strategy-detail-head {
   display: flex;
   align-items: center;
-  min-height: 38px;
-  border-color: var(--line);
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 10px;
 }
-#strategy-tree .tabulator-placeholder {
+.strategy-detail-head strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+.strategy-detail-head span {
+  white-space: nowrap;
+}
+.strategy-account-table-wrap {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
   background: var(--panel);
 }
-#strategy-tree .tabulator-placeholder span {
+.strategy-account-table {
+  min-width: 820px;
+  table-layout: fixed;
+}
+.strategy-account-table th {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 9px;
+}
+.strategy-account-table td {
+  height: 44px;
+  padding: 7px 12px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strategy-account-table th:nth-child(1) {
+  width: 24%;
+}
+.strategy-account-table th:nth-child(2) {
+  width: 16%;
+}
+.strategy-account-table th:nth-child(3),
+.strategy-account-table th:nth-child(4),
+.strategy-account-table th:nth-child(5) {
+  width: 13%;
+}
+.strategy-account-table th:nth-child(6) {
+  width: 12%;
+}
+.strategy-account-name,
+.strategy-account-groups,
+.strategy-binding-source {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strategy-account-empty td {
+  height: 82px;
   color: var(--muted);
-  font-size: 15px;
-  font-weight: 650;
+  text-align: center;
+}
+.strategy-account-empty svg {
+  width: 15px;
+  height: 15px;
+  margin-right: 7px;
+  vertical-align: -3px;
+}
+.strategy-accordion-placeholder {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.strategy-accordion-placeholder svg {
+  width: 18px;
+  height: 18px;
+}
+@keyframes strategy-accordion-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (max-width: 720px) {
+  .strategy-detail-panel {
+    padding-left: 14px;
+  }
 }

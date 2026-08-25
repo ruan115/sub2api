@@ -678,6 +678,14 @@ func GenerateCCMaxCompatibilitySessionHash(body []byte, clientIP, userAgent stri
 // decisions used by RateLimitService. Model-scoped overloads are intentionally
 // excluded and must be handled by the caller's model scheduler.
 func ResolveCCMaxCompatibilityCooldown(status int, headers http.Header) (time.Time, bool) {
+	resetAt, _, ok := ResolveCCMaxCompatibilityCooldownWindow(status, headers)
+	return resetAt, ok
+}
+
+// ResolveCCMaxCompatibilityCooldownWindow returns the same cooldown decision
+// together with the quota window that selected it. An empty window means the
+// response only qualified for the short transient 429 cooldown.
+func ResolveCCMaxCompatibilityCooldownWindow(status int, headers http.Header) (time.Time, string, bool) {
 	switch status {
 	case http.StatusTooManyRequests:
 		// Only explicit 5h/7d exhaustion is strong enough to park the whole
@@ -685,11 +693,11 @@ func ResolveCCMaxCompatibilityCooldown(status int, headers http.Header) (time.Ti
 		// is also emitted for transient and model-scoped 429s, so trusting it on
 		// its own can incorrectly remove a healthy account for several days.
 		if limit := selectAnthropicExhaustedWindow(headers, time.Now()); limit != nil {
-			return limit.resetAt, true
+			return limit.resetAt, limit.window, true
 		}
-		return time.Now().Add(defaultRateLimit429CooldownSeconds * time.Second), true
+		return time.Now().Add(defaultRateLimit429CooldownSeconds * time.Second), "", true
 	default:
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -434,4 +435,20 @@ func TestResolveCCMaxCompatibilityCooldownKeeps529ModelScoped(t *testing.T) {
 	resetAt, ok := ResolveCCMaxCompatibilityCooldown(http.StatusTooManyRequests, make(http.Header))
 	require.True(t, ok)
 	require.WithinDuration(t, time.Now().Add(5*time.Second), resetAt, time.Second)
+}
+
+func TestResolveCCMaxCompatibilityCooldownWindowReportsSelectedWindow(t *testing.T) {
+	reset := time.Now().Add(time.Hour).Truncate(time.Second)
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "1")
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset.Unix(), 10))
+
+	resetAt, window, ok := ResolveCCMaxCompatibilityCooldownWindow(http.StatusTooManyRequests, headers)
+	require.True(t, ok)
+	require.Equal(t, "5h", window)
+	require.Equal(t, reset, resetAt)
+
+	_, window, ok = ResolveCCMaxCompatibilityCooldownWindow(http.StatusTooManyRequests, make(http.Header))
+	require.True(t, ok)
+	require.Empty(t, window)
 }

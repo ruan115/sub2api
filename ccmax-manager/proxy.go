@@ -36,6 +36,7 @@ type proxyPool struct {
 	LastError       string `json:"last_error"`
 	CreatedAt       string `json:"created_at"`
 	UpdatedAt       string `json:"updated_at"`
+	ProtocolSynced  int64  `json:"protocol_synced,omitempty"`
 }
 
 type proxyPoolInput struct {
@@ -546,8 +547,49 @@ func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, err := a.db.Exec(`UPDATE proxy_pools SET name = ?, source_type = ?, api_url = ?, api_headers_json = ?, default_protocol = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, id)
+	tx, err := a.db.Begin()
 	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
+
+	var previousProtocol string
+	if err := tx.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, id).Scan(&previousProtocol); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "proxy pool not found")
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+
+	var protocolSynced int64
+	if previousProtocol != input.DefaultProtocol {
+		var collisions int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM (
+			SELECT 1 FROM proxies WHERE pool_id = ? AND deleted_at IS NULL
+			GROUP BY host, port, username, password HAVING COUNT(*) > 1
+		) duplicate_endpoints`, id).Scan(&collisions); err != nil {
+			writeDBError(w, err)
+			return
+		}
+		if collisions > 0 {
+			writeError(w, http.StatusConflict, "代理池中存在相同地址和认证信息的多协议代理，无法统一协议")
+			return
+		}
+		result, err := tx.Exec(`UPDATE proxies SET protocol = ?, updated_at = `+nowSQL+` WHERE pool_id = ? AND deleted_at IS NULL`, input.DefaultProtocol, id)
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		protocolSynced, _ = result.RowsAffected()
+	}
+	if _, err := tx.Exec(`UPDATE proxy_pools SET name = ?, source_type = ?, api_url = ?, api_headers_json = ?, default_protocol = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, id); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -556,6 +598,7 @@ func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "proxy pool not found")
 		return
 	}
+	item.ProtocolSynced = protocolSynced
 	writeJSON(w, http.StatusOK, item)
 }
 

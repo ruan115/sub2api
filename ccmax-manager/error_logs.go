@@ -46,12 +46,15 @@ type errorLogSummary struct {
 }
 
 type errorLogResponse struct {
-	Summary    errorLogSummary `json:"summary"`
-	Items      []errorLogItem  `json:"items"`
-	Page       int             `json:"page"`
-	PageSize   int             `json:"page_size"`
-	TotalPages int             `json:"total_pages"`
+	Summary       errorLogSummary `json:"summary"`
+	Items         []errorLogItem  `json:"items"`
+	Page          int             `json:"page"`
+	PageSize      int             `json:"page_size"`
+	TotalPages    int             `json:"total_pages"`
+	RetentionDays int             `json:"retention_days"`
 }
+
+const errorLogPruneInterval = time.Hour
 
 var (
 	errorStatusPattern          = regexp.MustCompile(`(?i)(?:http|status(?:\s+code)?|oauth)[^0-9]{0,12}([1-5][0-9]{2})`)
@@ -157,20 +160,21 @@ func (a *app) handleErrorLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
-		where = append(where, "(message LIKE ? OR account_name LIKE ? OR proxy_ip LIKE ? OR actor LIKE ? OR path LIKE ? OR request_id LIKE ? OR client_request_id LIKE ? OR trace_id LIKE ? OR upstream_request_id LIKE ?)")
-		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
+		where = append(where, "(message LIKE ? OR category LIKE ? OR account_name LIKE ? OR proxy_ip LIKE ? OR actor LIKE ? OR method LIKE ? OR path LIKE ? OR request_id LIKE ? OR client_request_id LIKE ? OR trace_id LIKE ? OR upstream_request_id LIKE ?)")
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
-	if from := normalizeDateStart(strings.TrimSpace(r.URL.Query().Get("from"))); from != "" {
+	from, to := a.errorLogTimeBounds(r)
+	if from != "" {
 		where = append(where, "created_at >= ?")
 		args = append(args, from)
 	}
-	if to := normalizeDateEnd(strings.TrimSpace(r.URL.Query().Get("to"))); to != "" {
+	if to != "" {
 		where = append(where, "created_at < ?")
 		args = append(args, to)
 	}
 
 	clause := strings.Join(where, " AND ")
-	result := errorLogResponse{Items: []errorLogItem{}}
+	result := errorLogResponse{Items: []errorLogItem{}, RetentionDays: a.errorRetention}
 	summaryRows, err := a.db.Query(errorEventsCTE+` SELECT source, COUNT(*) FROM error_events WHERE `+clause+` GROUP BY source`, args...)
 	if err != nil {
 		writeDBError(w, err)
@@ -267,10 +271,17 @@ type errorInsightEvent struct {
 	CreatedAt     string `json:"created_at"`
 }
 
+type errorInsightTimelinePoint struct {
+	Bucket string `json:"bucket"`
+	Count  int64  `json:"count"`
+}
+
 type errorInsightResponse struct {
-	Status   int                   `json:"status"`
-	Accounts []errorInsightAccount `json:"accounts"`
-	Events   []errorInsightEvent   `json:"events"`
+	Status              int                         `json:"status"`
+	Accounts            []errorInsightAccount       `json:"accounts"`
+	Events              []errorInsightEvent         `json:"events"`
+	Timeline            []errorInsightTimelinePoint `json:"timeline"`
+	TimelineGranularity string                      `json:"timeline_granularity"`
 }
 
 // handleErrorInsights aggregates gateway errors of one status code (401 by
@@ -288,16 +299,38 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	where := []string{"ge.status_code = ?", "ge.account_id IS NOT NULL"}
 	args := []any{status}
-	if from := normalizeDateStart(strings.TrimSpace(r.URL.Query().Get("from"))); from != "" {
+	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupID != "" {
+		if !groupIDPattern.MatchString(groupID) {
+			writeError(w, http.StatusBadRequest, "invalid group")
+			return
+		}
+		if err := a.validateGroupIDs([]string{groupID}, false); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid group")
+			return
+		}
+		where = append(where, "ge.group_id = ?")
+		args = append(args, groupID)
+	}
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		pattern := "%" + search + "%"
+		where = append(where, "(ge.message LIKE ? OR ge.category LIKE ? OR a.name LIKE ? OR ge.request_id LIKE ? OR ge.client_request_id LIKE ? OR ge.trace_id LIKE ? OR ge.upstream_request_id LIKE ?)")
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+	from, to := a.errorLogTimeBounds(r)
+	if from != "" {
 		where = append(where, "ge.created_at >= ?")
 		args = append(args, from)
 	}
-	if to := normalizeDateEnd(strings.TrimSpace(r.URL.Query().Get("to"))); to != "" {
+	if to != "" {
 		where = append(where, "ge.created_at < ?")
 		args = append(args, to)
 	}
 	clause := strings.Join(where, " AND ")
-	result := errorInsightResponse{Status: status, Accounts: []errorInsightAccount{}, Events: []errorInsightEvent{}}
+	granularity := errorInsightGranularity(from, to)
+	result := errorInsightResponse{
+		Status: status, Accounts: []errorInsightAccount{}, Events: []errorInsightEvent{},
+		Timeline: []errorInsightTimelinePoint{}, TimelineGranularity: granularity,
+	}
 
 	rows, err := a.db.Query(`SELECT ge.account_id, COALESCE(a.name, ''), COALESCE(a.base_rpm, 0), COUNT(*),
 		COALESCE(AVG(CASE WHEN ge.rpm_snapshot >= 0 THEN ge.rpm_snapshot END), 0),
@@ -324,6 +357,30 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
+	bucketExpression := errorInsightBucketExpression(a.db.dialect, granularity)
+	timelineRows, err := a.db.Query(`SELECT `+bucketExpression+` AS bucket, COUNT(*)
+		FROM gateway_error_logs ge LEFT JOIN accounts a ON a.id = ge.account_id
+		WHERE `+clause+` GROUP BY bucket ORDER BY bucket`, args...)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	for timelineRows.Next() {
+		var item errorInsightTimelinePoint
+		if err := timelineRows.Scan(&item.Bucket, &item.Count); err != nil {
+			timelineRows.Close()
+			writeDBError(w, err)
+			return
+		}
+		result.Timeline = append(result.Timeline, item)
+	}
+	if err := timelineRows.Err(); err != nil {
+		timelineRows.Close()
+		writeDBError(w, err)
+		return
+	}
+	timelineRows.Close()
+
 	eventRows, err := a.db.Query(`SELECT ge.account_id, COALESCE(a.name, ''), ge.status_code, ge.category, ge.message,
 		ge.rpm_snapshot, ge.tpm_snapshot, ge.total_requests, ge.created_at
 		FROM gateway_error_logs ge LEFT JOIN accounts a ON a.id = ge.account_id
@@ -347,6 +404,67 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *app) errorLogTimeBounds(r *http.Request) (string, string) {
+	from := normalizeDateStart(strings.TrimSpace(r.URL.Query().Get("from")))
+	if from == "" {
+		days := a.errorRetention
+		if days <= 0 {
+			days = 7
+		}
+		from = time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339Nano)
+	}
+	return from, normalizeDateEnd(strings.TrimSpace(r.URL.Query().Get("to")))
+}
+
+func errorInsightGranularity(from, to string) string {
+	start, err := time.Parse(time.RFC3339Nano, from)
+	if err != nil {
+		return "day"
+	}
+	end := time.Now().UTC()
+	if to != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, to); parseErr == nil {
+			end = parsed
+		}
+	}
+	if end.After(start) && end.Sub(start) <= 48*time.Hour {
+		return "hour"
+	}
+	return "day"
+}
+
+func errorInsightBucketExpression(dialect databaseDialect, granularity string) string {
+	if dialect == dialectMySQL {
+		if granularity == "hour" {
+			return `DATE_FORMAT(DATE_ADD(ge.created_at, INTERVAL 8 HOUR), '%Y-%m-%dT%H:00:00+08:00')`
+		}
+		return `DATE_FORMAT(DATE_ADD(ge.created_at, INTERVAL 8 HOUR), '%Y-%m-%dT00:00:00+08:00')`
+	}
+	if granularity == "hour" {
+		return `strftime('%Y-%m-%dT%H:00:00+08:00', ge.created_at, '+8 hours')`
+	}
+	return `strftime('%Y-%m-%dT00:00:00+08:00', ge.created_at, '+8 hours')`
+}
+
+func (a *app) pruneGatewayErrorLogs(force bool) error {
+	a.errorPruneMu.Lock()
+	defer a.errorPruneMu.Unlock()
+	now := time.Now().UTC()
+	if !force && !a.lastErrorPrune.IsZero() && now.Sub(a.lastErrorPrune) < errorLogPruneInterval {
+		return nil
+	}
+	days := a.errorRetention
+	if days <= 0 {
+		days = 7
+	}
+	cutoff := now.AddDate(0, 0, -days).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`DELETE FROM gateway_error_logs WHERE created_at < ?`, cutoff); err != nil {
+		return fmt.Errorf("prune gateway error logs: %w", err)
+	}
+	a.lastErrorPrune = now
+	return nil
 }
 
 func splitErrorGroupIDs(value string) []string {
@@ -691,6 +809,7 @@ func (a *app) recordGatewayError(r *http.Request, response *gatewayErrorResponse
 	rpmSnapshot, tpmSnapshot, totalRequests := a.accountLoadSnapshot(response.accountID)
 	_, _ = a.db.Exec(`INSERT INTO gateway_error_logs (request_id, client_request_id, trace_id, upstream_request_id, api_key_id, user_id, account_id, group_id, status_code, category, method, path, message, client_ip, dispatch_diagnostics, duration_ms, rpm_snapshot, tpm_snapshot, total_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		requestID, clientRequestID, traceID, upstreamRequestID, key.ID, key.UserID, optionalID(response.accountID), key.GroupID, status, category, r.Method, r.URL.Path, message, requestIP(r), response.dispatchDiagnostics, response.durationMS, rpmSnapshot, tpmSnapshot, totalRequests)
+	_ = a.pruneGatewayErrorLogs(false)
 }
 
 // accountLoadSnapshot captures the account's load at the moment an error is

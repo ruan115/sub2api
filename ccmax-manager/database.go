@@ -124,6 +124,8 @@ var mysqlRPMThresholdUpsertPattern = regexp.MustCompile(`ON CONFLICT\(account_id
 
 var mysqlProxyHistoryUpsertPattern = regexp.MustCompile(`ON CONFLICT\(proxy_id, account_id\)\s+DO UPDATE SET\s+first_bound_at = LEAST\(proxy_account_history\.first_bound_at, VALUES\(first_bound_at\)\),\s+last_bound_at = GREATEST\(proxy_account_history\.last_bound_at, VALUES\(last_bound_at\)\),\s+bind_count = proxy_account_history\.bind_count \+ excluded\.bind_count`)
 
+var mysqlTimestampDifferencePattern = regexp.MustCompile(`ABS\(strftime\('%s',\s*([a-zA-Z0-9_.]+)\)\s*-\s*strftime\('%s',\s*([a-zA-Z0-9_.]+)\)\)`)
+
 func rewriteQuery(dialect databaseDialect, query string) string {
 	if dialect != dialectMySQL {
 		return query
@@ -136,13 +138,14 @@ func rewriteQuery(dialect databaseDialect, query string) string {
 		{"INSERT OR IGNORE", "INSERT IGNORE"},
 		{"MAX(0, CAST(strftime('%s', invalidated_at) AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER))", "GREATEST(0, TIMESTAMPDIFF(SECOND, onboarded_at, invalidated_at))"},
 		{"MAX(0, CAST(strftime('%s','now') AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER))", "GREATEST(0, TIMESTAMPDIFF(SECOND, onboarded_at, UTC_TIMESTAMP(3)))"},
-		{"strftime('%Y-%m-%dT%H:%M:%fZ','now','-90 days')", "(UTC_TIMESTAMP(3) - INTERVAL 90 DAY)"},
 		{"strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')", "(UTC_TIMESTAMP(3) - INTERVAL 60 SECOND)"},
 		{"strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 second')", "(UTC_TIMESTAMP(3) - INTERVAL 1 SECOND)"},
 		{"strftime('%Y-%m-%dT%H:%M:%fZ','now')", "UTC_TIMESTAMP(3)"},
 		{"CAST(strftime('%s','now') AS INTEGER)", "UNIX_TIMESTAMP(UTC_TIMESTAMP(3))"},
 		{"COALESCE(json_extract(credentials_json, '$.refresh_token'), '')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(credentials_json, '$.refresh_token')), '')"},
 		{"CASE WHEN COALESCE(px.id, archived_px.id) IS NULL THEN '' ELSE COALESCE(px.protocol, archived_px.protocol) || '://' || COALESCE(px.host, archived_px.host) || ':' || COALESCE(px.port, archived_px.port) END", "CASE WHEN COALESCE(px.id, archived_px.id) IS NULL THEN '' ELSE CONCAT(COALESCE(px.protocol, archived_px.protocol), '://', COALESCE(px.host, archived_px.host), ':', COALESCE(px.port, archived_px.port)) END"},
+		{"(',' || group_ids || ',')", "CONCAT(',', group_ids, ',')"},
+		{"al.action || ' · ' || al.method || ' ' || al.path || ' 返回 HTTP ' || al.status_code", "CONCAT(al.action, ' · ', al.method, ' ', al.path, ' 返回 HTTP ', al.status_code)"},
 		{"MIN(account_rpm_thresholds.rpm_limit, excluded.rpm_limit)", "LEAST(account_rpm_thresholds.rpm_limit, VALUES(rpm_limit))"},
 		{"MAX(account_rpm_thresholds.reset_at, excluded.reset_at)", "GREATEST(account_rpm_thresholds.reset_at, VALUES(reset_at))"},
 		{"MIN(proxy_account_history.first_bound_at, excluded.first_bound_at)", "LEAST(proxy_account_history.first_bound_at, VALUES(first_bound_at))"},
@@ -158,6 +161,7 @@ func rewriteQuery(dialect databaseDialect, query string) string {
 	query = strings.ReplaceAll(query, "WHERE key =", "WHERE `key` =")
 	query = mysqlGroupConcatPattern.ReplaceAllString(query, "GROUP_CONCAT($1 SEPARATOR '$2')")
 	query = mysqlGroupsTablePattern.ReplaceAllString(query, "$1 `groups`")
+	query = mysqlTimestampDifferencePattern.ReplaceAllString(query, "ABS(TIMESTAMPDIFF(SECOND, $1, $2))")
 
 	query = rewriteMySQLUpsert(query)
 	return query

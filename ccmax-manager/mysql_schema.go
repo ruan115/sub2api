@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"database/sql"
+	"fmt"
+)
 
 const mysqlSchemaVersion = 1
 
@@ -42,9 +45,11 @@ func (a *app) migrateMySQL() error {
 			speed_passthrough_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			anthropic_beta_passthrough_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			reject_anthropic_downgrade_enabled TINYINT(1) NOT NULL DEFAULT 0,
-			reject_distillation_enabled TINYINT(1) NOT NULL DEFAULT 0,
-			overload_cooldown_seconds INT NOT NULL DEFAULT 10,
-			capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				reject_distillation_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
+				rate_limit_wait_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				rate_limit_wait_seconds INT NOT NULL DEFAULT 5,
+				capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INT NOT NULL DEFAULT 30,
 			strategy_required_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			strategy_id BIGINT NULL,
@@ -461,6 +466,12 @@ func (a *app) migrateMySQL() error {
 			return fmt.Errorf("migrate MySQL schema statement %d: %w", index+1, err)
 		}
 	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_wait_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_wait_seconds", "INT NOT NULL DEFAULT 5"); err != nil {
+		return err
+	}
 
 	seeds := []string{
 		`INSERT IGNORE INTO ` + "`groups`" + ` (id, name, description, rate_multiplier) VALUES ('a', 'A 分组', '主业务账号池', 1)`,
@@ -480,6 +491,20 @@ func (a *app) migrateMySQL() error {
 	}
 	if _, err := a.db.DB.Exec(`DELETE FROM account_inflight`); err != nil {
 		return fmt.Errorf("reset stale MySQL in-flight leases: %w", err)
+	}
+	return nil
+}
+
+func ensureMySQLColumn(db *sql.DB, table, column, definition string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect MySQL column %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `%s` %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add MySQL column %s.%s: %w", table, column, err)
 	}
 	return nil
 }

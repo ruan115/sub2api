@@ -145,6 +145,86 @@ func TestAccountStatisticsSubscriptionAndDispatchState(t *testing.T) {
 	}
 }
 
+func TestAccountLimitWindowInfersFiveHourFromSelectedReset(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "inferred-5h@example.com", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+
+	fiveHourReset := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second).Format(time.RFC3339Nano)
+	sevenDayReset := time.Now().UTC().Add(4 * 24 * time.Hour).Truncate(time.Second).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '', quota_5h_utilization = 99, quota_5h_reset_at = ?, quota_7d_utilization = 41, quota_7d_reset_at = ? WHERE id = ?`, fiveHourReset, fiveHourReset, sevenDayReset, created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var all []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts", nil, http.StatusOK, &all)
+	if len(all) != 1 || all[0].DispatchStatus != "unavailable" || all[0].LimitWindow != "5h" {
+		t.Fatalf("account classification = %+v, want unavailable/5h", all)
+	}
+	var fiveHourLimited []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts?status=limited_5h", nil, http.StatusOK, &fiveHourLimited)
+	if len(fiveHourLimited) != 1 || fiveHourLimited[0].ID != created.ID {
+		t.Fatalf("5h filter = %+v, want account %d", fiveHourLimited, created.ID)
+	}
+	var sevenDayLimited []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts?status=limited_7d", nil, http.StatusOK, &sevenDayLimited)
+	if len(sevenDayLimited) != 0 {
+		t.Fatalf("7d filter = %+v, want empty", sevenDayLimited)
+	}
+}
+
+func TestAccountLimitWindowInfersSevenDayFromSelectedReset(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "inferred-7d@example.com", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+
+	fiveHourReset := time.Now().UTC().Add(-time.Hour).Truncate(time.Second).Format(time.RFC3339Nano)
+	sevenDayReset := time.Now().UTC().Add(4 * 24 * time.Hour).Truncate(time.Second).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '', quota_5h_utilization = 0, quota_5h_reset_at = ?, quota_7d_utilization = 100, quota_7d_reset_at = ? WHERE id = ?`, sevenDayReset, fiveHourReset, sevenDayReset, created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var all []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts", nil, http.StatusOK, &all)
+	if len(all) != 1 || all[0].DispatchStatus != "unavailable" || all[0].LimitWindow != "7d" {
+		t.Fatalf("account classification = %+v, want unavailable/7d", all)
+	}
+	var sevenDayLimited []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts?status=limited_7d", nil, http.StatusOK, &sevenDayLimited)
+	if len(sevenDayLimited) != 1 || sevenDayLimited[0].ID != created.ID {
+		t.Fatalf("7d filter = %+v, want account %d", sevenDayLimited, created.ID)
+	}
+	var fiveHourLimited []account
+	putJSON(t, handler, http.MethodGet, "/api/accounts?status=limited_5h", nil, http.StatusOK, &fiveHourLimited)
+	if len(fiveHourLimited) != 0 {
+		t.Fatalf("5h filter = %+v, want empty", fiveHourLimited)
+	}
+}
+
 func TestDailyStatsSupportsInclusiveDateRange(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
