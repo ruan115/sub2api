@@ -49,8 +49,11 @@ func (a *app) migrateGroupStrategyShares() error {
 // groupStrategyWeights returns the configured split for a group. A group with
 // no rows, or whose rows all sit at zero, has no split configured and every
 // strategy dispatches unrestricted.
-func (a *app) groupStrategyWeights(groupID string) (map[int64]int, int) {
-	rows, err := a.db.Query(`SELECT s.strategy_id, s.weight FROM group_strategy_shares s
+//
+// It reads through the caller's transaction: the dispatcher holds one open, and
+// borrowing a second pooled connection there can deadlock SQLite.
+func groupStrategyWeights(tx *databaseTx, groupID string) (map[int64]int, int) {
+	rows, err := tx.Query(`SELECT s.strategy_id, s.weight FROM group_strategy_shares s
 		JOIN dispatch_strategies ds ON ds.id = s.strategy_id AND ds.deleted_at IS NULL
 		WHERE s.group_id = ? AND s.weight > 0`, groupID)
 	if err != nil {

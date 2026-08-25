@@ -1876,7 +1876,7 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 	// Group traffic is split between strategies by configured weight. Tally the
 	// last minute per strategy so each candidate can be measured against its
 	// share; with no split configured this stays empty and costs nothing.
-	shareWeights, shareTotalWeight := a.groupStrategyWeights(key.GroupID)
+	shareWeights, shareTotalWeight := groupStrategyWeights(tx, key.GroupID)
 	strategyRPM := map[int64]int{}
 	groupRPM := 0
 	if shareTotalWeight > 0 {
