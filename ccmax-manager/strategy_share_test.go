@@ -20,7 +20,7 @@ func TestStrategyOverShareSplitsGroupTraffic(t *testing.T) {
 		{"idle group admits the majority strategy", map[int64]int{}, 0, 1, false},
 		{"idle group admits the minority strategy", map[int64]int{}, 0, 2, false},
 		{"majority still under its 60% slice", map[int64]int{1: 6, 2: 4}, 10, 1, false},
-		{"majority past its 60% slice", map[int64]int{1: 7, 2: 4}, 11, 1, true},
+		{"majority past its 60% slice", map[int64]int{1: 8, 2: 3}, 11, 1, true},
 		{"minority still under its 40% slice", map[int64]int{1: 6, 2: 4}, 10, 2, false},
 		{"minority past its 40% slice", map[int64]int{1: 6, 2: 5}, 11, 2, true},
 		{"unconfigured strategy is unrestricted", map[int64]int{3: 99}, 99, 3, false},

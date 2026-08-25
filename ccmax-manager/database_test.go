@@ -52,8 +52,22 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 			WHERE rate_limit_reason IN ('429_cooling', 'quota_exhausted')
 			AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at <= ` + nowSQL,
 		`UPDATE accounts SET rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
+			rate_limit_downweight_until = NULL, quota_refreshed_at = ` + nowSQL + `,
 			error_message = CASE WHEN auth_error = '' THEN '' ELSE error_message END, updated_at = ` + nowSQL + `
-			WHERE rate_limit_reason = '429_backoff' AND (last_429_at IS NULL OR last_429_at <= ?)`,
+			WHERE rate_limit_downweight_until IS NOT NULL AND rate_limit_downweight_until <= ` + nowSQL + `
+			AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at <= ` + nowSQL + `)`,
+		// Group strategy traffic shares.
+		`SELECT ds.id, ds.name,
+			COALESCE((SELECT s.weight FROM group_strategy_shares s WHERE s.group_id = ? AND s.strategy_id = ds.id), 0),
+			COUNT(DISTINCT a.id),
+			COALESCE(SUM((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'))), 0)
+			FROM account_groups ag
+			JOIN accounts a ON a.id = ag.account_id AND a.deleted_at IS NULL AND a.archived_at IS NULL
+			LEFT JOIN groups g ON g.id = ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE ag.group_id = ?
+			GROUP BY ds.id, ds.name
+			ORDER BY ds.id`,
 	}
 	for _, query := range queries {
 		rewritten := rewriteQuery(dialectMySQL, query)
