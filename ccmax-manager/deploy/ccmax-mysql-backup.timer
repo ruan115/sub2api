@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily CCMAX MySQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=ccmax-mysql-backup.service
+
+[Install]
+WantedBy=timers.target
+

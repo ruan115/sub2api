@@ -74,3 +74,7 @@ backup cycle. To roll back, remove the MySQL/Redis environment file from the
 service, restore the previous binary, and point Nginx back to the SQLite
 instance. Never merge billing by replacing MySQL with an older SQLite snapshot.
 
+Install `ccmax-mysql-backup.sh` and the provided systemd service/timer after
+cutover. A backup is accepted only after `gzip -t` succeeds. Keep the final
+SQLite snapshot until at least one MySQL backup has also been restored into a
+temporary database and its core row counts have been checked.

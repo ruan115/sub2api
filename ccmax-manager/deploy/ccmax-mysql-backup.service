@@ -1,0 +1,22 @@
+[Unit]
+Description=Back up CCMAX MySQL database
+After=mysql.service
+Requires=mysql.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=CCMAX_MYSQL_BACKUP_DIR=/var/lib/ccmax-manager/mysql-backups
+Environment=CCMAX_MYSQL_CLIENT_CONFIG=/etc/ccmax-manager-secrets/mysql-client.cnf
+Environment=CCMAX_MYSQL_BACKUP_RETENTION_DAYS=14
+ExecStart=/usr/local/sbin/ccmax-mysql-backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ccmax-manager/mysql-backups
+
