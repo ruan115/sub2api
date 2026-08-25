@@ -838,6 +838,16 @@ func (a *app) listGroups() ([]group, error) {
 		item.DailyLimitUSD = floatPointer(daily)
 		item.MonthlyLimitUSD = floatPointer(monthly)
 		item.StrategyID = nullIntPointer(strategyID)
+		groups = append(groups, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range groups {
+		item := &groups[index]
 		if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN `+accountStatePredicate("a", "normal")+` THEN 1 ELSE 0 END), 0) FROM account_groups ag JOIN accounts a ON a.id = ag.account_id WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL`, item.ID).Scan(&item.TotalAccounts, &item.ActiveAccounts); err != nil {
 			return nil, err
 		}
@@ -847,9 +857,8 @@ func (a *app) listGroups() ([]group, error) {
 		if err := a.db.QueryRow(`SELECT COALESCE(SUM(billed_cost), 0) FROM usage_logs WHERE group_id = ? AND created_at >= ?`, item.ID, startOfTodayUTC()).Scan(&item.TodayBilledCost); err != nil {
 			return nil, err
 		}
-		groups = append(groups, item)
 	}
-	return groups, rows.Err()
+	return groups, nil
 }
 
 func normalizeGroupInput(input *groupInput) error {
@@ -1405,6 +1414,18 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			writeDBError(w, err)
 			return
 		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	for index := range items {
+		item := &items[index]
 		item.GroupIDs, err = a.accountGroupIDs(item.ID)
 		if err != nil {
 			writeDBError(w, err)
@@ -1419,11 +1440,6 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 			item.GroupIDs = visibleGroups
 		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		writeDBError(w, err)
-		return
 	}
 	writeJSON(w, http.StatusOK, items)
 }

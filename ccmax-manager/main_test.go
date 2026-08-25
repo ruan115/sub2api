@@ -84,6 +84,50 @@ func TestAccountPoolRoutingAndBilling(t *testing.T) {
 	}
 }
 
+func TestAccountAndGroupListsWorkWithSingleDatabaseConnection(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+
+	result, err := a.db.Exec(`INSERT INTO accounts (name) VALUES ('single-connection-account')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO account_groups (account_id, group_id) VALUES (?, 'a')`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	a.db.SetMaxOpenConns(1)
+	a.db.SetMaxIdleConns(1)
+
+	groups, err := a.listGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) == 0 {
+		t.Fatal("listGroups returned no groups")
+	}
+
+	response := httptest.NewRecorder()
+	a.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/accounts", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/accounts status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var accounts []account
+	if err := json.Unmarshal(response.Body.Bytes(), &accounts); err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || len(accounts[0].GroupIDs) != 1 || accounts[0].GroupIDs[0] != "a" {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+}
+
 func TestGroupFieldPassthroughSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
