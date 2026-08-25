@@ -28,6 +28,7 @@ mysqldump \
 	--events \
 	--triggers \
 	--hex-blob \
+	--no-tablespaces \
 	--set-gtid-purged=OFF \
 	--databases ccmax | gzip -1 >"$temporary"
 
@@ -36,4 +37,3 @@ mv "$temporary" "$target"
 find "$backup_dir" -type f -name 'ccmax-*.sql.gz' -mtime "+$retention_days" -delete
 
 printf 'backup=%s bytes=%s\n' "$target" "$(stat -c %s "$target")"
-
