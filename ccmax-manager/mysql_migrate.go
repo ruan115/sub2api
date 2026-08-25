@@ -26,6 +26,7 @@ type mysqlMigrationReport struct {
 var mysqlMigrationTables = []string{
 	"dispatch_strategies",
 	"groups",
+	"group_strategy_shares",
 	"proxy_pools",
 	"proxies",
 	"users",

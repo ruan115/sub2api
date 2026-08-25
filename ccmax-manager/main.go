@@ -85,6 +85,7 @@ type group struct {
 	AnthropicBetaPassthrough  bool     `json:"anthropic_beta_passthrough_enabled"`
 	RejectAnthropicDowngrade  bool     `json:"reject_anthropic_downgrade_enabled"`
 	RejectDistillation        bool     `json:"reject_distillation_enabled"`
+	QuotaHeaderMasking        bool     `json:"quota_header_masking_enabled"`
 	OverloadCooldownSeconds   int      `json:"overload_cooldown_seconds"`
 	RateLimitWaitEnabled      bool     `json:"rate_limit_wait_enabled"`
 	RateLimitWaitSeconds      int      `json:"rate_limit_wait_seconds"`
@@ -120,6 +121,7 @@ type groupInput struct {
 	AnthropicBetaPassthrough  *bool    `json:"anthropic_beta_passthrough_enabled"`
 	RejectAnthropicDowngrade  *bool    `json:"reject_anthropic_downgrade_enabled"`
 	RejectDistillation        *bool    `json:"reject_distillation_enabled"`
+	QuotaHeaderMasking        *bool    `json:"quota_header_masking_enabled"`
 	OverloadCooldownSeconds   *int     `json:"overload_cooldown_seconds"`
 	RateLimitWaitEnabled      *bool    `json:"rate_limit_wait_enabled"`
 	RateLimitWaitSeconds      *int     `json:"rate_limit_wait_seconds"`
@@ -130,6 +132,8 @@ type groupInput struct {
 	StrategyID         *int64 `json:"strategy_id"`
 	ReservePoolEnabled *bool  `json:"reserve_pool_enabled"`
 	Status             string `json:"status"`
+	// StrategyShares: nil keeps the current split, an empty slice clears it.
+	StrategyShares *[]groupStrategyShareInput `json:"strategy_shares"`
 }
 
 type account struct {
@@ -153,6 +157,11 @@ type account struct {
 	ExpiresAt        string         `json:"expires_at"`
 	RateLimitResetAt string         `json:"rate_limit_reset_at"`
 	RateLimitWindow  string         `json:"rate_limit_window"`
+	RateLimitReason  string         `json:"rate_limit_reason"`
+	Consecutive429   int            `json:"consecutive_429"`
+	Last429At        string         `json:"last_429_at"`
+	DownweightUntil  string         `json:"rate_limit_downweight_until"`
+	QuotaRefreshedAt string         `json:"quota_refreshed_at"`
 	LimitWindow      string         `json:"limit_window"`
 	GroupIDs         []string       `json:"group_ids"`
 	CreatedAt        string         `json:"created_at"`
@@ -316,6 +325,7 @@ type usageLog struct {
 	GroupID               string  `json:"group_id"`
 	AccountID             int64   `json:"account_id"`
 	AccountName           string  `json:"account_name"`
+	ProxyIP               string  `json:"proxy_ip"`
 	Model                 string  `json:"model"`
 	InputTokens           int64   `json:"input_tokens"`
 	OutputTokens          int64   `json:"output_tokens"`
@@ -410,6 +420,8 @@ func main() {
 	defer stopTokenRefresh()
 	stopAccountHealth := a.startAccountHealthScheduler()
 	defer stopAccountHealth()
+	stopRateLimitSweep := a.startAccountRateLimitSweeper()
+	defer stopRateLimitSweep()
 
 	server := &http.Server{
 		Addr:              addr,
@@ -515,6 +527,14 @@ func newApp(dataPath string) (*app, error) {
 			return nil, err
 		}
 	}
+	// Dialect-neutral data migrations run for both branches. On a MySQL import
+	// run this executes before migrateSQLiteToMySQL fills the target, so the
+	// backfills see an empty table; they are idempotent and run on every
+	// startup, so the next process start applies them.
+	if err := a.migrateSharedData(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := a.pruneGatewayErrorLogs(true); err != nil {
 		db.Close()
 		return nil, err
@@ -551,6 +571,7 @@ func (a *app) migrate() error {
 			anthropic_beta_passthrough_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_anthropic_downgrade_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_distillation_enabled INTEGER NOT NULL DEFAULT 0,
+			quota_header_masking_enabled INTEGER NOT NULL DEFAULT 0,
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
 			rate_limit_wait_enabled INTEGER NOT NULL DEFAULT 0,
 			rate_limit_wait_seconds INTEGER NOT NULL DEFAULT 5 CHECK (rate_limit_wait_seconds BETWEEN 1 AND 600),
@@ -581,6 +602,11 @@ func (a *app) migrate() error {
 			last_used_at TEXT,
 			expires_at TEXT,
 			rate_limit_reset_at TEXT,
+			rate_limit_reason TEXT NOT NULL DEFAULT '',
+			consecutive_429 INTEGER NOT NULL DEFAULT 0,
+			last_429_at TEXT,
+			rate_limit_downweight_until TEXT,
+			quota_refreshed_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
@@ -711,6 +737,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/groups", a.handleGroups)
 	mux.HandleFunc("POST /api/groups", a.handleGroupCreate)
 	mux.HandleFunc("PUT /api/groups/{id}", a.handleGroupUpdate)
+	mux.HandleFunc("GET /api/groups/{id}/strategy-shares", a.handleGroupStrategyShares)
 	mux.HandleFunc("GET /api/purposes", a.handlePurposes)
 	mux.HandleFunc("POST /api/purposes", a.handlePurposeCreate)
 	mux.HandleFunc("PUT /api/purposes/{id}", a.handlePurposeUpdate)
@@ -912,7 +939,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, overload_cooldown_seconds, rate_limit_wait_enabled, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_wait_enabled, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -922,7 +949,7 @@ func (a *app) listGroups() ([]group, error) {
 		var item group
 		var daily, monthly sql.NullFloat64
 		var strategyID sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.OverloadCooldownSeconds, &item.RateLimitWaitEnabled, &item.RateLimitWaitSeconds, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.QuotaHeaderMasking, &item.OverloadCooldownSeconds, &item.RateLimitWaitEnabled, &item.RateLimitWaitSeconds, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -1099,7 +1126,7 @@ func (a *app) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	for attempt := 0; attempt < 5; attempt++ {
 		id = "g_" + randomSecret(6)
-		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, overload_cooldown_seconds, rate_limit_wait_enabled, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitWaitEnabled, false)), intPointerValue(input.RateLimitWaitSeconds, 5), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
+		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_wait_enabled, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitWaitEnabled, false)), intPointerValue(input.RateLimitWaitSeconds, 5), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
 		if err == nil {
 			break
 		}
@@ -1202,6 +1229,10 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.RejectDistillation != nil {
 		rejectDistillation = boolInt(*input.RejectDistillation)
 	}
+	var quotaHeaderMasking any
+	if input.QuotaHeaderMasking != nil {
+		quotaHeaderMasking = boolInt(*input.QuotaHeaderMasking)
+	}
 	var overloadCooldown any
 	if input.OverloadCooldownSeconds != nil {
 		overloadCooldown = *input.OverloadCooldownSeconds
@@ -1236,7 +1267,7 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_wait_enabled = COALESCE(?, rate_limit_wait_enabled), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, overloadCooldown, rateLimitWaitEnabled, rateLimitWaitSeconds, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_wait_enabled = COALESCE(?, rate_limit_wait_enabled), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, overloadCooldown, rateLimitWaitEnabled, rateLimitWaitSeconds, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1244,6 +1275,22 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if count, _ := result.RowsAffected(); count == 0 {
 		writeError(w, http.StatusNotFound, "group not found")
 		return
+	}
+	if input.StrategyShares != nil {
+		tx, err := a.db.Begin()
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		defer tx.Rollback()
+		if err := replaceGroupStrategyShares(tx, id, *input.StrategyShares); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			writeDBError(w, err)
+			return
+		}
 	}
 	item, err := a.getGroup(id)
 	if err != nil {
@@ -1411,7 +1458,7 @@ func (a *app) getPurpose(id int64) (purpose, error) {
 
 const accountSelectBase = `SELECT a.id, a.name, a.platform, a.auth_type, a.credential_hint, a.source_sk_hint, a.credentials_json != '{}',
 	a.status, a.schedulable, a.concurrency, a.priority, a.rate_multiplier, a.notes, a.error_message,
-	a.last_used_at, a.expires_at, a.rate_limit_reset_at, a.rate_limit_window, a.created_at, a.updated_at, a.credentials_json, a.extra_json,
+	a.last_used_at, a.expires_at, a.rate_limit_reset_at, a.rate_limit_window, a.rate_limit_reason, a.consecutive_429, a.last_429_at, a.rate_limit_downweight_until, a.quota_refreshed_at, a.created_at, a.updated_at, a.credentials_json, a.extra_json,
 	a.proxy_pool_id, COALESCE(pp.name, ''), a.proxy_id, COALESCE(px.name, archived_px.name, ''),
 	CASE WHEN COALESCE(px.id, archived_px.id) IS NULL THEN '' ELSE COALESCE(px.protocol, archived_px.protocol) || '://' || COALESCE(px.host, archived_px.host) || ':' || COALESCE(px.port, archived_px.port) END,
 	COALESCE(NULLIF(px.exit_ip, ''), NULLIF(archived_px.exit_ip, ''), px.host, archived_px.host, ''),
@@ -1437,9 +1484,9 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 	var item account
 	var schedulable, autoProxy int
 	var proxyPoolID, proxyID, strategyID sql.NullInt64
-	var lastUsed, expires, rateLimit, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, invalidated, archived sql.NullString
+	var lastUsed, expires, rateLimit, last429, downweightUntil, quotaRefreshed, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, invalidated, archived sql.NullString
 	var credentialsJSON, extraJSON string
-	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
+	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
 	if err != nil {
 		return item, err
 	}
@@ -1451,6 +1498,9 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 	item.LastUsedAt = nullText(lastUsed)
 	item.ExpiresAt = nullText(expires)
 	item.RateLimitResetAt = nullText(rateLimit)
+	item.Last429At = nullText(last429)
+	item.DownweightUntil = nullText(downweightUntil)
+	item.QuotaRefreshedAt = nullText(quotaRefreshed)
 	item.AuthCheckedAt = nullText(authChecked)
 	item.TokenExpiresAt = nullText(tokenExpires)
 	item.Quota5HResetAt = nullText(quota5HReset)
@@ -1679,6 +1729,12 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
+	if assignedProxy != nil {
+		if err := recordProxyAssignment(tx, *assignedProxy, id); err != nil {
+			writeDBError(w, err)
+			return
+		}
+	}
 	if err := setAccountGroups(tx, id, input.GroupIDs, input.Priority); err != nil {
 		writeDBError(w, err)
 		return
@@ -1716,8 +1772,9 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.releaseAccountTokenLease(id, leaseOwner)
 	var existingCredentials, existingExtra, existingSourceSKHint string
+	var previousProxyID sql.NullInt64
 	var previousOnboarded, previousInvalidated sql.NullString
-	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &existingSourceSKHint, &previousOnboarded, &previousInvalidated); err != nil {
+	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, proxy_id, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &existingSourceSKHint, &previousProxyID, &previousOnboarded, &previousInvalidated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found")
 			return
@@ -1769,8 +1826,18 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := tx.Exec(`UPDATE accounts SET name = ?, platform = ?, auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, extra_json = ?, status = ?, schedulable = ?, concurrency = ?, priority = ?, rate_multiplier = ?, notes = ?, error_message = ?, expires_at = NULLIF(?, ''), rate_limit_reset_at = NULLIF(?, ''), proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
-		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, id, leaseOwner)
+	result, err := tx.Exec(`UPDATE accounts SET name = ?, platform = ?, auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, extra_json = ?, status = ?, schedulable = ?, concurrency = ?, priority = ?, rate_multiplier = ?, notes = ?, error_message = ?, expires_at = NULLIF(?, ''), rate_limit_reset_at = NULLIF(?, ''),
+		rate_limit_window = CASE WHEN NULLIF(?, '') IS NULL THEN '' ELSE rate_limit_window END,
+		rate_limit_reason = CASE WHEN NULLIF(?, '') IS NULL THEN '' ELSE rate_limit_reason END,
+		consecutive_429 = CASE WHEN NULLIF(?, '') IS NULL THEN 0 ELSE consecutive_429 END,
+		last_429_at = CASE WHEN NULLIF(?, '') IS NULL THEN NULL ELSE last_429_at END,
+		proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt,
+		// Clearing the cooldown field is the administrator's manual recovery, so
+		// the automatic 429 bookkeeping has to go with it. Otherwise the account
+		// keeps its strikes and the next single 429 re-parks it.
+		input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt,
+		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, id, leaseOwner)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1778,6 +1845,12 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	if updated, _ := result.RowsAffected(); updated == 0 {
 		writeError(w, http.StatusConflict, "account token lease expired; retry the update")
 		return
+	}
+	if assignedProxy != nil && (!previousProxyID.Valid || previousProxyID.Int64 != *assignedProxy) {
+		if err := recordProxyAssignment(tx, *assignedProxy, id); err != nil {
+			writeDBError(w, err)
+			return
+		}
 	}
 	credentialsProvided := len(input.Credentials) > 0 && string(input.Credentials) != "null"
 	if credentialsProvided && credentialsJSON != "{}" {
@@ -2196,7 +2269,10 @@ func (a *app) handleAccountBatchSchedule(w http.ResponseWriter, r *http.Request)
 	var result sql.Result
 	var err error
 	if input.Schedulable {
-		result, err = a.db.Exec(`UPDATE accounts SET status = 'active', schedulable = 1, rate_limit_reset_at = NULL, error_message = '', updated_at = `+nowSQL+`
+		result, err = a.db.Exec(`UPDATE accounts SET status = 'active', schedulable = 1,
+			rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
+			rate_limit_downweight_until = NULL, quota_refreshed_at = `+nowSQL+`,
+			error_message = '', updated_at = `+nowSQL+`
 			WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`) AND auth_status = 'valid' AND proxy_id IS NOT NULL
 			AND EXISTS (SELECT 1 FROM proxies p WHERE p.id = accounts.proxy_id AND p.status = 'active' AND p.deleted_at IS NULL)`, args...)
 	} else {
@@ -2707,15 +2783,23 @@ func (a *app) getUsageByRequestID(requestID string) (usageLog, error) {
 
 // Keep the calling API key relation for tenant scoping and cost breakdowns.
 // The account authorization SK is stored separately as a masked snapshot.
-const usageFrom = ` FROM usage_logs u LEFT JOIN api_keys k ON k.id = u.api_key_id`
+// Proxy joins expose the account's current or archived IP without rewriting
+// historical usage rows, so existing ledgers become searchable immediately.
+const usageFrom = ` FROM usage_logs u
+	LEFT JOIN api_keys k ON k.id = u.api_key_id
+	LEFT JOIN accounts usage_account ON usage_account.id = u.account_id
+	LEFT JOIN proxies usage_proxy ON usage_proxy.id = usage_account.proxy_id
+	LEFT JOIN proxies usage_archived_proxy ON usage_archived_proxy.id = usage_account.archived_proxy_id`
 
-const usageSelect = `SELECT u.id, u.user_id, u.api_key_id, COALESCE(k.name, ''), COALESCE(k.key_prefix, ''), u.account_sk_hint, u.request_id, u.client_request_id, u.trace_id, u.upstream_request_id, u.purpose_key, u.purpose_name, u.group_id, u.account_id, u.account_name, u.model, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens, u.input_cost, u.output_cost, u.cache_creation_cost, u.cache_read_cost, u.base_cost, u.billed_cost, u.actual_cost, u.group_rate_multiplier, u.account_rate_multiplier, u.stream, u.duration_ms, u.created_at` + usageFrom
+const usageProxyIPExpr = `COALESCE(NULLIF(usage_proxy.exit_ip, ''), NULLIF(usage_archived_proxy.exit_ip, ''), usage_proxy.host, usage_archived_proxy.host, '')`
+
+const usageSelect = `SELECT u.id, u.user_id, u.api_key_id, COALESCE(k.name, ''), COALESCE(k.key_prefix, ''), u.account_sk_hint, u.request_id, u.client_request_id, u.trace_id, u.upstream_request_id, u.purpose_key, u.purpose_name, u.group_id, u.account_id, u.account_name, ` + usageProxyIPExpr + `, u.model, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens, u.input_cost, u.output_cost, u.cache_creation_cost, u.cache_read_cost, u.base_cost, u.billed_cost, u.actual_cost, u.group_rate_multiplier, u.account_rate_multiplier, u.stream, u.duration_ms, u.created_at` + usageFrom
 
 func scanUsage(row scanner) (usageLog, error) {
 	var item usageLog
 	var stream int
 	var userID, apiKeyID sql.NullInt64
-	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.APIKeyName, &item.APIKeyPrefix, &item.AccountSKHint, &item.RequestID, &item.ClientRequestID, &item.TraceID, &item.UpstreamRequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
+	err := row.Scan(&item.ID, &userID, &apiKeyID, &item.APIKeyName, &item.APIKeyPrefix, &item.AccountSKHint, &item.RequestID, &item.ClientRequestID, &item.TraceID, &item.UpstreamRequestID, &item.PurposeKey, &item.PurposeName, &item.GroupID, &item.AccountID, &item.AccountName, &item.ProxyIP, &item.Model, &item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens, &item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &item.BaseCost, &item.BilledCost, &item.ActualCost, &item.GroupRateMultiplier, &item.AccountRateMultiplier, &stream, &item.DurationMS, &item.CreatedAt)
 	item.UserID = nullIntPointer(userID)
 	item.APIKeyID = nullIntPointer(apiKeyID)
 	item.Stream = stream == 1
@@ -2794,8 +2878,12 @@ func buildUsageWhere(filters usageFilters) (string, []any) {
 		args = append(args, normalizeDateEnd(filters.To))
 	}
 	if filters.Search != "" {
-		conditions = append(conditions, "(u.request_id = ? OR u.client_request_id = ? OR u.trace_id = ? OR u.upstream_request_id = ? OR u.account_name LIKE ?)")
-		args = append(args, filters.Search, filters.Search, filters.Search, filters.Search, "%"+filters.Search+"%")
+		term := "%" + filters.Search + "%"
+		conditions = append(conditions, `(u.request_id = ? OR u.client_request_id = ? OR u.trace_id = ? OR u.upstream_request_id = ?
+			OR u.account_name LIKE ? OR u.account_sk_hint LIKE ? OR u.model LIKE ? OR u.purpose_name LIKE ?
+			OR COALESCE(k.name, '') LIKE ? OR COALESCE(k.key_prefix, '') LIKE ?
+			OR `+usageProxyIPExpr+` LIKE ? OR COALESCE(usage_proxy.host, usage_archived_proxy.host, '') LIKE ?)`)
+		args = append(args, filters.Search, filters.Search, filters.Search, filters.Search, term, term, term, term, term, term, term, term)
 	}
 	if groupIDPattern.MatchString(filters.GroupID) {
 		conditions = append(conditions, "u.group_id = ?")

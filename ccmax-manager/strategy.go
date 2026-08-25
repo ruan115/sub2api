@@ -247,6 +247,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			COALESCE((SELECT f.requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight
 			FROM accounts a
 			WHERE a.deleted_at IS NULL AND a.archived_at IS NULL
+			AND `+accountStatePredicate("a", "normal")+`
 			AND (a.strategy_id = ? OR (a.strategy_id IS NULL AND EXISTS (
 				SELECT 1 FROM account_groups ag JOIN groups g ON g.id = ag.group_id
 				WHERE ag.account_id = a.id AND g.strategy_id = ?)))

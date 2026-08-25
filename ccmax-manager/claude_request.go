@@ -27,6 +27,7 @@ type claudePreparedRequest struct {
 	NonStreamBridge          bool
 	CountTokens              bool
 	RejectAnthropicDowngrade bool
+	MaskQuotaHeaders         bool
 	Compat                   *sub2service.CCMaxCompatibilityPrepared
 	Credentials              map[string]any
 }

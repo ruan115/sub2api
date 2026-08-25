@@ -298,6 +298,7 @@
             <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
             <button data-account-status="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
             <button data-account-status="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
+            <button data-account-status="cooling_429" title="连续 429 触发的自动冷却，等待下一个 5h 窗口刷新">429 冷却 <b id="status-cooling-429-count">0</b></button>
             <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
           </div>
           <section class="panel table-panel accounts-panel">
@@ -498,6 +499,15 @@
 
         <section class="view" id="view-authorization">
           <section class="panel filter-bar authorization-filters">
+            <label class="search-field authorization-search-field"
+              ><i data-lucide="search"></i
+              ><input
+                id="authorization-search"
+                type="search"
+                autocomplete="off"
+                placeholder="搜索账号、代理 IP、操作 IP 或说明"
+                aria-label="搜索授权日志" /></label
+            >
             <select id="authorization-status"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select>
             <label class="date-filter"><span>开始</span><input type="datetime-local" step="60" id="authorization-from" /></label>
             <label class="date-filter"><span>结束</span><input type="datetime-local" step="60" id="authorization-to" /></label>
@@ -867,6 +877,15 @@
 
         <section class="view" id="view-billing">
           <section class="panel filter-bar billing-filters">
+            <label class="search-field billing-search-field"
+              ><i data-lucide="search"></i
+              ><input
+                id="billing-search"
+                type="search"
+                autocomplete="off"
+                placeholder="搜索账号、IP、SK、模型或请求 ID"
+                aria-label="搜索计费流水" /></label
+            >
             <label
               ><span>开始时间</span
               ><input type="datetime-local" step="60" id="billing-from" /></label
@@ -929,7 +948,7 @@
                     <th>请求 / 时间</th>
                     <th>用途</th>
                     <th>账号授权 SK</th>
-                    <th>账号</th>
+                    <th>账号 / IP</th>
                     <th>模型</th>
                     <th class="num">输入</th>
                     <th class="num">输出</th>
@@ -1516,6 +1535,19 @@
               <i></i>
             </label>
           </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>屏蔽上游限额响应头</strong>
+              <small title="开启后不向客户端返回 anthropic-ratelimit-*、anthropic-organization-id、anthropic-workspace-id 和 X-CCMAX-Account。账号利用率超过 fallback 阈值时，Claude Code 会据此把会话自动降级到 Opus 4.8，并会泄露账号邮箱；关闭时全部原样透传">屏蔽 anthropic-ratelimit-* 等头，防止 Claude Code 客户端自动降级到 Opus 4.8 并防止账号信息泄露</small>
+            </div>
+            <label class="compact-toggle" title="屏蔽上游限额响应头">
+              <input
+                id="group-quota-header-masking"
+                type="checkbox"
+                aria-label="屏蔽上游限额响应头" />
+              <i></i>
+            </label>
+          </div>
           <section class="group-passthrough-panel" aria-labelledby="group-passthrough-title">
             <div class="group-passthrough-head">
               <span class="group-passthrough-icon" aria-hidden="true">
@@ -1649,6 +1681,15 @@
                 <option value="">不绑定</option>
               </select>
             </label>
+          </div>
+          <div class="group-mode-setting strategy-share-setting">
+            <div>
+              <strong>策略流量分配</strong>
+              <small>按权重把本组流量分给组内出现的各个策略；权重全为 0 表示不分配。某个策略用满份额后请求会等待其份额释放（开启容量排队时进入排队），不会挤占其他策略</small>
+              <div id="group-strategy-shares" class="strategy-share-list">
+                <p class="muted">组内暂无绑定策略的账号</p>
+              </div>
+            </div>
           </div>
           <div class="group-mode-setting">
             <div>
@@ -1890,6 +1931,14 @@
               <option value="active">启用</option>
               <option value="disabled">停用</option>
             </select></label
+          ><label
+            class="toggle-field"
+            title="开启后，每个代理地址只能绑定一个账号；账号解绑、删除或归档后，该地址不能再次分配"
+            ><span>一次性 IP（禁止复用）</span
+            ><input
+              id="proxy-pool-single-use"
+              type="checkbox"
+              checked /><i></i></label
           ><label class="api-source-field"
             ><span>代理 API URL</span
             ><input

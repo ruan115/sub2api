@@ -46,6 +46,7 @@ func (a *app) migrateMySQL() error {
 			anthropic_beta_passthrough_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			reject_anthropic_downgrade_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				reject_distillation_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				quota_header_masking_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
 				rate_limit_wait_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				rate_limit_wait_seconds INT NOT NULL DEFAULT 5,
@@ -69,6 +70,7 @@ func (a *app) migrateMySQL() error {
 			api_headers_json LONGTEXT NOT NULL DEFAULT ('{}'),
 			default_protocol VARCHAR(16) NOT NULL DEFAULT 'socks5',
 			status VARCHAR(16) NOT NULL DEFAULT 'active',
+			single_use_enabled TINYINT(1) NOT NULL DEFAULT 1,
 			system_kind VARCHAR(64) NOT NULL DEFAULT '',
 			active_system_kind VARCHAR(64) GENERATED ALWAYS AS (NULLIF(system_kind, '')) STORED,
 			last_sync_at DATETIME(3) NULL,
@@ -99,6 +101,7 @@ func (a *app) migrateMySQL() error {
 			deleted_at DATETIME(3) NULL,
 			UNIQUE KEY idx_proxy_unique (pool_id, identity_hash),
 			KEY idx_proxy_pool_status (pool_id, status, deleted_at),
+			KEY idx_proxy_identity (protocol, host, port, username, password),
 			CONSTRAINT fk_proxies_pool FOREIGN KEY (pool_id) REFERENCES proxy_pools(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS users (
@@ -137,6 +140,11 @@ func (a *app) migrateMySQL() error {
 			expires_at DATETIME(3) NULL,
 			rate_limit_reset_at DATETIME(3) NULL,
 			rate_limit_window VARCHAR(16) NOT NULL DEFAULT '',
+			rate_limit_reason VARCHAR(32) NOT NULL DEFAULT '',
+			consecutive_429 INT NOT NULL DEFAULT 0,
+			last_429_at DATETIME(3) NULL,
+			rate_limit_downweight_until DATETIME(3) NULL,
+			quota_refreshed_at DATETIME(3) NULL,
 			proxy_pool_id BIGINT NULL,
 			proxy_id BIGINT NULL,
 			active_proxy_id BIGINT GENERATED ALWAYS AS (CASE WHEN deleted_at IS NULL AND archived_at IS NULL THEN proxy_id ELSE NULL END) STORED,
@@ -347,6 +355,15 @@ func (a *app) migrateMySQL() error {
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			CONSTRAINT fk_fingerprints_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS group_strategy_shares (
+			group_id VARCHAR(40) NOT NULL,
+			strategy_id BIGINT NOT NULL,
+			weight INT NOT NULL DEFAULT 0,
+			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			PRIMARY KEY (group_id, strategy_id),
+			CONSTRAINT fk_group_strategy_shares_strategy FOREIGN KEY (strategy_id) REFERENCES dispatch_strategies(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS proxy_account_history (
 			proxy_id BIGINT NOT NULL,
 			account_id BIGINT NOT NULL,
@@ -472,6 +489,27 @@ func (a *app) migrateMySQL() error {
 	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_wait_seconds", "INT NOT NULL DEFAULT 5"); err != nil {
 		return err
 	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "quota_header_masking_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "rate_limit_reason", "VARCHAR(32) NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "consecutive_429", "INT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "last_429_at", "DATETIME(3) NULL"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "rate_limit_downweight_until", "DATETIME(3) NULL"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_refreshed_at", "DATETIME(3) NULL"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "proxy_pools", "single_use_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 
 	seeds := []string{
 		`INSERT IGNORE INTO ` + "`groups`" + ` (id, name, description, rate_multiplier) VALUES ('a', 'A 分组', '主业务账号池', 1)`,
@@ -489,9 +527,8 @@ func (a *app) migrateMySQL() error {
 			return fmt.Errorf("seed MySQL schema: %w", err)
 		}
 	}
-	if _, err := a.db.DB.Exec(`DELETE FROM account_inflight`); err != nil {
-		return fmt.Errorf("reset stale MySQL in-flight leases: %w", err)
-	}
+	// Proxy pool seeds, assignment-history backfills and in-flight lease resets
+	// are shared with SQLite; newApp calls migrateSharedData after this returns.
 	return nil
 }
 

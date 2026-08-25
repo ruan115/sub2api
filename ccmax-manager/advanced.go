@@ -75,6 +75,12 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "reject_distillation_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Off by default: enabling it hides the pooled account's unified ratelimit
+	// headers from clients, so Claude Code stops falling back to Opus 4.8 when
+	// the account crosses the advertised fallback percentage.
+	if err := addColumnIfMissing(a.db, "groups", "quota_header_masking_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(a.db, "groups", "overload_cooldown_seconds", "INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600)"); err != nil {
 		return err
 	}
@@ -280,14 +286,20 @@ func (a *app) migrateAdvancedFeatures() error {
 		// Which unified window ('5h' / '7d') caused the current cooldown; empty
 		// when the upstream did not say or the cooldown came from a bare 429.
 		{"rate_limit_window", "TEXT NOT NULL DEFAULT ''"},
+		// Automatic 429 state is separate from schedulable, which remains an
+		// administrator-controlled switch.
+		{"rate_limit_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"consecutive_429", "INTEGER NOT NULL DEFAULT 0"},
+		{"last_429_at", "TEXT"},
+		// The penalty lasts until the quota window in force when the limit was
+		// hit rolls over; quota_refreshed_at then earns a short priority boost.
+		{"rate_limit_downweight_until", "TEXT"},
+		{"quota_refreshed_at", "TEXT"},
 	}
 	for _, column := range accountColumns {
 		if err := addColumnIfMissing(a.db, "accounts", column.name, column.definition); err != nil {
 			return err
 		}
-	}
-	if err := a.migrateDeadProxyAssignments(); err != nil {
-		return err
 	}
 	priceColumns := []struct{ name, definition string }{
 		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
@@ -330,47 +342,8 @@ func (a *app) migrateAdvancedFeatures() error {
 	if _, err := a.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_proxy_exclusive ON accounts(proxy_id) WHERE proxy_id IS NOT NULL AND deleted_at IS NULL`); err != nil {
 		return fmt.Errorf("enforce one account per proxy: %w", err)
 	}
-	if _, err := a.db.Exec(`UPDATE accounts SET auth_status = 'valid' WHERE auth_status = 'unknown' AND credentials_json != '{}'`); err != nil {
-		return fmt.Errorf("initialize account authorization state: %w", err)
-	}
-	if _, err := a.db.Exec(`UPDATE accounts SET onboarded_at = COALESCE(auth_checked_at, created_at) WHERE onboarded_at IS NULL AND auth_status = 'valid'`); err != nil {
-		return fmt.Errorf("initialize account onboarding time: %w", err)
-	}
-	if err := a.reclassifyRevokedOAuthAccounts(); err != nil {
-		return err
-	}
-	if _, err := a.db.Exec(`UPDATE accounts SET invalidated_at = NULL WHERE onboarded_at IS NULL AND status != 'error'`); err != nil {
-		return fmt.Errorf("clear invalid pending-account timestamps: %w", err)
-	}
-	if _, err := a.db.Exec(`DELETE FROM account_lifecycle_events WHERE event_type = 'invalidated' AND account_id IN (SELECT id FROM accounts WHERE onboarded_at IS NULL AND status != 'error')`); err != nil {
-		return fmt.Errorf("clear invalid pending-account events: %w", err)
-	}
-	if _, err := a.db.Exec(`UPDATE accounts SET invalidated_at = COALESCE(auth_checked_at, updated_at) WHERE invalidated_at IS NULL AND (status = 'error' OR (auth_status = 'reauth_required' AND onboarded_at IS NOT NULL))`); err != nil {
-		return fmt.Errorf("initialize account invalidation time: %w", err)
-	}
-	if _, err := a.db.Exec(`UPDATE accounts SET survival_seconds_total = MAX(0, CAST(strftime('%s', invalidated_at) AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER)) WHERE survival_seconds_total = 0 AND onboarded_at IS NOT NULL AND invalidated_at IS NOT NULL`); err != nil {
-		return fmt.Errorf("initialize account accumulated survival: %w", err)
-	}
-	if _, err := a.db.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type, created_at)
-		SELECT id, 'onboarded', onboarded_at FROM accounts a WHERE onboarded_at IS NOT NULL
-		AND NOT EXISTS (SELECT 1 FROM account_lifecycle_events e WHERE e.account_id = a.id AND e.event_type = 'onboarded')`); err != nil {
-		return fmt.Errorf("initialize account onboarding events: %w", err)
-	}
-	if _, err := a.db.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type, reason, created_at)
-		SELECT id, 'invalidated', COALESCE(NULLIF(auth_error, ''), error_message), invalidated_at FROM accounts a WHERE invalidated_at IS NOT NULL
-		AND NOT EXISTS (SELECT 1 FROM account_lifecycle_events e WHERE e.account_id = a.id AND e.event_type = 'invalidated')`); err != nil {
-		return fmt.Errorf("initialize account invalidation events: %w", err)
-	}
-	// Events written before the reason column existed can still be attributed
-	// while the account remains invalidated and its auth_error is intact.
-	if _, err := a.db.Exec(`UPDATE account_lifecycle_events SET reason = COALESCE((
-			SELECT NULLIF(a.auth_error, '') FROM accounts a WHERE a.id = account_lifecycle_events.account_id AND a.invalidated_at IS NOT NULL
-		), '') WHERE event_type = 'invalidated' AND reason = ''`); err != nil {
-		return fmt.Errorf("backfill account invalidation reasons: %w", err)
-	}
-	if err := a.backfillAccountSubscriptions(); err != nil {
-		return err
-	}
+	// Account lifecycle and proxy history backfills live in migrateSharedData
+	// so MySQL runs them too.
 	return nil
 }
 

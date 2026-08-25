@@ -64,13 +64,35 @@ func (a *app) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := a.db.Exec(`UPDATE accounts SET
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	// Restoring clears archived_proxy_id, which for accounts archived before the
+	// history table existed is the last record that the address was consumed.
+	// Preserve it first so a single-use address stays burned.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+		SELECT archived_proxy_id, id, created_at, updated_at, 1 FROM accounts
+		WHERE id = ? AND deleted_at IS NULL AND archived_at IS NOT NULL AND archived_proxy_id IS NOT NULL`, id); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	result, err := tx.Exec(`UPDATE accounts SET
 		archived_at = NULL,
 		archived_proxy_id = NULL,
 		proxy_id = NULL,
 		auto_proxy = 0,
 		schedulable = 0,
 		status = CASE WHEN status = 'disabled' THEN 'error' ELSE status END,
+		rate_limit_reset_at = NULL,
+		rate_limit_window = '',
+		rate_limit_reason = '',
+		consecutive_429 = 0,
+		rate_limit_downweight_until = NULL,
+		quota_refreshed_at = NULL,
+		last_429_at = NULL,
 		updated_at = `+nowSQL+`
 		WHERE id = ? AND deleted_at IS NULL AND archived_at IS NOT NULL`, id)
 	if err != nil {
@@ -79,6 +101,10 @@ func (a *app) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if count, _ := result.RowsAffected(); count == 0 {
 		writeError(w, http.StatusNotFound, "archived account not found")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "restored": true})

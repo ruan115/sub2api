@@ -116,6 +116,34 @@ func TestStrategyObservationReportsPendingAccountsForConcentrated(t *testing.T) 
 	}
 }
 
+func TestStrategyObservationExcludesUnavailableAccounts(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "available-only", "rpm_limit": 10, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	available := createGatewayTestAccount(t, a, handler, "strategy-available", "https://available.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	unavailable := createGatewayTestAccount(t, a, handler, "strategy-paused", "https://paused.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`UPDATE accounts SET schedulable = 0 WHERE id = ?`, unavailable.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []strategyObservation
+	putJSON(t, handler, http.MethodGet, "/api/strategies/observe", nil, http.StatusOK, &observed)
+	if len(observed) != 1 {
+		t.Fatalf("observations = %d, want 1", len(observed))
+	}
+	strategy := observed[0]
+	if strategy.BoundAccounts != 1 || strategy.AccountsAlive != 1 || len(strategy.Accounts) != 1 {
+		t.Fatalf("available strategy accounts = bound:%d alive:%d rows:%d, want 1/1/1", strategy.BoundAccounts, strategy.AccountsAlive, len(strategy.Accounts))
+	}
+	if strategy.Accounts[0].AccountID != available.ID {
+		t.Fatalf("observed account = %d, want available account %d", strategy.Accounts[0].AccountID, available.ID)
+	}
+}
+
 // Concentrated and round-robin strategies decide how many accounts are in play,
 // so an exhausted pool must queue even without the group's capacity toggle.
 func TestConcentratedStrategyQueuesWithoutGroupCapacityToggle(t *testing.T) {

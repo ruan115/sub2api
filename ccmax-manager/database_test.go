@@ -27,6 +27,33 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 				updated_at = ` + nowSQL,
 		`INSERT INTO model_prices (model, input_per_million, output_per_million, cache_creation_per_million, cache_read_per_million, source, source_hash) VALUES (?, ?, ?, ?, ?, 'manual', '') ON CONFLICT(model) DO UPDATE SET input_per_million = excluded.input_per_million, output_per_million = excluded.output_per_million, cache_creation_per_million = excluded.cache_creation_per_million, cache_read_per_million = excluded.cache_read_per_million, source = 'manual', source_hash = '', updated_at = ` + nowSQL,
 		`SELECT p.id, p.key FROM purposes p WHERE key = ?`,
+		// migrateSharedData runs on MySQL too, and there is no MySQL
+		// integration suite — this rewrite check is the only guard that its
+		// SQLite-flavoured SQL survives translation.
+		`INSERT OR IGNORE INTO proxy_pools (id, name, source_type, default_protocol) VALUES (1, 'default', 'manual', 'socks5')`,
+		`INSERT OR IGNORE INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+			SELECT proxy_id, id, created_at, updated_at, 1 FROM accounts WHERE proxy_id IS NOT NULL`,
+		`INSERT OR IGNORE INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+			SELECT archived_proxy_id, id, created_at, updated_at, 1 FROM accounts WHERE archived_proxy_id IS NOT NULL`,
+		`UPDATE accounts SET survival_seconds_total = MAX(0, CAST(strftime('%s', invalidated_at) AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER)) WHERE survival_seconds_total = 0 AND onboarded_at IS NOT NULL AND invalidated_at IS NOT NULL`,
+		accumulateAccountSurvivalSQL,
+		`INSERT INTO proxy_account_history
+			(proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+			SELECT ?, account_id, first_bound_at, last_bound_at, bind_count
+			FROM proxy_account_history WHERE proxy_id = ?
+			ON CONFLICT(proxy_id, account_id) DO UPDATE SET
+				first_bound_at = MIN(proxy_account_history.first_bound_at, excluded.first_bound_at),
+				last_bound_at = MAX(proxy_account_history.last_bound_at, excluded.last_bound_at),
+				bind_count = proxy_account_history.bind_count + excluded.bind_count`,
+		// Rate-limit bookkeeping.
+		`UPDATE accounts SET rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '',
+			consecutive_429 = 0, last_429_at = NULL,
+			error_message = CASE WHEN auth_error = '' THEN '' ELSE error_message END, updated_at = ` + nowSQL + `
+			WHERE rate_limit_reason IN ('429_cooling', 'quota_exhausted')
+			AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at <= ` + nowSQL,
+		`UPDATE accounts SET rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
+			error_message = CASE WHEN auth_error = '' THEN '' ELSE error_message END, updated_at = ` + nowSQL + `
+			WHERE rate_limit_reason = '429_backoff' AND (last_429_at IS NULL OR last_429_at <= ?)`,
 	}
 	for _, query := range queries {
 		rewritten := rewriteQuery(dialectMySQL, query)
@@ -36,6 +63,22 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The account proxy-history triggers are deliberately SQLite-only: MySQL keeps
+// the same table current through recordProxyAssignment instead. rewriteQuery has
+// no rule for their upsert, so feeding one to MySQL is a bug worth failing loudly.
+func TestProxyHistoryTriggerUpsertIsSQLiteOnly(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("trigger upsert was translated instead of rejected")
+		}
+	}()
+	rewriteQuery(dialectMySQL, `INSERT INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+		VALUES (NEW.proxy_id, NEW.id, NEW.created_at, NEW.updated_at, 1)
+		ON CONFLICT(proxy_id, account_id) DO UPDATE SET
+			last_bound_at = excluded.last_bound_at,
+			bind_count = proxy_account_history.bind_count + 1`)
 }
 
 func TestSQLiteLockErrorsAreRetryable(t *testing.T) {

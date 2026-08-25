@@ -23,30 +23,32 @@ import (
 )
 
 type proxyPool struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	SourceType      string `json:"source_type"`
-	APIURL          string `json:"api_url"`
-	APIHeaders      string `json:"api_headers"`
-	DefaultProtocol string `json:"default_protocol"`
-	Status          string `json:"status"`
-	ProxyCount      int    `json:"proxy_count"`
-	AvailableCount  int    `json:"available_count"`
-	AssignedCount   int    `json:"assigned_count"`
-	LastSyncAt      string `json:"last_sync_at"`
-	LastError       string `json:"last_error"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
-	ProtocolSynced  int64  `json:"protocol_synced,omitempty"`
+	ID               int64  `json:"id"`
+	Name             string `json:"name"`
+	SourceType       string `json:"source_type"`
+	APIURL           string `json:"api_url"`
+	APIHeaders       string `json:"api_headers"`
+	DefaultProtocol  string `json:"default_protocol"`
+	Status           string `json:"status"`
+	SingleUseEnabled bool   `json:"single_use_enabled"`
+	ProxyCount       int    `json:"proxy_count"`
+	AvailableCount   int    `json:"available_count"`
+	AssignedCount    int    `json:"assigned_count"`
+	LastSyncAt       string `json:"last_sync_at"`
+	LastError        string `json:"last_error"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	ProtocolSynced   int64  `json:"protocol_synced,omitempty"`
 }
 
 type proxyPoolInput struct {
-	Name            string `json:"name"`
-	SourceType      string `json:"source_type"`
-	APIURL          string `json:"api_url"`
-	APIHeaders      string `json:"api_headers"`
-	DefaultProtocol string `json:"default_protocol"`
-	Status          string `json:"status"`
+	Name             string `json:"name"`
+	SourceType       string `json:"source_type"`
+	APIURL           string `json:"api_url"`
+	APIHeaders       string `json:"api_headers"`
+	DefaultProtocol  string `json:"default_protocol"`
+	Status           string `json:"status"`
+	SingleUseEnabled *bool  `json:"single_use_enabled"`
 }
 
 type proxyRecord struct {
@@ -66,6 +68,7 @@ type proxyRecord struct {
 	LastError        string `json:"last_error"`
 	AssignedTo       string `json:"assigned_to"`
 	UsedAccountCount int    `json:"used_account_count"`
+	SingleUseEnabled bool   `json:"single_use_enabled"`
 	CreatedAt        string `json:"created_at"`
 	UpdatedAt        string `json:"updated_at"`
 }
@@ -133,6 +136,7 @@ func (a *app) migrateProxyFeatures() error {
 			api_headers_json TEXT NOT NULL DEFAULT '{}',
 			default_protocol TEXT NOT NULL DEFAULT 'socks5' CHECK (default_protocol IN (` + proxyProtocolCheckList + `)),
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+			single_use_enabled INTEGER NOT NULL DEFAULT 1,
 			last_sync_at TEXT,
 			last_error TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
@@ -159,6 +163,9 @@ func (a *app) migrateProxyFeatures() error {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_unique ON proxies(pool_id, protocol, host, port, username, password) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_proxy_pool_status ON proxies(pool_id, status) WHERE deleted_at IS NULL`,
+		// Single-use lookups correlate proxies by address across pools, which
+		// idx_proxy_unique cannot serve because it leads with pool_id.
+		`CREATE INDEX IF NOT EXISTS idx_proxy_identity ON proxies(protocol, host, port, username, password)`,
 		`CREATE TABLE IF NOT EXISTS account_rpm_events (
 			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `)
@@ -196,16 +203,14 @@ func (a *app) migrateProxyFeatures() error {
 	if err := addColumnIfMissing(a.db, "proxy_pools", "system_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "proxy_pools", "single_use_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	if _, err := a.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_pools_system_kind ON proxy_pools(system_kind) WHERE system_kind != ''`); err != nil {
 		return fmt.Errorf("index system proxy pools: %w", err)
 	}
 	if err := a.migrateProxyProtocols(); err != nil {
 		return err
-	}
-	// In-flight counters are process leases. A previous process cannot release
-	// them after a crash or restart, so never carry them into this process.
-	if _, err := a.db.Exec(`DELETE FROM account_inflight`); err != nil {
-		return fmt.Errorf("reset stale account in-flight leases: %w", err)
 	}
 	columns := []struct{ name, definition string }{
 		{"proxy_pool_id", "INTEGER REFERENCES proxy_pools(id)"},
@@ -247,24 +252,8 @@ func (a *app) migrateProxyFeatures() error {
 			return fmt.Errorf("migrate proxy assignment history: %w", err)
 		}
 	}
-	if _, err := a.db.Exec(`INSERT OR IGNORE INTO proxy_account_history (proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
-		SELECT proxy_id, id, created_at, updated_at, 1 FROM accounts WHERE proxy_id IS NOT NULL`); err != nil {
-		return fmt.Errorf("backfill proxy assignment history: %w", err)
-	}
-	if _, err := a.db.Exec(`INSERT OR IGNORE INTO proxy_pools (id, name, source_type, default_protocol) VALUES (1, 'default', 'manual', 'socks5')`); err != nil {
-		return err
-	}
-	tx, err := a.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := ensureDeadProxyPool(tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("create dead proxy pool: %w", err)
-	}
+	// Proxy pool seeds, assignment-history backfills and in-flight lease resets
+	// live in migrateSharedData so MySQL runs them too.
 	return nil
 }
 
@@ -273,8 +262,8 @@ func ensureDeadProxyPool(tx *databaseTx) (int64, error) {
 	err := tx.QueryRow(`SELECT id FROM proxy_pools WHERE system_kind = ? ORDER BY id LIMIT 1`, deadProxyPoolKind).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO proxy_pools
-			(name, source_type, api_headers_json, default_protocol, status, system_kind)
-			VALUES (?, 'manual', '{}', 'socks5', 'disabled', ?)`, deadProxyPoolName, deadProxyPoolKind); err != nil {
+			(name, source_type, api_headers_json, default_protocol, status, single_use_enabled, system_kind)
+			VALUES (?, 'manual', '{}', 'socks5', 'disabled', 1, ?)`, deadProxyPoolName, deadProxyPoolKind); err != nil {
 			return 0, fmt.Errorf("insert dead proxy pool: %w", err)
 		}
 		err = tx.QueryRow(`SELECT id FROM proxy_pools WHERE name = ?`, deadProxyPoolName).Scan(&id)
@@ -284,7 +273,7 @@ func ensureDeadProxyPool(tx *databaseTx) (int64, error) {
 	}
 	if _, err := tx.Exec(`UPDATE proxy_pools SET
 		system_kind = ?, source_type = 'manual', api_url = '', api_headers_json = '{}',
-		status = 'disabled', last_error = '', deleted_at = NULL, updated_at = `+nowSQL+`
+		status = 'disabled', single_use_enabled = 1, last_error = '', deleted_at = NULL, updated_at = `+nowSQL+`
 		WHERE id = ?`, deadProxyPoolKind, id); err != nil {
 		return 0, fmt.Errorf("lock dead proxy pool: %w", err)
 	}
@@ -335,6 +324,19 @@ func quarantineProxyIDs(tx *databaseTx, proxyIDs []int64) error {
 		return err
 	}
 	for _, proxyID := range proxyIDs {
+		var singleUseEnabled int
+		err := tx.QueryRow(`SELECT pool.single_use_enabled FROM proxies proxy
+			JOIN proxy_pools pool ON pool.id = proxy.pool_id
+			WHERE proxy.id = ? AND proxy.deleted_at IS NULL`, proxyID).Scan(&singleUseEnabled)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if singleUseEnabled == 0 {
+			continue
+		}
 		var liveOwners int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM accounts
 			WHERE proxy_id = ? AND deleted_at IS NULL AND archived_at IS NULL`, proxyID).Scan(&liveOwners); err != nil {
@@ -345,7 +347,7 @@ func quarantineProxyIDs(tx *databaseTx, proxyIDs []int64) error {
 		}
 
 		var duplicateID int64
-		err := tx.QueryRow(`SELECT target.id
+		err = tx.QueryRow(`SELECT target.id
 			FROM proxies source
 			JOIN proxies target ON target.pool_id = ? AND target.id != source.id
 				AND target.protocol = source.protocol AND target.host = source.host AND target.port = source.port
@@ -449,18 +451,37 @@ func normalizeProxyPool(input *proxyPoolInput) error {
 }
 
 func proxyNotQuarantinedPredicate(alias string) string {
-	return `NOT EXISTS (SELECT 1 FROM proxies dead_proxy
+	return `(EXISTS (SELECT 1 FROM proxy_pools source_pool
+		WHERE source_pool.id = ` + alias + `.pool_id AND source_pool.single_use_enabled = 0)
+		OR NOT EXISTS (SELECT 1 FROM proxies dead_proxy
 		JOIN proxy_pools dead_pool ON dead_pool.id = dead_proxy.pool_id
 		WHERE dead_pool.system_kind = 'dead' AND dead_proxy.deleted_at IS NULL
 		AND dead_proxy.protocol = ` + alias + `.protocol AND dead_proxy.host = ` + alias + `.host
 		AND dead_proxy.port = ` + alias + `.port AND dead_proxy.username = ` + alias + `.username
-		AND dead_proxy.password = ` + alias + `.password)`
+		AND dead_proxy.password = ` + alias + `.password))`
 }
 
-var proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_headers_json, p.default_protocol, p.status,
+func proxyIdentityUnusedPredicate(alias string) string {
+	return `NOT EXISTS (SELECT 1 FROM proxy_account_history used_history
+		JOIN proxies used_proxy ON used_proxy.id = used_history.proxy_id
+		WHERE used_proxy.protocol = ` + alias + `.protocol AND used_proxy.host = ` + alias + `.host
+		AND used_proxy.port = ` + alias + `.port AND used_proxy.username = ` + alias + `.username
+		AND used_proxy.password = ` + alias + `.password)`
+}
+
+func proxyAvailableToAccountPredicate(proxyAlias, poolAlias string) string {
+	return `(` + poolAlias + `.single_use_enabled = 0
+		OR EXISTS (SELECT 1 FROM accounts current_owner
+			WHERE current_owner.id = ? AND current_owner.proxy_id = ` + proxyAlias + `.id
+			AND current_owner.deleted_at IS NULL AND current_owner.archived_at IS NULL)
+		OR ` + proxyIdentityUnusedPredicate(proxyAlias) + `)`
+}
+
+var proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_headers_json, p.default_protocol, p.status, p.single_use_enabled,
 	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.deleted_at IS NULL AND ` + proxyNotQuarantinedPredicate("x") + `),
 	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.status = 'active' AND x.deleted_at IS NULL
 		AND ` + proxyNotQuarantinedPredicate("x") + `
+		AND (p.single_use_enabled = 0 OR ` + proxyIdentityUnusedPredicate("x") + `)
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL AND a.archived_at IS NULL)),
 	(SELECT COUNT(DISTINCT a.id) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.proxy_id IS NOT NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL),
 	p.last_sync_at, p.last_error, p.created_at, p.updated_at FROM proxy_pools p`
@@ -468,7 +489,9 @@ var proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_head
 func scanProxyPool(row scanner) (proxyPool, error) {
 	var item proxyPool
 	var lastSync sql.NullString
-	err := row.Scan(&item.ID, &item.Name, &item.SourceType, &item.APIURL, &item.APIHeaders, &item.DefaultProtocol, &item.Status, &item.ProxyCount, &item.AvailableCount, &item.AssignedCount, &lastSync, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+	var singleUseEnabled int
+	err := row.Scan(&item.ID, &item.Name, &item.SourceType, &item.APIURL, &item.APIHeaders, &item.DefaultProtocol, &item.Status, &singleUseEnabled, &item.ProxyCount, &item.AvailableCount, &item.AssignedCount, &lastSync, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+	item.SingleUseEnabled = singleUseEnabled == 1
 	item.LastSyncAt = nullText(lastSync)
 	return item, err
 }
@@ -525,7 +548,11 @@ func (a *app) handleProxyPoolCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`INSERT INTO proxy_pools (name, source_type, api_url, api_headers_json, default_protocol, status) VALUES (?, ?, ?, ?, ?, ?)`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status)
+	singleUseEnabled := true
+	if input.SingleUseEnabled != nil {
+		singleUseEnabled = *input.SingleUseEnabled
+	}
+	result, err := a.db.Exec(`INSERT INTO proxy_pools (name, source_type, api_url, api_headers_json, default_protocol, status, single_use_enabled) VALUES (?, ?, ?, ?, ?, ?, ?)`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, boolInt(singleUseEnabled))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -586,7 +613,11 @@ func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		protocolSynced, _ = result.RowsAffected()
 	}
-	if _, err := tx.Exec(`UPDATE proxy_pools SET name = ?, source_type = ?, api_url = ?, api_headers_json = ?, default_protocol = ?, status = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, id); err != nil {
+	var singleUseEnabled any
+	if input.SingleUseEnabled != nil {
+		singleUseEnabled = boolInt(*input.SingleUseEnabled)
+	}
+	if _, err := tx.Exec(`UPDATE proxy_pools SET name = ?, source_type = ?, api_url = ?, api_headers_json = ?, default_protocol = ?, status = ?, single_use_enabled = COALESCE(?, single_use_enabled), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, input.Name, input.SourceType, input.APIURL, input.APIHeaders, input.DefaultProtocol, input.Status, singleUseEnabled, id); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -652,16 +683,22 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 
 const proxySelect = `SELECT x.id, x.pool_id, p.name, x.name, x.protocol, x.host, x.port, x.username, x.password != '', x.status, x.exit_ip, x.latency_ms, x.last_test_at, x.last_error,
 	COALESCE((SELECT GROUP_CONCAT(a.name, ', ') FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL AND a.archived_at IS NULL), ''),
-	(SELECT COUNT(*) FROM proxy_account_history h WHERE h.proxy_id = x.id), x.created_at, x.updated_at
+	(SELECT COUNT(DISTINCT used_history.account_id) FROM proxy_account_history used_history
+		JOIN proxies used_proxy ON used_proxy.id = used_history.proxy_id
+		WHERE used_proxy.protocol = x.protocol AND used_proxy.host = x.host AND used_proxy.port = x.port
+		AND used_proxy.username = x.username AND used_proxy.password = x.password),
+	p.single_use_enabled, x.created_at, x.updated_at
 	FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id`
 
 func scanProxy(row scanner) (proxyRecord, error) {
 	var item proxyRecord
 	var latency sql.NullInt64
 	var lastTest sql.NullString
-	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.UsedAccountCount, &item.CreatedAt, &item.UpdatedAt)
+	var singleUseEnabled int
+	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.UsedAccountCount, &singleUseEnabled, &item.CreatedAt, &item.UpdatedAt)
 	item.LatencyMS = nullIntPointer(latency)
 	item.LastTestAt = nullText(lastTest)
+	item.SingleUseEnabled = singleUseEnabled == 1
 	return item, err
 }
 
@@ -784,26 +821,29 @@ func (a *app) importProxyText(poolID int64, defaultProtocol, text string) (creat
 }
 
 func storeProxy(tx *databaseTx, poolID int64, item parsedProxy) (int64, bool, error) {
-	var poolAvailable int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxy_pools
-		WHERE id = ? AND status = 'active' AND deleted_at IS NULL AND system_kind = ''`, poolID).Scan(&poolAvailable); err != nil {
+	var poolAvailable, singleUseEnabled int
+	if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(MAX(single_use_enabled), 1) FROM proxy_pools
+		WHERE id = ? AND status = 'active' AND deleted_at IS NULL AND system_kind = ''`, poolID).Scan(&poolAvailable, &singleUseEnabled); err != nil {
 		return 0, false, err
 	}
 	if poolAvailable == 0 {
 		return 0, false, errors.New("selected proxy pool is unavailable")
 	}
-	var quarantinedID int64
-	err := tx.QueryRow(`SELECT dead_proxy.id FROM proxies dead_proxy
-		JOIN proxy_pools dead_pool ON dead_pool.id = dead_proxy.pool_id
-		WHERE dead_pool.system_kind = ? AND dead_proxy.deleted_at IS NULL
-		AND dead_proxy.protocol = ? AND dead_proxy.host = ? AND dead_proxy.port = ?
-		AND dead_proxy.username = ? AND dead_proxy.password = ? LIMIT 1`, deadProxyPoolKind,
-		item.Protocol, item.Host, item.Port, item.Username, item.Password).Scan(&quarantinedID)
-	if err == nil {
-		return quarantinedID, false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, false, err
+	if singleUseEnabled == 1 {
+		var usedID int64
+		err := tx.QueryRow(`SELECT used_proxy.id FROM proxies used_proxy
+			WHERE used_proxy.protocol = ? AND used_proxy.host = ? AND used_proxy.port = ?
+			AND used_proxy.username = ? AND used_proxy.password = ?
+			AND (EXISTS (SELECT 1 FROM proxy_account_history used_history WHERE used_history.proxy_id = used_proxy.id)
+				OR EXISTS (SELECT 1 FROM proxy_pools used_pool WHERE used_pool.id = used_proxy.pool_id AND used_pool.system_kind = ?))
+			ORDER BY CASE WHEN used_proxy.deleted_at IS NULL THEN 0 ELSE 1 END, used_proxy.id LIMIT 1`,
+			item.Protocol, item.Host, item.Port, item.Username, item.Password, deadProxyPoolKind).Scan(&usedID)
+		if err == nil {
+			return usedID, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, false, err
+		}
 	}
 	name := item.Host + ":" + strconv.Itoa(item.Port)
 	result, err := tx.Exec(`INSERT OR IGNORE INTO proxies (pool_id, name, protocol, host, port, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)`, poolID, name, item.Protocol, item.Host, item.Port, item.Username, item.Password)
@@ -1259,6 +1299,9 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 				if _, err := tx.Exec(`UPDATE accounts SET proxy_id = ?, updated_at = `+nowSQL+` WHERE id = ?`, replacement, account.ID); err != nil {
 					return result, err
 				}
+				if err := recordProxyAssignment(tx, *replacement, account.ID); err != nil {
+					return result, err
+				}
 				result.ReassignedAccounts++
 				continue
 			}
@@ -1501,6 +1544,7 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 			WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 			AND `+proxyNotQuarantinedPredicate("p")+`
+			AND (pool.single_use_enabled = 0 OR `+proxyIdentityUnusedPredicate("p")+`)
 			AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)`, *selected, *poolID).Scan(&available)
 		if err != nil {
 			return nil, "", err
@@ -1518,6 +1562,7 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 			WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 			AND `+proxyNotQuarantinedPredicate("p")+`
+			AND (pool.single_use_enabled = 0 OR `+proxyIdentityUnusedPredicate("p")+`)
 			AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)
 			ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID).Scan(&id)
 		if err != nil {
@@ -1615,7 +1660,8 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
 			WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
-			AND `+proxyNotQuarantinedPredicate("p"), *requestedProxyID, *poolID).Scan(&exists); err != nil || exists == 0 {
+			AND `+proxyNotQuarantinedPredicate("p")+`
+			AND `+proxyAvailableToAccountPredicate("p", "pool"), *requestedProxyID, *poolID, accountID).Scan(&exists); err != nil || exists == 0 {
 			return nil, errors.New("selected proxy is unavailable")
 		}
 		var exclusiveOwner int
@@ -1635,7 +1681,8 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 			_ = tx.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
 				WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 				AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
-				AND `+proxyNotQuarantinedPredicate("p"), *requestedProxyID, *poolID).Scan(&valid)
+				AND `+proxyNotQuarantinedPredicate("p")+`
+				AND `+proxyAvailableToAccountPredicate("p", "pool"), *requestedProxyID, *poolID, accountID).Scan(&valid)
 			if valid > 0 {
 				return requestedProxyID, nil
 			}
@@ -1646,10 +1693,24 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 		WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 		AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 		AND `+proxyNotQuarantinedPredicate("p")+`
+		AND `+proxyAvailableToAccountPredicate("p", "pool")+`
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.id != ? AND a.deleted_at IS NULL)
-		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID, accountID).Scan(&id)
+		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID, accountID, accountID).Scan(&id)
 	if err != nil {
 		return nil, errors.New("no unassigned active proxy is available in this pool")
 	}
 	return &id, nil
+}
+
+func recordProxyAssignment(tx *databaseTx, proxyID, accountID int64) error {
+	if tx.dialect != dialectMySQL {
+		return nil
+	}
+	_, err := tx.Exec(`INSERT INTO proxy_account_history
+		(proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+		VALUES (?, ?, `+nowSQL+`, `+nowSQL+`, 1)
+		ON DUPLICATE KEY UPDATE
+			last_bound_at = VALUES(last_bound_at),
+			bind_count = proxy_account_history.bind_count + 1`, proxyID, accountID)
+	return err
 }

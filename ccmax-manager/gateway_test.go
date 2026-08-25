@@ -422,6 +422,92 @@ func TestGatewayRejectsAnthropicSilentModelDowngradeByGroup(t *testing.T) {
 	}
 }
 
+func TestGatewayQuotaHeaderMaskingByGroup(t *testing.T) {
+	tests := []struct {
+		name    string
+		stream  bool
+		enabled bool
+	}{
+		{name: "disabled_non_stream_passes_through", enabled: false},
+		{name: "enabled_non_stream_masks", enabled: true},
+		{name: "enabled_stream_masks", stream: true, enabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CCMAX_AUTH_DISABLED", "1")
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("request-id", "req-quota-mask")
+				w.Header().Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.93")
+				w.Header().Set("Anthropic-Ratelimit-Unified-Fallback-Percentage", "0.5")
+				w.Header().Set("Anthropic-Ratelimit-Unified-Status", "allowed_warning")
+				w.Header().Set("Anthropic-Organization-Id", "org-secret")
+				w.Header().Set("Anthropic-Workspace-Id", "wrkspc-secret")
+				if tt.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_mask\",\"type\":\"message\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":2}}}\n\n")
+					_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"msg_mask","type":"message","model":"claude-opus-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2,"output_tokens":1}}`)
+			}))
+			defer upstream.Close()
+
+			a, handler := newGatewayTestApp(t)
+			defer a.db.Close()
+			putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+				"name": "A 分组", "description": "限额头屏蔽", "rate_multiplier": 1, "status": "active",
+				"quota_header_masking_enabled": tt.enabled,
+			}, http.StatusOK, nil)
+			key := createGatewayTestKey(t, handler)
+			created := createGatewayTestAccount(t, a, handler, "quota-mask", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+
+			payload := fmt.Sprintf(`{"model":"claude-opus-5","stream":%t,"max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`, tt.stream)
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload))
+			request.Header.Set("Authorization", "Bearer "+key.Key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			header := response.Header()
+			if header.Get("request-id") != "req-quota-mask" {
+				t.Fatalf("benign upstream header lost: %v", header)
+			}
+			if header.Get("X-CCMAX-Group") == "" {
+				t.Fatalf("group attribution header lost: %v", header)
+			}
+			masked := []string{
+				"Anthropic-Ratelimit-Unified-5h-Utilization",
+				"Anthropic-Ratelimit-Unified-Fallback-Percentage",
+				"Anthropic-Ratelimit-Unified-Status",
+				"Anthropic-Organization-Id",
+				"Anthropic-Workspace-Id",
+			}
+			if tt.enabled {
+				for _, name := range masked {
+					if header.Get(name) != "" {
+						t.Fatalf("header %s leaked despite masking: %q", name, header.Get(name))
+					}
+				}
+				if header.Get("X-CCMAX-Account") != "" {
+					t.Fatalf("account header leaked despite masking: %q", header.Get("X-CCMAX-Account"))
+				}
+				return
+			}
+			for _, name := range masked {
+				if header.Get(name) == "" {
+					t.Fatalf("header %s missing with masking disabled: %v", name, header)
+				}
+			}
+			if header.Get("X-CCMAX-Account") != created.Name {
+				t.Fatalf("account header=%q want=%q", header.Get("X-CCMAX-Account"), created.Name)
+			}
+		})
+	}
+}
+
 func TestDetectGatewayAnthropicModelDowngradeFamilies(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -2269,6 +2355,429 @@ func TestGatewayRecordsSelectedFiveHourWindow(t *testing.T) {
 	}
 	if resetAt != fiveHourReset.Format(time.RFC3339Nano) || window != "5h" {
 		t.Fatalf("stored cooldown = %s/%s, want %s/5h", resetAt, window, fiveHourReset.Format(time.RFC3339Nano))
+	}
+}
+
+func TestGatewayConsecutive429ParksAccountUntilFiveHourReset(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "three-strikes", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	fiveHourReset := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(fiveHourReset.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.91")
+	response := &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers}
+
+	for attempt := 1; attempt <= account429CoolingThreshold; attempt++ {
+		a.captureGatewayUpstreamState(created.ID, "claude-fable-5", 10, response)
+		var consecutive, schedulable int
+		var reason, window string
+		var resetAt sql.NullString
+		if err := a.db.QueryRow(`SELECT consecutive_429, schedulable, rate_limit_reason, rate_limit_window, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).
+			Scan(&consecutive, &schedulable, &reason, &window, &resetAt); err != nil {
+			t.Fatal(err)
+		}
+		if consecutive != attempt || schedulable != 1 {
+			t.Fatalf("attempt %d state = consecutive %d, schedulable %d", attempt, consecutive, schedulable)
+		}
+		if attempt < account429CoolingThreshold {
+			if reason != "429_backoff" || window != "" {
+				t.Fatalf("attempt %d reason/window = %q/%q", attempt, reason, window)
+			}
+			// Strikes debounce, so age this one out to model attempts spread
+			// across separate dispatches rather than one upstream burst.
+			if _, err := a.db.Exec(`UPDATE accounts SET last_429_at = ? WHERE id = ?`,
+				time.Now().UTC().Add(-2*account429DebounceWindow).Format(time.RFC3339Nano), created.ID); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if reason != "429_cooling" || !resetAt.Valid {
+			t.Fatalf("third 429 state = reason %q, reset %v", reason, resetAt)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, resetAt.String)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !parsed.Equal(fiveHourReset) {
+			t.Fatalf("cooldown reset = %s, want %s", parsed, fiveHourReset)
+		}
+	}
+}
+
+func TestGatewayConcurrent429BurstCountsOnce(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "burst", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	response := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)}
+
+	// Upstream rate limiting rejects every in-flight request at once; that is
+	// one event, not enough strikes to park the account.
+	var wait sync.WaitGroup
+	for range account429CoolingThreshold + 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			a.captureAccount429State(created.ID, response)
+		}()
+	}
+	wait.Wait()
+
+	var consecutive int
+	var reason string
+	var resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &resetAt); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 1 || reason != "429_backoff" || resetAt.Valid {
+		t.Fatalf("burst state = consecutive %d, reason %q, reset %v; want a single backoff strike", consecutive, reason, resetAt)
+	}
+}
+
+// The very first 429 must lower the account's dispatch weight, and the penalty
+// must be pinned to the quota window rather than a rolling timer.
+func TestGatewayFirst429DownweightsUntilQuotaWindowResets(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "first-strike", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	windowReset := time.Now().UTC().Add(90 * time.Minute).Truncate(time.Second)
+	if _, err := a.db.Exec(`UPDATE accounts SET quota_5h_reset_at = ? WHERE id = ?`, windowReset.Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a.captureAccount429State(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+
+	var consecutive int
+	var reason string
+	var downweightUntil sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &downweightUntil); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 1 || reason != "429_backoff" || !downweightUntil.Valid {
+		t.Fatalf("first 429 state = consecutive %d, reason %q, downweight %v", consecutive, reason, downweightUntil)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, downweightUntil.String)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Equal(windowReset) {
+		t.Fatalf("downweight until = %s, want the account's 5h window reset %s", parsed, windowReset)
+	}
+}
+
+// Successes inside the same window must not lift the penalty — the account has
+// already shown it reaches its ceiling there.
+func TestGatewaySuccessDoesNotLiftDownweight(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":2}}`)
+	}))
+	defer healthy.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "still-penalised", healthy.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 1, rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`,
+		time.Now().UTC().Add(2*time.Hour).Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	var consecutive int
+	var reason string
+	var downweightUntil sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &downweightUntil); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 1 || reason != "429_backoff" || !downweightUntil.Valid {
+		t.Fatalf("a success lifted the window penalty: consecutive %d, reason %q, downweight %v", consecutive, reason, downweightUntil)
+	}
+}
+
+func TestGatewayLate429DoesNotDowngradeLivePark(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "parked", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	parkedUntil := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, rate_limit_reason = '429_cooling', rate_limit_reset_at = ?, error_message = '已冷却' WHERE id = ?`,
+		parkedUntil, created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A request that was already in flight when the park landed must not
+	// rewrite the reason, or the sweeper would never release the row.
+	a.captureAccount429State(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+
+	var reason, message string
+	var resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reason, error_message, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).
+		Scan(&reason, &message, &resetAt); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "429_cooling" || message != "已冷却" || !resetAt.Valid {
+		t.Fatalf("late strike changed park: reason %q, message %q, reset %v", reason, message, resetAt)
+	}
+}
+
+// Manual recovery is one of only two ways out of the penalty, and it grants
+// the fresh-window boost because the operator is asserting the account is good.
+func TestManualClearReleasesDownweightAndBoosts(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "manual-clear", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, last_429_at = ?, rate_limit_reason = '429_cooling', rate_limit_window = '5h', rate_limit_reset_at = ?, rate_limit_downweight_until = ?, error_message = '上游 429' WHERE id = ?`,
+		time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+		time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+		time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a.clearAccount429State(created.ID)
+
+	var consecutive int
+	var reason, window, message string
+	var last429, resetAt, downweight, refreshed sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_window, error_message, last_429_at, rate_limit_reset_at, rate_limit_downweight_until, quota_refreshed_at FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &window, &message, &last429, &resetAt, &downweight, &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 0 || reason != "" || window != "" || message != "" || last429.Valid || resetAt.Valid || downweight.Valid {
+		t.Fatalf("manual clear kept state: consecutive=%d reason=%q window=%q message=%q last=%v reset=%v downweight=%v", consecutive, reason, window, message, last429, resetAt, downweight)
+	}
+	if !refreshed.Valid {
+		t.Fatal("manual clear did not grant the fresh-window priority boost")
+	}
+}
+
+func TestManualClearKeepsCooldownsItDoesNotOwn(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	idle := createGatewayTestAccount(t, a, handler, "idle-cooldown", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
+	// A backoff strike never owns rate_limit_reset_at; here it belongs to the
+	// stream-idle guard, so clearing the 429 penalty must leave it alone.
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 2, rate_limit_reason = '429_backoff', rate_limit_reset_at = ? WHERE id = ?`, future, idle.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a.clearAccount429State(idle.ID)
+
+	var idleReset sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, idle.ID).Scan(&idleReset); err != nil {
+		t.Fatal(err)
+	}
+	if !idleReset.Valid {
+		t.Fatal("clear removed a cooldown owned by the stream-idle guard")
+	}
+}
+
+func TestAccountRateLimitSweeperReleasesOnQuotaWindowReset(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	expired := createGatewayTestAccount(t, a, handler, "expired-park", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	live := createGatewayTestAccount(t, a, handler, "live-park", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	rolled := createGatewayTestAccount(t, a, handler, "window-rolled", "https://third.example.test", 0, nil, map[string]any{"access_token": "token-c"})
+	penalised := createGatewayTestAccount(t, a, handler, "still-penalised", "https://fourth.example.test", 0, nil, map[string]any{"access_token": "token-d"})
+	past := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
+	// Park expired but the window has not rolled: schedulable again, still last.
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, rate_limit_reason = '429_cooling', rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`, past, future, expired.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, rate_limit_reason = '429_cooling', rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`, future, future, live.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 2, rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`, past, rolled.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 2, rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`, future, penalised.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a.sweepAccountRateLimitState()
+
+	var refreshed sql.NullString
+	if err := a.db.QueryRow(`SELECT quota_refreshed_at FROM accounts WHERE id = ?`, rolled.ID).Scan(&refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed.Valid {
+		t.Fatal("a rolled quota window did not grant the fresh priority boost")
+	}
+	for _, expectation := range []struct {
+		name            string
+		id              int64
+		wantConsecutive int
+		wantReason      string
+	}{
+		{"expired park inside window", expired.ID, 3, "429_backoff"},
+		{"live park", live.ID, 3, "429_cooling"},
+		{"rolled window", rolled.ID, 0, ""},
+		{"still penalised", penalised.ID, 2, "429_backoff"},
+	} {
+		var consecutive int
+		var reason string
+		if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason FROM accounts WHERE id = ?`, expectation.id).Scan(&consecutive, &reason); err != nil {
+			t.Fatal(err)
+		}
+		if consecutive != expectation.wantConsecutive || reason != expectation.wantReason {
+			t.Fatalf("%s = consecutive %d reason %q, want %d %q", expectation.name, consecutive, reason, expectation.wantConsecutive, expectation.wantReason)
+		}
+	}
+}
+
+func TestGatewayExpired429CoolingAutoRecoversBeforeSelection(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := createGatewayTestAccount(t, a, handler, "expired-cooling", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, last_429_at = ?, rate_limit_reason = '429_cooling', rate_limit_window = '5h', rate_limit_reset_at = ?, error_message = '连续 3 次上游 429' WHERE id = ?`,
+		time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Selection must recover the account on its own. The sweeper only tidies
+	// display state, so dispatch cannot depend on having run it first.
+	selected, err := a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.releaseGatewayAccount(selected.ID)
+	if selected.ID != created.ID {
+		t.Fatalf("selected account = %d, want recovered %d", selected.ID, created.ID)
+	}
+}
+
+// A stream opens with a 200 header and only then carries a rate_limit_error.
+// Resetting on the header status would zero the counter immediately before the
+// in-stream error increments it, so strikes could never accumulate.
+func TestGatewayStreamRateLimitErrorAccumulatesStrikes(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"limited\"}}\n\n")
+	}))
+	defer limited.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	key := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "stream-limited", limited.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
+
+	// Seed an earlier strike that has aged past the debounce window. If the
+	// 200 header still triggered a reset, this would be wiped and the
+	// in-stream error would leave the count at 1 instead of 2.
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 1, rate_limit_reason = '429_backoff', last_429_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-2*account429DebounceWindow).Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	var consecutive int
+	var reason string
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason FROM accounts WHERE id = ?`, created.ID).Scan(&consecutive, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 2 || reason != "429_backoff" {
+		t.Fatalf("in-stream rate limit state = consecutive %d, reason %q; want the earlier strike kept and this one added", consecutive, reason)
+	}
+}
+
+// A freshly refreshed account outranks a plain one, which in turn outranks one
+// still carrying this window's penalty.
+func TestGatewaySchedulerPrefersFreshlyRefreshedAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Equal priority throughout: the weight tier is only a tie-break, an
+	// explicit priority still wins outright.
+	penalised := createGatewayTestAccount(t, a, handler, "penalised", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	createGatewayTestAccount(t, a, handler, "plain", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	refreshed := createGatewayTestAccount(t, a, handler, "refreshed", "https://third.example.test", 0, nil, map[string]any{"access_token": "token-c"})
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 1, rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`,
+		time.Now().UTC().Add(2*time.Hour).Format(time.RFC3339Nano), penalised.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET quota_refreshed_at = ? WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano), refreshed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	selected, err := a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.releaseGatewayAccount(selected.ID)
+	if selected.ID != refreshed.ID {
+		t.Fatalf("selected account = %d, want the freshly refreshed one %d", selected.ID, refreshed.ID)
+	}
+
+	// With the boost aged out it falls back to the plain account, and the
+	// penalised one still sorts last.
+	if _, err := a.db.Exec(`UPDATE accounts SET quota_refreshed_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-2*accountQuotaFreshPriorityWindow).Format(time.RFC3339Nano), refreshed.ID); err != nil {
+		t.Fatal(err)
+	}
+	next, err := a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.releaseGatewayAccount(next.ID)
+	if next.ID == penalised.ID {
+		t.Fatalf("selected the penalised account %d while unpenalised ones were available", penalised.ID)
+	}
+}
+
+func TestGatewaySchedulerPrefersAccountWithout429Strikes(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	penalized := createGatewayTestAccount(t, a, handler, "penalized", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	healthy := createGatewayTestAccount(t, a, handler, "healthy", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 1, rate_limit_reason = '429_backoff', rate_limit_reset_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), penalized.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	selected, err := a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.releaseGatewayAccount(selected.ID)
+	if selected.ID != healthy.ID {
+		t.Fatalf("selected account = %d, want healthy account %d", selected.ID, healthy.ID)
 	}
 }
 

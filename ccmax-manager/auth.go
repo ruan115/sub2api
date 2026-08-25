@@ -141,12 +141,6 @@ func (a *app) migrateFeatures() error {
 	if err := addColumnIfMissing(a.db, "users", "balance", "REAL"); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = CASE role WHEN 'admin' THEN '["overview","accounts","dead","onboarding","daily","authorization","errors","proxies","access","pricing","billing","audit"]' WHEN 'readonly_admin' THEN '["overview","accounts","dead","daily","authorization","errors","proxies","pricing","billing","audit"]' ELSE '["accounts","access"]' END WHERE visible_pages_json = '[]'`); err != nil {
-		return fmt.Errorf("initialize visible pages: %w", err)
-	}
-	if _, err := a.db.Exec(`UPDATE users SET visible_pages_json = '["overview","accounts","dead","daily","authorization","errors","proxies","pricing","billing","audit"]' WHERE role = 'readonly_admin' AND visible_pages_json = '["overview","accounts","dead","daily","authorization","proxies","pricing","billing","audit"]'`); err != nil {
-		return fmt.Errorf("add error page to default read-only permissions: %w", err)
-	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -164,25 +158,9 @@ func (a *app) migrateFeatures() error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit ordinary user account page migration: %w", err)
 	}
-	if err := a.migrateProxyFeatures(); err != nil {
-		return err
-	}
-	var count int
-	if err := a.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND deleted_at IS NULL`).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		hash, err := bcrypt.GenerateFromPassword([]byte(a.adminPassword), bcrypt.DefaultCost)
-		if err != nil {
-			return err
-		}
-		visible, _ := json.Marshal(defaultVisiblePages("admin"))
-		_, err = a.db.Exec(`INSERT INTO users (username, name, password_hash, role, allowed_group_ids_json, visible_pages_json) VALUES (?, '系统管理员', ?, 'admin', '["a","b"]', ?)`, a.adminUser, string(hash), string(visible))
-		if err != nil {
-			return fmt.Errorf("seed administrator: %w", err)
-		}
-	}
-	return nil
+	// Visible-page backfills and the administrator seed live in
+	// migrateSharedData so MySQL runs them too.
+	return a.migrateProxyFeatures()
 }
 
 func defaultVisiblePages(role string) []string {

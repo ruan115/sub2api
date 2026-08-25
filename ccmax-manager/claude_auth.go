@@ -728,10 +728,12 @@ func (a *app) saveClaudeTokenWithCondition(accountID int64, authType string, tok
 		rateLimitTier = rateLimitTierFromCredentials(credentials)
 	}
 	schedulingUpdate := `status = 'active', schedulable = 1,`
+	rateLimitStateUpdate := `rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL,`
 	if preserveRefresh {
 		schedulingUpdate = `status = CASE WHEN status = 'error' THEN 'active' ELSE status END,`
+		rateLimitStateUpdate = ``
 	}
-	query := `UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = CASE WHEN ? = '' THEN source_sk_hint ELSE ? END, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = ` + nowSQL + `, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN ` + nowSQL + ` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', ` + schedulingUpdate + ` updated_at = ` + nowSQL + ` WHERE id = ? AND deleted_at IS NULL`
+	query := `UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = CASE WHEN ? = '' THEN source_sk_hint ELSE ? END, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = ` + nowSQL + `, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN ` + nowSQL + ` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', ` + rateLimitStateUpdate + schedulingUpdate + ` updated_at = ` + nowSQL + ` WHERE id = ? AND deleted_at IS NULL`
 	args := []any{authType, string(credentialsJSON), credentialHint(string(credentialsJSON)), sourceHint, sourceHint, expiresAt, subscription, rateLimitTier, accountID}
 	if condition != nil {
 		if condition.ExpectedCredentials != nil {

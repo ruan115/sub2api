@@ -155,6 +155,133 @@ func TestProxyPoolUpdateSynchronizesExistingProxyProtocols(t *testing.T) {
 	}
 }
 
+func TestProxyPoolSingleUseDefaultsOnAndUpdatePreservesOmittedValue(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var pool proxyPool
+	putJSON(t, handler, http.MethodPost, "/api/proxy-pools", map[string]any{
+		"name": "single-use-default", "source_type": "manual", "default_protocol": "http", "status": "active",
+	}, http.StatusCreated, &pool)
+	if !pool.SingleUseEnabled {
+		t.Fatalf("new proxy pool single_use_enabled = false, want true")
+	}
+
+	putJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/proxy-pools/%d", pool.ID), map[string]any{
+		"name": "single-use-default", "source_type": "manual", "default_protocol": "http", "status": "active",
+		"single_use_enabled": false,
+	}, http.StatusOK, &pool)
+	if pool.SingleUseEnabled {
+		t.Fatalf("updated proxy pool single_use_enabled = true, want false")
+	}
+
+	putJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/proxy-pools/%d", pool.ID), map[string]any{
+		"name": "single-use-default-renamed", "source_type": "manual", "default_protocol": "http", "status": "active",
+	}, http.StatusOK, &pool)
+	if pool.SingleUseEnabled {
+		t.Fatalf("omitted single_use_enabled reset existing false value")
+	}
+}
+
+func TestSingleUseProxyCannotMoveToAnotherAccountAfterDelete(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	createAccount := func(name string, wantStatus int) account {
+		var item account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": name, "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": name + "-token"}, "extra": map[string]any{},
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+			"rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+		}, wantStatus, &item)
+		return item
+	}
+
+	first := createAccount("single-use-first@example.com", http.StatusCreated)
+	putJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/accounts/%d", first.ID), nil, http.StatusNoContent, nil)
+	createAccount("single-use-blocked@example.com", http.StatusConflict)
+
+	var pools []proxyPool
+	putJSON(t, handler, http.MethodGet, "/api/proxy-pools", nil, http.StatusOK, &pools)
+	defaultPool := findProxyPool(t, pools, 1)
+	if !defaultPool.SingleUseEnabled || defaultPool.AvailableCount != 0 {
+		t.Fatalf("single-use pool after release = %+v, want enabled with zero available proxies", defaultPool)
+	}
+	var proxies []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
+	usedProxy := findProxyRecord(t, proxies, proxyID)
+	if !usedProxy.SingleUseEnabled || usedProxy.AssignedTo != "" || usedProxy.UsedAccountCount != 1 {
+		t.Fatalf("released single-use proxy = %+v", usedProxy)
+	}
+
+	var reusablePool proxyPool
+	putJSON(t, handler, http.MethodPut, "/api/proxy-pools/1", map[string]any{
+		"name": "default", "source_type": "manual", "default_protocol": "socks5", "status": "active",
+		"single_use_enabled": false,
+	}, http.StatusOK, &reusablePool)
+	if reusablePool.SingleUseEnabled {
+		t.Fatal("proxy pool did not switch to reusable mode")
+	}
+	createAccount("reusable-second@example.com", http.StatusCreated)
+}
+
+func TestSingleUseProxyCannotBeDeletedAndReimported(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	var host string
+	var port int
+	if err := a.db.QueryRow(`SELECT host, port FROM proxies WHERE id = ?`, proxyID).Scan(&host, &port); err != nil {
+		t.Fatal(err)
+	}
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "single-use-delete@example.com", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "delete-token"}, "extra": map[string]any{},
+		"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+		"rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}, http.StatusCreated, &created)
+	putJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/accounts/%d", created.ID), nil, http.StatusNoContent, nil)
+	putJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/proxies/%d", proxyID), nil, http.StatusOK, nil)
+
+	var imported map[string]int
+	putJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": 1, "default_protocol": "http", "text": fmt.Sprintf("http://%s:%d", host, port),
+	}, http.StatusCreated, &imported)
+	if imported["created"] != 0 || imported["skipped"] != 1 || imported["invalid"] != 0 {
+		t.Fatalf("reimported deleted single-use proxy = %+v", imported)
+	}
+}
+
+func findProxyPool(t *testing.T, items []proxyPool, id int64) proxyPool {
+	t.Helper()
+	for _, item := range items {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("proxy pool %d not found in %+v", id, items)
+	return proxyPool{}
+}
+
 func TestPersistProxyTestResultsWritesBatchAndPreservesDisabled(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

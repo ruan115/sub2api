@@ -62,9 +62,10 @@ func gatewayCorrelationIDs(ctx context.Context, upstreamRequestID string) (reque
 }
 
 type gatewayCapacityDiagnostics struct {
-	Candidates          int `json:"candidates"`
-	Excluded            int `json:"excluded"`
-	StrategyMissing     int `json:"strategy_missing"`
+	Candidates           int `json:"candidates"`
+	Excluded             int `json:"excluded"`
+	StrategyMissing      int `json:"strategy_missing"`
+	StrategyShareBlocked int `json:"strategy_share_blocked"`
 	ModelCooldown       int `json:"model_cooldown"`
 	ModelUnsupported    int `json:"model_unsupported"`
 	ConcurrencyBlocked  int `json:"concurrency_blocked"`

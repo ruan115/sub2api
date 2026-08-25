@@ -845,6 +845,34 @@ svg {
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }
+.strategy-share-setting > div {
+  width: 100%;
+}
+.strategy-share-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.strategy-share-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 76px minmax(0, 1.4fr);
+}
+.strategy-share-row > span {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strategy-share-row > small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .group-mode-setting > div {
   display: grid;
   gap: 5px;
@@ -1908,6 +1936,9 @@ textarea:focus {
 .authorization-filters {
   flex-wrap: wrap;
 }
+.authorization-search-field {
+  flex: 1 1 320px;
+}
 .authorization-filters > select {
   width: 170px;
   flex: 0 0 170px;
@@ -2162,8 +2193,12 @@ textarea:focus {
   font-size: 13px;
 }
 .pool-row small {
-  color: var(--muted);
-  font-size: 9px;
+	min-width: 0;
+	overflow: hidden;
+	color: var(--muted);
+	font-size: 9px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .pool-meter {
   height: 5px;
@@ -2276,7 +2311,15 @@ textarea:focus {
 
 .billing-filters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+  grid-template-columns: minmax(260px, 1.5fr) repeat(3, minmax(145px, 1fr));
+  align-items: end;
+}
+.billing-search-field {
+  min-width: 0;
+}
+.billing-filters .button {
+  width: fit-content;
+  min-width: 96px;
 }
 .billing-filters label > span,
 .form-grid label > span,
@@ -3208,10 +3251,10 @@ label small {
     min-width: 100%;
   }
   .billing-filters {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .billing-filters .button {
-    grid-column: span 2;
+    grid-column: auto;
   }
   .form-grid {
     grid-template-columns: 1fr;

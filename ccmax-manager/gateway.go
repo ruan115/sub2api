@@ -59,6 +59,7 @@ type gatewayKey struct {
 	AnthropicBetaPassthrough  bool
 	RejectAnthropicDowngrade  bool
 	RejectDistillation        bool
+	QuotaHeaderMasking        bool
 	OverloadCooldownSeconds   int
 	RateLimitWaitEnabled      bool
 	RateLimitWaitSeconds      int
@@ -348,6 +349,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			return
 		}
 		prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
+		prepared.MaskQuotaHeaders = key.QuotaHeaderMasking
 		path := "/v1/messages"
 		if countTokens {
 			path = "/v1/messages/count_tokens"
@@ -519,6 +521,10 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			return
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			// Success deliberately does not lift a rate-limit penalty: the
+			// account has already shown it reaches its ceiling in this quota
+			// window. Only the window rolling over, or an administrator,
+			// clears it.
 			if countTokens {
 				if forwardErr != nil {
 					return
@@ -551,9 +557,8 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			writeSub2CompatibilityError(w, lastFailure.status, lastFailure.body, countTokens)
 			return
 		}
-		copyGatewayResponseHeaders(w.Header(), lastFailure.header)
-		w.Header().Set("X-CCMAX-Account", lastFailure.account.Name)
-		w.Header().Set("X-CCMAX-Group", key.GroupID)
+		copyGatewayResponseHeaders(w.Header(), lastFailure.header, key.QuotaHeaderMasking)
+		setGatewayAttributionHeaders(w.Header(), lastFailure.account.Name, key.GroupID, key.QuotaHeaderMasking)
 		w.WriteHeader(lastFailure.status)
 		_, _ = w.Write(lastFailure.body)
 		return
@@ -1097,9 +1102,8 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 				return parseAnthropicUsage(body, false), downgrade
 			}
 		}
-		copyGatewayResponseHeaders(w.Header(), response.Header)
-		w.Header().Set("X-CCMAX-Account", account.Name)
-		w.Header().Set("X-CCMAX-Group", groupID)
+		copyGatewayResponseHeaders(w.Header(), response.Header, prepared.MaskQuotaHeaders)
+		setGatewayAttributionHeaders(w.Header(), account.Name, groupID, prepared.MaskQuotaHeaders)
 		body = restoreGatewayResponse(body, prepared)
 		w.WriteHeader(response.StatusCode)
 		_, err = w.Write(body)
@@ -1118,9 +1122,8 @@ func forwardGatewayResponse(w http.ResponseWriter, response *http.Response, stre
 		if committed {
 			return
 		}
-		copyGatewayResponseHeaders(w.Header(), response.Header)
-		w.Header().Set("X-CCMAX-Account", account.Name)
-		w.Header().Set("X-CCMAX-Group", groupID)
+		copyGatewayResponseHeaders(w.Header(), response.Header, prepared.MaskQuotaHeaders)
+		setGatewayAttributionHeaders(w.Header(), account.Name, groupID, prepared.MaskQuotaHeaders)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
@@ -1424,15 +1427,45 @@ func mergeTokenUsage(current, next tokenUsage) tokenUsage {
 	return current
 }
 
-func copyGatewayResponseHeaders(target, source http.Header) {
+func copyGatewayResponseHeaders(target, source http.Header, maskQuota bool) {
 	for key, values := range source {
 		if isHopByHopHeader(key) || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		if maskQuota && isGatewayQuotaIdentityHeader(key) {
 			continue
 		}
 		for _, value := range values {
 			target.Add(key, value)
 		}
 	}
+}
+
+// isGatewayQuotaIdentityHeader matches upstream headers that reveal the pooled
+// account's quota state or identity. Claude Code reads the unified ratelimit
+// headers and silently drops a session from Opus 5 to Opus 4.8 once the
+// account's utilization crosses the advertised fallback percentage, so
+// customer-facing groups must not leak them.
+func isGatewayQuotaIdentityHeader(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if strings.HasPrefix(lower, "anthropic-ratelimit-") {
+		return true
+	}
+	switch lower {
+	case "anthropic-organization-id", "anthropic-workspace-id":
+		return true
+	}
+	return false
+}
+
+// setGatewayAttributionHeaders tags the response with the serving account and
+// group. Masked groups omit the account header because its value is the pooled
+// account's email address.
+func setGatewayAttributionHeaders(header http.Header, accountName, groupID string, maskQuota bool) {
+	if !maskQuota {
+		header.Set("X-CCMAX-Account", accountName)
+	}
+	header.Set("X-CCMAX-Group", groupID)
 }
 
 func copyGatewayRequestID(target, source http.Header) {
@@ -1487,11 +1520,11 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, rateLimitWaitEnabled, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.overload_cooldown_seconds, g.rate_limit_wait_enabled, g.rate_limit_wait_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, rateLimitWaitEnabled, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.quota_header_masking_enabled, g.overload_cooldown_seconds, g.rate_limit_wait_enabled, g.rate_limit_wait_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &key.OverloadCooldownSeconds, &rateLimitWaitEnabled, &key.RateLimitWaitSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &quotaHeaderMasking, &key.OverloadCooldownSeconds, &rateLimitWaitEnabled, &key.RateLimitWaitSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
@@ -1503,6 +1536,7 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	key.AnthropicBetaPassthrough = anthropicBetaPassthrough == 1
 	key.RejectAnthropicDowngrade = rejectAnthropicDowngrade == 1
 	key.RejectDistillation = rejectDistillation == 1
+	key.QuotaHeaderMasking = quotaHeaderMasking == 1
 	key.RateLimitWaitEnabled = rateLimitWaitEnabled == 1
 	key.CapacityQueueEnabled = capacityQueueEnabled == 1
 	key.StrategyRequiredEnabled = strategyRequired == 1
@@ -1759,11 +1793,24 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL); err != nil {
 		return gatewayAccount{}, err
 	}
+	// Expired rate-limit state is tidied by startAccountRateLimitSweeper, not
+	// here: accountStatePredicate already admits accounts whose cooldown has
+	// passed, and an unbounded UPDATE in the dispatch transaction deadlocks
+	// against captureAccount429State on MySQL.
 	var stickyID int64
 	if sessionHash != "" {
 		_ = tx.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ? AND expires_at > `+nowSQL, sessionHash, key.ID).Scan(&stickyID)
 	}
-	orderClause := `ORDER BY CASE WHEN a.id = ? THEN 0 ELSE 1 END, ag.priority, a.priority`
+	// Rate-limit history splits equal-priority accounts into three tiers: an
+	// account whose quota window just rolled over has a full allowance and goes
+	// first, an account still carrying this window's 429 penalty goes last.
+	freshCutoff := time.Now().UTC().Add(-accountQuotaFreshPriorityWindow).Format(time.RFC3339Nano)
+	weightTier := `CASE
+		WHEN a.quota_refreshed_at IS NOT NULL AND a.quota_refreshed_at > ? THEN 0
+		WHEN a.rate_limit_downweight_until IS NOT NULL OR a.rate_limit_reason != '' THEN 2
+		ELSE 1
+	END`
+	orderClause := `ORDER BY CASE WHEN a.id = ? THEN 0 ELSE 1 END, ag.priority, a.priority, weight_tier, a.consecutive_429`
 	if key.RPMDispatchEnabled && !loadAware {
 		orderClause += `, CASE WHEN current_rpm > 0 OR current_inflight > 0 THEN 0 ELSE 1 END, current_rpm DESC, current_inflight DESC, COALESCE(a.last_used_at, '') DESC, a.id`
 	} else {
@@ -1773,6 +1820,7 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_rpm,
 		COALESCE((SELECT requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight,
 		COALESCE((SELECT rpm_limit FROM account_rpm_thresholds t WHERE t.account_id = a.id AND t.reset_at > `+nowSQL+`), 0) AS temporary_rpm_limit,
+		a.consecutive_429, `+weightTier+` AS weight_tier,
 		COALESCE(ds.id, 0), COALESCE(ds.rpm_limit, 0), COALESCE(ds.tpm_limit, 0), COALESCE(ds.concurrency_limit, 0), COALESCE(ds.rpm_strategy, ''), COALESCE(ds.rpm_sticky_buffer, 0), COALESCE(ds.dispatch_mode, ''),
 		CASE WHEN ds.tpm_limit > 0 THEN COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) ELSE 0 END AS current_tpm,
 		CASE WHEN EXISTS (SELECT 1 FROM account_model_cooldowns mc WHERE mc.account_id = a.id AND mc.model = ? AND mc.reset_at > `+nowSQL+`) THEN 1 ELSE 0 END AS model_cooldown
@@ -1780,7 +1828,7 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		LEFT JOIN groups g ON g.id = ag.group_id
 		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
 		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND `+accountStatePredicate("a", "normal")+`
-		`+orderClause, modelCooldownKey(requestedModel), key.GroupID, stickyID)
+		`+orderClause, freshCutoff, modelCooldownKey(requestedModel), key.GroupID, stickyID)
 	if err != nil {
 		return gatewayAccount{}, err
 	}
@@ -1792,6 +1840,8 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		rpm             int
 		inflight        int
 		temporaryRPM    int
+		consecutive429  int
+		weightTier      int
 		strategyID      int64
 		strategyRPM     int
 		strategyTPM     int64
@@ -1805,7 +1855,7 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 	candidates := []candidate{}
 	for rows.Next() {
 		var item candidate
-		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &item.tpm, &item.modelCooldown); err != nil {
+		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.consecutive429, &item.weightTier, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &item.tpm, &item.modelCooldown); err != nil {
 			rows.Close()
 			return gatewayAccount{}, err
 		}
@@ -1823,11 +1873,27 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		candidates = append(candidates, item)
 	}
 	rows.Close()
+	// Group traffic is split between strategies by configured weight. Tally the
+	// last minute per strategy so each candidate can be measured against its
+	// share; with no split configured this stays empty and costs nothing.
+	shareWeights, shareTotalWeight := a.groupStrategyWeights(key.GroupID)
+	strategyRPM := map[int64]int{}
+	groupRPM := 0
+	if shareTotalWeight > 0 {
+		for _, item := range candidates {
+			strategyRPM[item.strategyID] += item.rpm
+			groupRPM += item.rpm
+		}
+	}
 	selectedIndex := -1
 	diagnostics := gatewayCapacityDiagnostics{Candidates: len(candidates)}
 	for index, candidate := range candidates {
 		if excluded[candidate.account.ID] {
 			diagnostics.Excluded++
+			continue
+		}
+		if strategyOverShare(shareWeights, shareTotalWeight, strategyRPM, groupRPM, candidate.strategyID) {
+			diagnostics.StrategyShareBlocked++
 			continue
 		}
 		if key.StrategyRequiredEnabled && candidate.strategyID == 0 {
@@ -1877,6 +1943,20 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 		selected := candidates[selectedIndex]
 		if candidate.groupPriority != selected.groupPriority || candidate.accountPriority != selected.accountPriority {
 			break
+		}
+		// Mirrors the weight_tier ordering: freshly refreshed beats normal beats
+		// rate-limited, and within a tier fewer strikes wins.
+		if candidate.weightTier != selected.weightTier {
+			if candidate.weightTier < selected.weightTier {
+				selectedIndex = index
+			}
+			continue
+		}
+		if candidate.consecutive429 != selected.consecutive429 {
+			if candidate.consecutive429 < selected.consecutive429 {
+				selectedIndex = index
+			}
+			continue
 		}
 		if loadAware {
 			if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||

@@ -96,7 +96,9 @@ func (w *anthropicNonStreamResponseWriter) finish() {
 }
 
 func copyAnthropicNonStreamHeaders(target, source http.Header) {
-	copyGatewayResponseHeaders(target, source)
+	// The buffered header was already filtered by the gateway forwarding path,
+	// so no additional quota masking is needed here.
+	copyGatewayResponseHeaders(target, source, false)
 	for _, key := range []string{"Content-Length", "Transfer-Encoding", "Connection", "Cache-Control", "X-Accel-Buffering"} {
 		target.Del(key)
 	}

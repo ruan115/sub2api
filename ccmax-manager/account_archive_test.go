@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -165,6 +166,49 @@ func TestAccountArchiveQuarantinesProxyAndPreservesHistory(t *testing.T) {
 	if restored.ArchivedAt != "" || restored.ProxyID != nil || restored.Schedulable || restored.DispatchStatus != "error" {
 		t.Fatalf("restored account = %+v", restored)
 	}
+}
+
+func TestAccountArchiveKeepsProxyReusableWhenPoolAllowsReuse(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+	var pool proxyPool
+	putJSON(t, handler, http.MethodPut, "/api/proxy-pools/1", map[string]any{
+		"name": "default", "source_type": "manual", "default_protocol": "socks5", "status": "active",
+		"single_use_enabled": false,
+	}, http.StatusOK, &pool)
+
+	createAccount := func(name string) account {
+		var item account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": name, "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": name + "-token"}, "extra": map[string]any{},
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+			"rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+		}, http.StatusCreated, &item)
+		return item
+	}
+
+	first := createAccount("reusable-archive-first@example.com")
+	a.markAccountReauth(first.ID, "token expired")
+	putJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/accounts/%d/archive", first.ID), map[string]any{}, http.StatusOK, nil)
+
+	var status, poolKind string
+	var poolID int64
+	if err := a.db.QueryRow(`SELECT proxy.status, pool.id, pool.system_kind FROM proxies proxy
+		JOIN proxy_pools pool ON pool.id = proxy.pool_id WHERE proxy.id = ?`, proxyID).Scan(&status, &poolID, &poolKind); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" || poolID != 1 || poolKind != "" {
+		t.Fatalf("reusable archived proxy = status:%s pool:%d kind:%q", status, poolID, poolKind)
+	}
+	createAccount("reusable-archive-second@example.com")
 }
 
 func TestDeadProxyMigrationQuarantinesLegacyReleasedProxy(t *testing.T) {

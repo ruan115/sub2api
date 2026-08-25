@@ -798,6 +798,8 @@ function initializeAccountAutoRefresh() {
 async function loadBilling() {
   if (!canView("billing")) return;
   const params = new URLSearchParams(paginationParams("usage"));
+  if ($("#billing-search").value.trim())
+    params.set("search", $("#billing-search").value.trim());
   for (const [key, selector] of [
     ["from", "#billing-from"],
     ["to", "#billing-to"],
@@ -877,6 +879,8 @@ async function loadDaily() {
 async function loadAuthorization() {
   if (!canView("authorization")) return;
   const params = new URLSearchParams(paginationParams("authorization"));
+  if ($("#authorization-search").value.trim())
+    params.set("search", $("#authorization-search").value.trim());
   if ($("#authorization-status").value)
     params.set("status", $("#authorization-status").value);
   if ($("#authorization-from").value)
@@ -1143,6 +1147,7 @@ function strategyAccountCandidates(strategyID, mode) {
   const currentID = Number(strategyID);
   const search = $("#strategy-account-search")?.value.trim().toLowerCase() || "";
   return (state.accounts || [])
+    .filter((account) => account.dispatch_status === "normal")
     .filter((account) =>
       mode === "unbind"
         ? Number(account.strategy_id || 0) === currentID
@@ -1442,9 +1447,18 @@ const limitWindowLabels = { "5h": "5h 限制", "7d": "7d 限制" };
 // parent filter still matches a window-limited account.
 function accountMatchesStatus(account, status) {
   if (!status) return true;
-  if (status === "limited_5h" || status === "limited_7d") {
+  if (status === "cooling_429") {
     return (
       account.dispatch_status === "unavailable" &&
+      account.rate_limit_reason === "429_cooling"
+    );
+  }
+  if (status === "limited_5h" || status === "limited_7d") {
+    // A self-imposed 429 cooldown gets its own bucket, so it must not also
+    // count as an upstream quota window.
+    return (
+      account.dispatch_status === "unavailable" &&
+      account.rate_limit_reason !== "429_cooling" &&
       account.limit_window === status.slice("limited_".length)
     );
   }
@@ -1452,12 +1466,50 @@ function accountMatchesStatus(account, status) {
 }
 
 function accountStatus(account) {
-  if (account.dispatch_status === "error") return ["错误", "error"];
+  if (account.dispatch_status === "error")
+    return ["错误", "error", account.auth_error || account.error_message || "账号错误"];
   if (account.dispatch_status === "unavailable") {
+    const reasons = [];
+    if (account.status !== "active") reasons.push("账号已停用");
+    if (!account.schedulable) reasons.push("管理员已暂停调度");
+    if (account.auth_status !== "valid") reasons.push("账号授权不可用");
+    if (!account.proxy_id) reasons.push("未绑定代理");
+    else if (account.proxy_status !== "active") reasons.push("绑定代理不可用");
+    if (account.expires_at) {
+      const expiresAt = Date.parse(account.expires_at);
+      if (Number.isFinite(expiresAt) && expiresAt <= Date.now())
+        reasons.push("账号已过期");
+    }
+    if (account.rate_limit_reason === "429_cooling")
+      reasons.push(
+        `连续 429 冷却${account.rate_limit_reset_at ? `至 ${dateTime(account.rate_limit_reset_at)}` : ""}`,
+      );
     const label = limitWindowLabels[account.limit_window];
-    return label ? [label, "warn"] : ["暂不可调度", "off"];
+    if (label) reasons.push(`${label}，等待配额窗口刷新`);
+    const detail = reasons.join(" · ") || account.error_message || "当前不满足调度条件";
+    if (account.status !== "active") return ["已停用", "off", detail];
+    if (!account.schedulable) return ["已暂停", "off", detail];
+    if (account.auth_status !== "valid")
+      return ["授权不可用", "error", detail];
+    if (!account.proxy_id || account.proxy_status !== "active")
+      return ["代理不可用", "error", detail];
+    if (account.expires_at && Date.parse(account.expires_at) <= Date.now())
+      return ["已过期", "off", detail];
+    if (account.rate_limit_reason === "429_cooling")
+      return ["429 冷却", "warn", detail];
+    return label
+      ? [label, "warn", detail]
+      : ["暂不可调度", "off", detail];
   }
-  return ["正常", "ok"];
+  if (account.rate_limit_reason === "429_backoff") {
+    const strikes = Number(account.consecutive_429 || 0);
+    return [
+      `429 降权 ${strikes}/3`,
+      "warn",
+      `账号仍可调度，但因连续 ${strikes} 次 429 已降低选号优先级；成功请求后自动清零`,
+    ];
+  }
+  return ["正常", "ok", "账号可参与调度"];
 }
 function accountAuthStatus(account) {
   if (account.auth_status === "reauth_required")
@@ -1689,6 +1741,9 @@ function renderAccounts() {
       .length,
     limited_7d: scoped.filter((item) => accountMatchesStatus(item, "limited_7d"))
       .length,
+    cooling_429: scoped.filter((item) =>
+      accountMatchesStatus(item, "cooling_429"),
+    ).length,
     error: scoped.filter((item) => item.dispatch_status === "error").length,
   };
   $("#status-all-count").textContent = scoped.length;
@@ -1696,6 +1751,7 @@ function renderAccounts() {
   $("#status-unavailable-count").textContent = counts.unavailable;
   $("#status-limited-5h-count").textContent = counts.limited_5h;
   $("#status-limited-7d-count").textContent = counts.limited_7d;
+  $("#status-cooling-429-count").textContent = counts.cooling_429;
   $("#status-error-count").textContent = counts.error;
   $$("#account-status-tabs button").forEach((node) => {
     node.classList.toggle(
@@ -1712,7 +1768,7 @@ function renderAccounts() {
   const pageItems = paginatedItems("accounts", filtered);
   $("#accounts-body").innerHTML = pageItems
     .map((item) => {
-      const [statusText, statusClass] = accountStatus(item);
+      const [statusText, statusClass, statusTitle] = accountStatus(item);
       const [authText] = accountAuthStatus(item);
       const groups = item.group_ids.map((id) => groupMark(id, "pill")).join("");
       const actions = isAdmin()
@@ -1723,14 +1779,19 @@ function renderAccounts() {
         ? ` · 检测 ${dateTime(item.auth_checked_at)}`
         : " · 尚未检测";
       const proxyHint = item.proxy_hint || "未绑定代理";
-      const statusDetail = `${authDetail}${checked}`;
+      const rateLimitDetail = item.rate_limit_reason
+        ? item.error_message || "等待限流冷却结束"
+        : "";
+      const statusDetail = [statusTitle, rateLimitDetail, `${authDetail}${checked}`]
+        .filter(Boolean)
+        .join(" · ");
       const onboardedAt = dateTime(item.onboarded_at);
       const lastUsedAt = dateTime(item.last_used_at);
       const subscription = accountSubscriptionName(item);
       const subscriptionTitle = item.rate_limit_tier
         ? `${subscription} · ${item.rate_limit_tier}`
         : subscription;
-      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
+      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}" title="${escapeHTML(statusTitle)}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -2097,7 +2158,7 @@ function renderProxies() {
   $("#proxy-pool-list").innerHTML = state.proxyPools
     .map(
       (pool) =>
-        `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small>${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${isAdmin() && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${isAdmin() ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button><button class="danger" data-delete-pool="${pool.id}" title="删除代理池">✕</button>` : ""}</div></article>`,
+        `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small title="${pool.single_use_enabled ? "一次性 IP，使用后禁止复用" : "允许代理地址重复分配"}">${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用 · ${pool.single_use_enabled ? "一次性 IP" : "允许复用"}</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${isAdmin() && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${isAdmin() ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button><button class="danger" data-delete-pool="${pool.id}" title="删除代理池">✕</button>` : ""}</div></article>`,
     )
     .join("");
   const selected = filteredProxies();
@@ -2107,9 +2168,27 @@ function renderProxies() {
   );
   $("#proxies-empty").hidden = selected.length > 0;
   $("#proxies-body").innerHTML = paginatedItems("proxies", selected)
-    .map(
-      (item) =>
-        `<tr>
+    .map((item) => {
+      const retired = Boolean(
+        item.single_use_enabled &&
+          !item.assigned_to &&
+          Number(item.used_account_count || 0) > 0,
+      );
+      const statusClass = retired
+        ? "off"
+        : item.status === "active"
+          ? "ok"
+          : item.status === "error"
+            ? "error"
+            : "off";
+      const statusText = retired
+        ? "已使用"
+        : item.status === "active"
+          ? "正常"
+          : item.status === "error"
+            ? "异常"
+            : "停用";
+      return `<tr>
           <td class="select-column admin-only-column"><input type="checkbox" data-proxy-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedProxyIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td>
           <td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle mono" title="${escapeHTML(item.host)}:${item.port}">${escapeHTML(item.host)}:${item.port}</span></td>
           <td><span class="pill">${item.protocol.toUpperCase()}</span></td>
@@ -2117,11 +2196,11 @@ function renderProxies() {
           <td class="num mono">${item.latency_ms == null ? "—" : `${item.latency_ms} ms`}</td>
           <td title="${escapeHTML(item.assigned_to || "未占用")}">${escapeHTML(item.assigned_to || "未占用")}</td>
           <td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
-          <td><span class="pill ${item.status === "active" ? "ok" : item.status === "error" ? "error" : "off"}">${item.status === "active" ? "正常" : item.status === "error" ? "异常" : "停用"}</span></td>
+          <td><span class="pill ${statusClass}" title="${retired ? "一次性 IP 已有绑定历史，不能再次分配" : statusText}">${statusText}</span></td>
           <td class="mono" title="${escapeHTML(dateTime(item.last_test_at))}">${dateTime(item.last_test_at)}</td>
           <td class="actions">${isAdmin() ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="删除代理"><i data-lucide="trash-2"></i></button></span>` : '<span class="muted">只读</span>'}</td>
-        </tr>`,
-    )
+        </tr>`;
+    })
     .join("");
   const options = `<option value="">全部代理池</option>${state.proxyPools.map((pool) => `<option value="${pool.id}">${escapeHTML(pool.name)}</option>`).join("")}`;
   $("#proxy-pool-filter").innerHTML = options;
@@ -2358,7 +2437,8 @@ function usageRows(items, compactMode) {
         .filter(Boolean)
         .join(" · ");
       const displayedRequestID = item.client_request_id || item.request_id;
-      return `<tr><td title="${escapeHTML(requestTooltip)}"><span class="mono row-title">${escapeHTML(displayedRequestID)}</span><span class="row-subtitle mono">${escapeHTML(requestNote)}</span></td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
+      const accountIP = item.proxy_ip || "未绑定 IP";
+      return `<tr><td title="${escapeHTML(requestTooltip)}"><span class="mono row-title">${escapeHTML(displayedRequestID)}</span><span class="row-subtitle mono">${escapeHTML(requestNote)}</span></td><td><span class="row-title" title="${escapeHTML(item.purpose_name)}">${escapeHTML(item.purpose_name)}</span>${groupMark(item.group_id, "pill")}</td><td>${usageAccountSKCell(item)}</td><td><span class="row-title" title="${escapeHTML(item.account_name)}">${escapeHTML(item.account_name)}</span><span class="row-subtitle mono" title="${escapeHTML(accountIP)}">${escapeHTML(accountIP)}</span></td><td class="mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</td><td class="num mono">${compact(item.input_tokens)}</td><td class="num mono">${compact(item.output_tokens)}</td><td class="num mono">${compact(item.cache_creation_tokens + item.cache_read_tokens)}</td><td class="num mono">${money(item.billed_cost)}</td><td class="num mono internal-cost-column">${money(item.actual_cost)}</td><td class="num mono internal-cost-column">${money(item.billed_cost - item.actual_cost)}</td></tr>`;
     })
     .join("");
 }
@@ -2712,6 +2792,62 @@ function syncGroupRateLimitWaitFields() {
     "#group-rate-limit-wait-enabled",
   ).checked;
 }
+
+// The rows are driven by the strategies the group's accounts actually resolve,
+// so the operator never has to look up a strategy id by hand.
+async function renderGroupStrategyShares(groupID) {
+  const container = $("#group-strategy-shares");
+  if (!groupID) {
+    container.innerHTML = `<p class="muted">保存分组后可配置策略流量分配</p>`;
+    return;
+  }
+  container.innerHTML = `<p class="muted">加载中…</p>`;
+  try {
+    const shares = await api(`/api/groups/${groupID}/strategy-shares`);
+    if (!shares.length) {
+      container.innerHTML = `<p class="muted">组内暂无绑定策略的账号</p>`;
+      return;
+    }
+    container.innerHTML = shares
+      .map(
+        (item) =>
+          `<label class="strategy-share-row"><span title="${escapeHTML(item.strategy_name)}">${escapeHTML(item.strategy_name)}</span><input type="number" min="0" max="1000" value="${Number(item.weight || 0)}" data-strategy-share="${item.strategy_id}" /><small>${item.percent ? `${item.percent}%` : "不分配"} · ${item.accounts} 个账号 · 近 1 分钟 ${item.current_rpm} 次</small></label>`,
+      )
+      .join("");
+    container.addEventListener("input", syncGroupStrategySharePercents);
+    syncGroupStrategySharePercents();
+  } catch (error) {
+    container.innerHTML = `<p class="muted">${escapeHTML(error.message)}</p>`;
+  }
+}
+
+function syncGroupStrategySharePercents() {
+  const inputs = $$("#group-strategy-shares [data-strategy-share]");
+  const total = inputs.reduce(
+    (sum, node) => sum + Math.max(0, Number(node.value) || 0),
+    0,
+  );
+  inputs.forEach((node) => {
+    const weight = Math.max(0, Number(node.value) || 0);
+    const label = node.parentElement.querySelector("small");
+    if (!label) return;
+    const percent = total > 0 ? Math.round((weight * 1000) / total) / 10 : 0;
+    const [, ...rest] = label.textContent.split(" · ");
+    label.textContent = [
+      total > 0 && weight > 0 ? `${percent}%` : "不分配",
+      ...rest,
+    ].join(" · ");
+  });
+}
+
+function collectGroupStrategyShares() {
+  const inputs = $$("#group-strategy-shares [data-strategy-share]");
+  if (!inputs.length) return undefined;
+  return inputs.map((node) => ({
+    strategy_id: Number(node.dataset.strategyShare),
+    weight: Math.max(0, Number(node.value) || 0),
+  }));
+}
 function openGroup(item = null) {
   $("#group-form").reset();
   $("#group-id").value = item?.id || "";
@@ -2727,6 +2863,7 @@ function openGroup(item = null) {
   ensureStrategiesLoaded().then(() =>
     fillStrategySelect($("#group-strategy"), item?.strategy_id),
   );
+  renderGroupStrategyShares(item?.id);
   $("#group-normal-request-mode").checked = Boolean(item?.normal_request_mode);
   $("#group-claude-code-identity").checked = Boolean(
     item?.claude_code_identity_enabled,
@@ -2736,6 +2873,9 @@ function openGroup(item = null) {
   );
   $("#group-reject-distillation").checked = Boolean(
     item?.reject_distillation_enabled,
+  );
+  $("#group-quota-header-masking").checked = Boolean(
+    item?.quota_header_masking_enabled,
   );
   $("#group-mcp-tool-names").checked = Boolean(item?.mcp_tool_names_enabled);
   $("#group-passthrough-service-tier").checked = Boolean(
@@ -2784,6 +2924,9 @@ function openPool(item = null) {
   $("#proxy-pool-source").value = item?.source_type || "manual";
   $("#proxy-pool-protocol").value = item?.default_protocol || "socks5";
   $("#proxy-pool-status").value = item?.status || "active";
+  $("#proxy-pool-single-use").checked = item
+    ? Boolean(item.single_use_enabled)
+    : true;
   $("#proxy-pool-api-url").value = item?.api_url || "";
   $("#proxy-pool-headers").value = item?.api_headers || "{}";
   toggleAPISource();
@@ -3555,6 +3698,17 @@ $("#apply-authorization-filters").addEventListener(
     loadAuthorization();
   },
 );
+for (const [selector, key, loader] of [
+  ["#billing-search", "usage", loadBilling],
+  ["#authorization-search", "authorization", loadAuthorization],
+]) {
+  $(selector).addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    resetPagination(key);
+    loader();
+  });
+}
 $("#deauth-window").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-window]");
   if (!button) return;
@@ -4061,6 +4215,7 @@ $("#group-form").addEventListener("submit", async (event) => {
           "#group-reject-anthropic-downgrade",
         ).checked,
         reject_distillation_enabled: $("#group-reject-distillation").checked,
+        quota_header_masking_enabled: $("#group-quota-header-masking").checked,
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
         adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
         rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
@@ -4086,6 +4241,7 @@ $("#group-form").addEventListener("submit", async (event) => {
           $("#group-capacity-queue-timeout").value,
         ),
         strategy_id: strategySelectPayload($("#group-strategy")),
+        strategy_shares: collectGroupStrategyShares(),
       }),
     });
     $("#group-dialog").close();
@@ -4212,6 +4368,7 @@ $("#proxy-pool-form").addEventListener("submit", async (event) => {
       source_type: $("#proxy-pool-source").value,
       default_protocol: $("#proxy-pool-protocol").value,
       status: $("#proxy-pool-status").value,
+      single_use_enabled: $("#proxy-pool-single-use").checked,
       api_url: $("#proxy-pool-api-url").value,
       api_headers: $("#proxy-pool-headers").value || "{}",
     };

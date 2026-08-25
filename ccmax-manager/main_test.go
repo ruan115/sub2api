@@ -159,6 +159,32 @@ func TestGroupFieldPassthroughSettingsPersistAndSurviveLegacyUpdate(t *testing.T
 	}
 }
 
+func TestGroupQuotaHeaderMaskingPersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "屏蔽限额头", "rate_multiplier": 1, "status": "active",
+		"quota_header_masking_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.QuotaHeaderMasking {
+		t.Fatalf("group quota header masking was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.QuotaHeaderMasking {
+		t.Fatalf("legacy update reset group quota header masking: %+v", updated)
+	}
+}
+
 func TestGroupRateLimitWaitSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
@@ -459,7 +485,7 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 		"rate_multiplier": 1, "group_ids": []string{"a"}, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
 	}, http.StatusCreated, &pending)
 	futureCooldown := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
-	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ? WHERE id = ?`, futureCooldown, ready.ID); err != nil {
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '5h', rate_limit_reason = '429_cooling', consecutive_429 = 3, last_429_at = ? WHERE id = ?`, futureCooldown, time.Now().UTC().Format(time.RFC3339Nano), ready.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -485,9 +511,10 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 	if enabled.Matched != 2 || enabled.Updated != 1 || enabled.Skipped != 1 {
 		t.Fatalf("enable result = %+v", enabled)
 	}
-	var readyScheduled, pendingScheduled int
-	var readyCooldown sql.NullString
-	if err := a.db.QueryRow(`SELECT schedulable, rate_limit_reset_at FROM accounts WHERE id = ?`, ready.ID).Scan(&readyScheduled, &readyCooldown); err != nil {
+	var readyScheduled, pendingScheduled, consecutive429 int
+	var readyCooldown, last429 sql.NullString
+	var rateLimitWindow, rateLimitReason string
+	if err := a.db.QueryRow(`SELECT schedulable, rate_limit_reset_at, rate_limit_window, rate_limit_reason, consecutive_429, last_429_at FROM accounts WHERE id = ?`, ready.ID).Scan(&readyScheduled, &readyCooldown, &rateLimitWindow, &rateLimitReason, &consecutive429, &last429); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.db.QueryRow(`SELECT schedulable FROM accounts WHERE id = ?`, pending.ID).Scan(&pendingScheduled); err != nil {
@@ -498,6 +525,9 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 	}
 	if readyCooldown.Valid {
 		t.Fatalf("manual resume kept cooldown = %q", readyCooldown.String)
+	}
+	if rateLimitWindow != "" || rateLimitReason != "" || consecutive429 != 0 || last429.Valid {
+		t.Fatalf("manual resume kept 429 state = window %q reason %q consecutive %d last %v", rateLimitWindow, rateLimitReason, consecutive429, last429)
 	}
 }
 

@@ -112,12 +112,24 @@ func TestGatewayCapacityDiagnosticsSurviveWrappedQueueError(t *testing.T) {
 
 func TestBuildUsageWhereSearchesEveryRequestID(t *testing.T) {
 	where, args := buildUsageWhere(usageFilters{Search: "newapi_123"})
-	for _, column := range []string{"u.request_id", "u.client_request_id", "u.trace_id", "u.upstream_request_id"} {
+	for _, column := range []string{
+		"u.request_id", "u.client_request_id", "u.trace_id", "u.upstream_request_id",
+		"u.account_name", "u.account_sk_hint", "usage_proxy.exit_ip", "k.key_prefix",
+	} {
 		if !strings.Contains(where, column) {
 			t.Fatalf("usage search condition %q does not include %s", where, column)
 		}
 	}
-	if len(args) != 5 {
-		t.Fatalf("usage search arguments = %d, want 5", len(args))
+	if len(args) != 12 {
+		t.Fatalf("usage search arguments = %d, want 12", len(args))
+	}
+	for index, arg := range args {
+		want := "newapi_123"
+		if index >= 4 {
+			want = "%newapi_123%"
+		}
+		if arg != want {
+			t.Fatalf("usage search argument %d = %q, want %q", index, arg, want)
+		}
 	}
 }

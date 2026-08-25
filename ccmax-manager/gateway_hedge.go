@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
 )
 
 var gatewayStreamHedgeDelay = 20 * time.Millisecond
@@ -302,6 +301,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 		return gatewayHedgeOutcome{terminal: &gatewayHedgeTerminal{status: http.StatusBadRequest, plainMessage: err.Error(), accountID: account.ID}, err: err}
 	}
 	prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
+	prepared.MaskQuotaHeaders = key.QuotaHeaderMasking
 	upstreamURL, err := upstreamClaudeURL(account.ExtraJSON, "/v1/messages")
 	if err != nil {
 		return gatewayHedgeOutcome{err: err}
@@ -385,11 +385,10 @@ func readGatewayStreamBootstrap(body io.Reader) ([]byte, *bufio.Reader, error) {
 			_, _ = buffered.Write(block)
 			eventType, eventBody := gatewaySSEEvent(block)
 			if eventType == "error" {
-				status := http.StatusForbidden
-				if gjson.GetBytes(eventBody, "error.type").String() == "overloaded_error" {
-					status = 529
-				}
-				return nil, reader, &gatewayPreOutputStreamError{status: status, body: eventBody}
+				// Same mapping as the non-hedged path, so an in-stream
+				// rate_limit_error reaches captureAccount429State instead of
+				// being reported as a 403.
+				return nil, reader, &gatewayPreOutputStreamError{status: gatewaySSEErrorStatus(eventBody), body: eventBody}
 			}
 			if eventType != "" && eventType != "ping" {
 				return append([]byte(nil), buffered.Bytes()...), reader, nil

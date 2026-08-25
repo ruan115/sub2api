@@ -336,6 +336,12 @@ func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 		where = append(where, "created_at < ?")
 		args = append(args, to)
 	}
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		term := "%" + search + "%"
+		where = append(where, `(account_name LIKE ? OR proxy_ip LIKE ? OR client_ip LIKE ?
+			OR method LIKE ? OR status_message LIKE ? OR CAST(COALESCE(account_id, 0) AS CHAR) LIKE ?)`)
+		args = append(args, term, term, term, term, term, term)
+	}
 	switch strings.TrimSpace(r.URL.Query().Get("status")) {
 	case "success":
 		where = append(where, "success = 1")
@@ -733,6 +739,7 @@ func (a *app) availableBatchAuthProxyCandidates(poolID int64, excluded map[int64
 		WHERE p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 		AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 		AND `+proxyNotQuarantinedPredicate("p")+`
+		AND (pool.single_use_enabled = 0 OR `+proxyIdentityUnusedPredicate("p")+`)
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)
 		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id`, poolID)
 	if err != nil {
@@ -889,11 +896,26 @@ func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authTy
 	defer tx.Rollback()
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
 	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, auth_status, auth_checked_at, token_expires_at, subscription_type, rate_limit_tier, account_price, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, ?, ?, 'active', 1, ?, 50, 1, ?, ?, 1, ?, ?, ?, 'off', ?, 'valid', `+nowSQL+`, ?, ?, ?, ?, `+nowSQL+`)`,
-		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), string(extraJSON), input.Concurrency, input.ProxyPoolID, proxyID, input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, strategyID, expiresAt, token.SubscriptionType, token.RateLimitTier, input.AccountPrice)
+		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), string(extraJSON), input.Concurrency, input.ProxyPoolID, nil, input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, strategyID, expiresAt, token.SubscriptionType, token.RateLimitTier, input.AccountPrice)
 	if err != nil {
 		return 0, err
 	}
 	accountID, _ := result.LastInsertId()
+	poolID := input.ProxyPoolID
+	requestedProxyID := proxyID
+	assignedProxyID, err := assignAccountProxy(tx, accountID, &poolID, &requestedProxyID, false)
+	if err != nil {
+		return 0, err
+	}
+	if assignedProxyID == nil {
+		return 0, errors.New("authorized account proxy is unavailable")
+	}
+	if _, err := tx.Exec(`UPDATE accounts SET proxy_id = ? WHERE id = ?`, *assignedProxyID, accountID); err != nil {
+		return 0, err
+	}
+	if err := recordProxyAssignment(tx, *assignedProxyID, accountID); err != nil {
+		return 0, err
+	}
 	if err := setAccountGroups(tx, accountID, input.GroupIDs, 50); err != nil {
 		return 0, err
 	}
@@ -921,7 +943,7 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 		return err
 	}
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`,
 		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, accountID, leaseOwner)
 	if err != nil {
