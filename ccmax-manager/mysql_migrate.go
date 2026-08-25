@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -46,7 +47,16 @@ var mysqlMigrationTables = []string{
 	"pricing_sync_state",
 }
 
-func migrateSQLiteToMySQL(sourcePath string, target *database, resetTarget bool) (mysqlMigrationReport, error) {
+var mysqlAppendOnlyMigrationTables = map[string]bool{
+	"usage_logs":               true,
+	"audit_logs":               true,
+	"authorization_logs":       true,
+	"gateway_error_logs":       true,
+	"account_lifecycle_events": true,
+	"reserve_activation_logs":  true,
+}
+
+func migrateSQLiteToMySQL(sourcePath string, target *database, resetTarget, incremental bool) (mysqlMigrationReport, error) {
 	report := mysqlMigrationReport{Tables: make([]mysqlMigrationTableReport, 0, len(mysqlMigrationTables))}
 	if target == nil || target.dialect != dialectMySQL {
 		return report, fmt.Errorf("migration target must be MySQL")
@@ -62,6 +72,12 @@ func migrateSQLiteToMySQL(sourcePath string, target *database, resetTarget bool)
 	defer source.Close()
 	if err := source.Ping(); err != nil {
 		return report, fmt.Errorf("ping SQLite migration source: %w", err)
+	}
+	if incremental {
+		if resetTarget {
+			return report, fmt.Errorf("incremental MySQL migration cannot reset the target")
+		}
+		return syncSQLiteToMySQL(source, target)
 	}
 
 	if !resetTarget {
@@ -108,6 +124,100 @@ func migrateSQLiteToMySQL(sourcePath string, target *database, resetTarget bool)
 		}
 		report.Tables = append(report.Tables, mysqlMigrationTableReport{
 			Table: table, SourceRows: sourceRows, ImportedRows: importedRows, TargetRows: targetRows,
+		})
+	}
+	if err := verifyMySQLMigrationAggregates(source, target.DB); err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
+func syncSQLiteToMySQL(source *sql.DB, target *database) (mysqlMigrationReport, error) {
+	report := mysqlMigrationReport{Tables: make([]mysqlMigrationTableReport, 0, len(mysqlMigrationTables))}
+	imported := map[string]int64{}
+
+	for _, table := range mysqlMigrationTables {
+		exists, err := sqliteTableExists(source, table)
+		if err != nil {
+			return report, err
+		}
+		if !exists {
+			continue
+		}
+		columns, err := commonMigrationColumns(source, target.DB, table)
+		if err != nil {
+			return report, err
+		}
+		primaryKey, err := sqlitePrimaryKeyColumns(source, table)
+		if err != nil {
+			return report, err
+		}
+		if len(primaryKey) == 0 {
+			return report, fmt.Errorf("incremental MySQL migration table %s has no primary key", table)
+		}
+		whereClause := ""
+		args := []any{}
+		if mysqlAppendOnlyMigrationTables[table] {
+			if len(primaryKey) != 1 || primaryKey[0] != "id" {
+				return report, fmt.Errorf("append-only MySQL migration table %s must use id as its primary key", table)
+			}
+			var targetMax sql.NullInt64
+			if err := target.QueryRow("SELECT MAX(id) FROM " + quoteIdentifier(table)).Scan(&targetMax); err != nil {
+				return report, fmt.Errorf("inspect MySQL migration watermark for %s: %w", table, err)
+			}
+			if targetMax.Valid {
+				whereClause = " WHERE id > ?"
+				args = append(args, targetMax.Int64)
+			}
+		}
+		processed, err := upsertMigrationTable(source, target, table, columns, primaryKey, whereClause, args...)
+		if err != nil {
+			return report, err
+		}
+		imported[table] = processed
+	}
+
+	for index := len(mysqlMigrationTables) - 1; index >= 0; index-- {
+		table := mysqlMigrationTables[index]
+		if mysqlAppendOnlyMigrationTables[table] {
+			continue
+		}
+		exists, err := sqliteTableExists(source, table)
+		if err != nil {
+			return report, err
+		}
+		if !exists {
+			continue
+		}
+		primaryKey, err := sqlitePrimaryKeyColumns(source, table)
+		if err != nil {
+			return report, err
+		}
+		if err := deleteMissingMigrationRows(source, target, table, primaryKey); err != nil {
+			return report, err
+		}
+	}
+
+	for _, table := range mysqlMigrationTables {
+		exists, err := sqliteTableExists(source, table)
+		if err != nil {
+			return report, err
+		}
+		if !exists {
+			continue
+		}
+		var sourceRows, targetRows int64
+		if err := source.QueryRow("SELECT COUNT(*) FROM " + quoteIdentifier(table)).Scan(&sourceRows); err != nil {
+			return report, fmt.Errorf("count incremental SQLite table %s: %w", table, err)
+		}
+		if err := target.QueryRow("SELECT COUNT(*) FROM " + quoteIdentifier(table)).Scan(&targetRows); err != nil {
+			return report, fmt.Errorf("count incremental MySQL table %s: %w", table, err)
+		}
+		if sourceRows != targetRows {
+			return report, fmt.Errorf("incremental migration row count mismatch for %s: source=%d target=%d", table, sourceRows, targetRows)
+		}
+		report.Tables = append(report.Tables, mysqlMigrationTableReport{
+			Table: table, SourceRows: sourceRows, ImportedRows: imported[table], TargetRows: targetRows,
 		})
 	}
 	if err := verifyMySQLMigrationAggregates(source, target.DB); err != nil {
@@ -199,6 +309,216 @@ func commonMigrationColumns(source *sql.DB, target *sql.DB, table string) ([]str
 	return columns, nil
 }
 
+func sqlitePrimaryKeyColumns(source *sql.DB, table string) ([]string, error) {
+	rows, err := source.Query("PRAGMA table_info(" + quoteIdentifier(table) + ")")
+	if err != nil {
+		return nil, fmt.Errorf("inspect SQLite primary key for %s: %w", table, err)
+	}
+	defer rows.Close()
+	type primaryKeyColumn struct {
+		name  string
+		order int
+	}
+	primaryKey := []primaryKeyColumn{}
+	for rows.Next() {
+		var cid, notNull, order int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &order); err != nil {
+			return nil, fmt.Errorf("scan SQLite primary key for %s: %w", table, err)
+		}
+		if order > 0 {
+			primaryKey = append(primaryKey, primaryKeyColumn{name: name, order: order})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(primaryKey, func(left, right int) bool { return primaryKey[left].order < primaryKey[right].order })
+	columns := make([]string, len(primaryKey))
+	for index, column := range primaryKey {
+		columns[index] = column.name
+	}
+	return columns, nil
+}
+
+func upsertMigrationTable(source *sql.DB, target *database, table string, columns, primaryKey []string, whereClause string, whereArgs ...any) (int64, error) {
+	quotedColumns := make([]string, len(columns))
+	primaryKeySet := map[string]bool{}
+	for _, column := range primaryKey {
+		primaryKeySet[column] = true
+	}
+	updates := []string{}
+	for index, column := range columns {
+		quotedColumns[index] = quoteIdentifier(column)
+		if !primaryKeySet[column] {
+			updates = append(updates, quoteIdentifier(column)+" = VALUES("+quoteIdentifier(column)+")")
+		}
+	}
+	if len(updates) == 0 {
+		column := quoteIdentifier(primaryKey[0])
+		updates = append(updates, column+" = VALUES("+column+")")
+	}
+	rows, err := source.Query("SELECT "+strings.Join(quotedColumns, ", ")+" FROM "+quoteIdentifier(table)+whereClause, whereArgs...)
+	if err != nil {
+		return 0, fmt.Errorf("read incremental SQLite table %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	const batchSize = 250
+	batch := make([][]any, 0, batchSize)
+	var processed int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		placeholders := make([]string, len(batch))
+		args := make([]any, 0, len(batch)*len(columns))
+		rowPlaceholder := "(" + strings.TrimSuffix(strings.Repeat("?,", len(columns)), ",") + ")"
+		for index, values := range batch {
+			placeholders[index] = rowPlaceholder
+			args = append(args, values...)
+		}
+		statement := "INSERT INTO " + quoteIdentifier(table) + " (" + strings.Join(quotedColumns, ", ") + ") VALUES " + strings.Join(placeholders, ",") + " ON DUPLICATE KEY UPDATE " + strings.Join(updates, ", ")
+		if _, err := target.Exec(statement, args...); err != nil {
+			return fmt.Errorf("write incremental MySQL table %s: %w", table, err)
+		}
+		processed += int64(len(batch))
+		batch = batch[:0]
+		return nil
+	}
+
+	for rows.Next() {
+		values := make([]any, len(columns))
+		destinations := make([]any, len(columns))
+		for index := range values {
+			destinations[index] = &values[index]
+		}
+		if err := rows.Scan(destinations...); err != nil {
+			return processed, fmt.Errorf("scan incremental SQLite table %s: %w", table, err)
+		}
+		normalizeMigrationValues(columns, values)
+		batch = append(batch, values)
+		if len(batch) == batchSize {
+			if err := flush(); err != nil {
+				return processed, err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return processed, fmt.Errorf("iterate incremental SQLite table %s: %w", table, err)
+	}
+	if err := flush(); err != nil {
+		return processed, err
+	}
+	return processed, nil
+}
+
+func deleteMissingMigrationRows(source *sql.DB, target *database, table string, primaryKey []string) error {
+	if len(primaryKey) == 0 {
+		return fmt.Errorf("delete missing MySQL rows for %s: no primary key", table)
+	}
+	quoted := make([]string, len(primaryKey))
+	for index, column := range primaryKey {
+		quoted[index] = quoteIdentifier(column)
+	}
+	query := "SELECT " + strings.Join(quoted, ", ") + " FROM " + quoteIdentifier(table)
+	sourceRows, err := source.Query(query)
+	if err != nil {
+		return fmt.Errorf("read SQLite migration keys for %s: %w", table, err)
+	}
+	sourceKeys := map[string]bool{}
+	for sourceRows.Next() {
+		values, key, err := scanMigrationKey(sourceRows, len(primaryKey))
+		_ = values
+		if err != nil {
+			sourceRows.Close()
+			return fmt.Errorf("scan SQLite migration keys for %s: %w", table, err)
+		}
+		sourceKeys[key] = true
+	}
+	if err := sourceRows.Err(); err != nil {
+		sourceRows.Close()
+		return fmt.Errorf("iterate SQLite migration keys for %s: %w", table, err)
+	}
+	if err := sourceRows.Close(); err != nil {
+		return err
+	}
+
+	targetRows, err := target.Query(query)
+	if err != nil {
+		return fmt.Errorf("read MySQL migration keys for %s: %w", table, err)
+	}
+	missing := [][]any{}
+	for targetRows.Next() {
+		values, key, err := scanMigrationKey(targetRows, len(primaryKey))
+		if err != nil {
+			targetRows.Close()
+			return fmt.Errorf("scan MySQL migration keys for %s: %w", table, err)
+		}
+		if !sourceKeys[key] {
+			missing = append(missing, values)
+		}
+	}
+	if err := targetRows.Err(); err != nil {
+		targetRows.Close()
+		return fmt.Errorf("iterate MySQL migration keys for %s: %w", table, err)
+	}
+	if err := targetRows.Close(); err != nil {
+		return err
+	}
+	where := make([]string, len(primaryKey))
+	for index, column := range primaryKey {
+		where[index] = quoteIdentifier(column) + " = ?"
+	}
+	for _, values := range missing {
+		if _, err := target.Exec("DELETE FROM "+quoteIdentifier(table)+" WHERE "+strings.Join(where, " AND "), values...); err != nil {
+			return fmt.Errorf("delete stale MySQL migration row from %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func scanMigrationKey(row scanner, count int) ([]any, string, error) {
+	values := make([]any, count)
+	destinations := make([]any, count)
+	for index := range values {
+		destinations[index] = &values[index]
+	}
+	if err := row.Scan(destinations...); err != nil {
+		return nil, "", err
+	}
+	canonical := make([]any, count)
+	for index, value := range values {
+		if bytes, ok := value.([]byte); ok {
+			value = string(bytes)
+			values[index] = value
+		}
+		if value == nil {
+			canonical[index] = nil
+		} else {
+			canonical[index] = fmt.Sprint(value)
+		}
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return nil, "", err
+	}
+	return values, string(encoded), nil
+}
+
+func normalizeMigrationValues(columns []string, values []any) {
+	for index, value := range values {
+		if bytes, ok := value.([]byte); ok {
+			value = string(bytes)
+		}
+		if isMigrationTimeColumn(columns[index]) && value == "" {
+			value = nil
+		}
+		values[index] = value
+	}
+}
+
 func copyMigrationTable(source *sql.DB, target *database, table string, columns []string) (int64, int64, error) {
 	quotedColumns := make([]string, len(columns))
 	for index, column := range columns {
@@ -248,15 +568,7 @@ func copyMigrationTable(source *sql.DB, target *database, table string, columns 
 		if err := rows.Scan(destinations...); err != nil {
 			return sourceRows, importedRows, fmt.Errorf("scan SQLite migration table %s: %w", table, err)
 		}
-		for index, value := range values {
-			if bytes, ok := value.([]byte); ok {
-				value = string(bytes)
-			}
-			if isMigrationTimeColumn(columns[index]) && value == "" {
-				value = nil
-			}
-			values[index] = value
-		}
+		normalizeMigrationValues(columns, values)
 		batch = append(batch, values)
 		sourceRows++
 		if len(batch) == batchSize {

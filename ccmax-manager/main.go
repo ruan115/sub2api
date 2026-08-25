@@ -384,7 +384,12 @@ func main() {
 		if a.db.dialect != dialectMySQL {
 			log.Fatal("CCMAX_MIGRATE_FROM_SQLITE requires CCMAX_MYSQL_DSN")
 		}
-		report, err := migrateSQLiteToMySQL(source, a.db, strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_RESET_TARGET")) == "1")
+		report, err := migrateSQLiteToMySQL(
+			source,
+			a.db,
+			strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_RESET_TARGET")) == "1",
+			strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_INCREMENTAL")) == "1",
+		)
 		if err != nil {
 			log.Fatal(err)
 		}
