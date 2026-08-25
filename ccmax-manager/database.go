@@ -199,6 +199,10 @@ var mysqlProxyHistoryUpsertPattern = regexp.MustCompile(`ON CONFLICT\(proxy_id, 
 
 var mysqlTimestampDifferencePattern = regexp.MustCompile(`ABS\(strftime\('%s',\s*([a-zA-Z0-9_.]+)\)\s*-\s*strftime\('%s',\s*([a-zA-Z0-9_.]+)\)\)`)
 
+var mysqlSQLiteDateOffsetPattern = regexp.MustCompile(`date\(\s*([a-zA-Z0-9_.]+)\s*,\s*'([+-]?[0-9]+) hours?'\s*\)`)
+
+var mysqlSQLiteStrftimeOffsetPattern = regexp.MustCompile(`strftime\('([^']+)',\s*([a-zA-Z0-9_.]+)\s*,\s*'([+-]?[0-9]+) hours?'\s*\)`)
+
 func rewriteQuery(dialect databaseDialect, query string) string {
 	if dialect != dialectMySQL {
 		return query
@@ -235,6 +239,8 @@ func rewriteQuery(dialect databaseDialect, query string) string {
 	query = mysqlGroupConcatPattern.ReplaceAllString(query, "GROUP_CONCAT($1 SEPARATOR '$2')")
 	query = mysqlGroupsTablePattern.ReplaceAllString(query, "$1 `groups`")
 	query = mysqlTimestampDifferencePattern.ReplaceAllString(query, "ABS(TIMESTAMPDIFF(SECOND, $1, $2))")
+	query = mysqlSQLiteDateOffsetPattern.ReplaceAllString(query, "DATE(DATE_ADD($1, INTERVAL $2 HOUR))")
+	query = mysqlSQLiteStrftimeOffsetPattern.ReplaceAllString(query, "DATE_FORMAT(DATE_ADD($2, INTERVAL $3 HOUR), '$1')")
 
 	query = rewriteMySQLUpsert(query)
 	return query

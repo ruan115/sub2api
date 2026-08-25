@@ -11,6 +11,9 @@ import (
 func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 	queries := []string{
 		`SELECT COUNT(*) FROM account_rpm_events WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`,
+		`SELECT date(created_at, '+8 hours'), COUNT(*) FROM usage_logs WHERE date(created_at, '+8 hours') BETWEEN ? AND ? GROUP BY 1`,
+		`SELECT strftime('%Y-%m-%dT%H:00:00+08:00', ge.created_at, '+8 hours'), COUNT(*) FROM gateway_error_logs ge GROUP BY 1`,
+		`SELECT strftime('%Y-%m-%dT00:00:00+08:00', ge.created_at, '+8 hours'), COUNT(*) FROM gateway_error_logs ge GROUP BY 1`,
 		`SELECT MAX(0, CAST(strftime('%s','now') AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER)) FROM accounts`,
 		`SELECT COALESCE((SELECT GROUP_CONCAT(ag.group_id, ',') FROM account_groups ag), '')`,
 		`SELECT CASE WHEN COALESCE(px.id, archived_px.id) IS NULL THEN '' ELSE COALESCE(px.protocol, archived_px.protocol) || '://' || COALESCE(px.host, archived_px.host) || ':' || COALESCE(px.port, archived_px.port) END`,
@@ -71,7 +74,7 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 	}
 	for _, query := range queries {
 		rewritten := rewriteQuery(dialectMySQL, query)
-		for _, forbidden := range []string{"strftime(", "ON CONFLICT", "INSERT OR", " || ", "json_extract", "p.key", "WHERE key ="} {
+		for _, forbidden := range []string{"strftime(", "date(created_at,", "ON CONFLICT", "INSERT OR", " || ", "json_extract", "p.key", "WHERE key ="} {
 			if strings.Contains(rewritten, forbidden) {
 				t.Fatalf("MySQL query still contains %q:\n%s", forbidden, rewritten)
 			}
