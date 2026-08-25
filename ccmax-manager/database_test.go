@@ -47,3 +47,16 @@ func TestMySQLQueryArgumentsNormalizeRFC3339Times(t *testing.T) {
 		t.Fatalf("non-time arguments changed: %#v", args)
 	}
 }
+
+func TestMySQLQueryRewriteQuotesGroupsTable(t *testing.T) {
+	input := `SELECT g.id FROM groups g JOIN groups parent ON parent.id = g.id WHERE g.id IN (SELECT group_id FROM account_groups)`
+	want := "SELECT g.id FROM `groups` g JOIN `groups` parent ON parent.id = g.id WHERE g.id IN (SELECT group_id FROM account_groups)"
+	if got := rewriteQuery(dialectMySQL, input); got != want {
+		t.Fatalf("rewriteQuery() = %q, want %q", got, want)
+	}
+
+	alreadyQuoted := "INSERT INTO `groups` (id) VALUES (?)"
+	if got := rewriteQuery(dialectMySQL, alreadyQuoted); got != alreadyQuoted {
+		t.Fatalf("rewriteQuery() changed an already quoted identifier: %q", got)
+	}
+}

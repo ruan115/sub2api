@@ -118,6 +118,8 @@ func normalizeQueryArgs(dialect databaseDialect, args []any) []any {
 
 var mysqlGroupConcatPattern = regexp.MustCompile(`GROUP_CONCAT\(([a-zA-Z0-9_.]+),\s*'([^']*)'\)`)
 
+var mysqlGroupsTablePattern = regexp.MustCompile(`(?i)\b(FROM|JOIN|INTO|UPDATE)\s+groups\b`)
+
 var mysqlRPMThresholdUpsertPattern = regexp.MustCompile(`ON CONFLICT\(account_id\)\s+DO UPDATE SET\s+rpm_limit = LEAST\(account_rpm_thresholds\.rpm_limit, VALUES\(rpm_limit\)\),\s+reset_at = GREATEST\(account_rpm_thresholds\.reset_at, VALUES\(reset_at\)\),\s+updated_at = UTC_TIMESTAMP\(3\)`)
 
 var mysqlProxyHistoryUpsertPattern = regexp.MustCompile(`ON CONFLICT\(proxy_id, account_id\)\s+DO UPDATE SET\s+first_bound_at = LEAST\(proxy_account_history\.first_bound_at, VALUES\(first_bound_at\)\),\s+last_bound_at = GREATEST\(proxy_account_history\.last_bound_at, VALUES\(last_bound_at\)\),\s+bind_count = proxy_account_history\.bind_count \+ excluded\.bind_count`)
@@ -155,6 +157,7 @@ func rewriteQuery(dialect databaseDialect, query string) string {
 	query = strings.ReplaceAll(query, "SELECT key FROM purposes", "SELECT `key` FROM purposes")
 	query = strings.ReplaceAll(query, "WHERE key =", "WHERE `key` =")
 	query = mysqlGroupConcatPattern.ReplaceAllString(query, "GROUP_CONCAT($1 SEPARATOR '$2')")
+	query = mysqlGroupsTablePattern.ReplaceAllString(query, "$1 `groups`")
 
 	query = rewriteMySQLUpsert(query)
 	return query

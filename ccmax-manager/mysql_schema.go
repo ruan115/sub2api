@@ -24,7 +24,7 @@ func (a *app) migrateMySQL() error {
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			deleted_at DATETIME(3) NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-		`CREATE TABLE IF NOT EXISTS groups (
+		`CREATE TABLE IF NOT EXISTS ` + "`groups`" + ` (
 			id VARCHAR(40) NOT NULL PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
 			description TEXT NOT NULL,
@@ -176,7 +176,7 @@ func (a *app) migrateMySQL() error {
 			PRIMARY KEY (account_id, group_id),
 			KEY idx_account_groups_group (group_id, priority, account_id),
 			CONSTRAINT fk_account_groups_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-			CONSTRAINT fk_account_groups_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
+			CONSTRAINT fk_account_groups_group FOREIGN KEY (group_id) REFERENCES ` + "`groups`" + `(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS purposes (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -187,7 +187,7 @@ func (a *app) migrateMySQL() error {
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			UNIQUE KEY uk_purposes_key (` + "`key`" + `),
-			CONSTRAINT fk_purposes_group FOREIGN KEY (active_group_id) REFERENCES groups(id)
+			CONSTRAINT fk_purposes_group FOREIGN KEY (active_group_id) REFERENCES ` + "`groups`" + `(id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS model_prices (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -229,7 +229,7 @@ func (a *app) migrateMySQL() error {
 			UNIQUE KEY uk_api_keys_hash (key_hash),
 			KEY idx_api_keys_user (user_id, status, deleted_at),
 			CONSTRAINT fk_api_keys_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-			CONSTRAINT fk_api_keys_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL
+			CONSTRAINT fk_api_keys_group FOREIGN KEY (group_id) REFERENCES ` + "`groups`" + `(id) ON DELETE SET NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS usage_logs (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -272,7 +272,7 @@ func (a *app) migrateMySQL() error {
 			KEY idx_usage_client_request (client_request_id),
 			KEY idx_usage_trace (trace_id),
 			CONSTRAINT fk_usage_purpose FOREIGN KEY (purpose_id) REFERENCES purposes(id) ON DELETE SET NULL,
-			CONSTRAINT fk_usage_group FOREIGN KEY (group_id) REFERENCES groups(id),
+			CONSTRAINT fk_usage_group FOREIGN KEY (group_id) REFERENCES ` + "`groups`" + `(id),
 			CONSTRAINT fk_usage_account FOREIGN KEY (account_id) REFERENCES accounts(id),
 			CONSTRAINT fk_usage_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
 			CONSTRAINT fk_usage_api_key FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL
@@ -441,8 +441,8 @@ func (a *app) migrateMySQL() error {
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			KEY idx_reserve_activation_target_created (target_group_id, created_at DESC),
 			CONSTRAINT fk_reserve_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-			CONSTRAINT fk_reserve_source_group FOREIGN KEY (source_group_id) REFERENCES groups(id) ON DELETE CASCADE,
-			CONSTRAINT fk_reserve_target_group FOREIGN KEY (target_group_id) REFERENCES groups(id) ON DELETE CASCADE
+			CONSTRAINT fk_reserve_source_group FOREIGN KEY (source_group_id) REFERENCES ` + "`groups`" + `(id) ON DELETE CASCADE,
+			CONSTRAINT fk_reserve_target_group FOREIGN KEY (target_group_id) REFERENCES ` + "`groups`" + `(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS pricing_sync_state (
 			id INT NOT NULL PRIMARY KEY,
@@ -463,8 +463,8 @@ func (a *app) migrateMySQL() error {
 	}
 
 	seeds := []string{
-		`INSERT IGNORE INTO groups (id, name, description, rate_multiplier) VALUES ('a', 'A 分组', '主业务账号池', 1)`,
-		`INSERT IGNORE INTO groups (id, name, description, rate_multiplier) VALUES ('b', 'B 分组', '备用与隔离账号池', 1)`,
+		`INSERT IGNORE INTO ` + "`groups`" + ` (id, name, description, rate_multiplier) VALUES ('a', 'A 分组', '主业务账号池', 1)`,
+		`INSERT IGNORE INTO ` + "`groups`" + ` (id, name, description, rate_multiplier) VALUES ('b', 'B 分组', '备用与隔离账号池', 1)`,
 		`INSERT IGNORE INTO purposes (` + "`key`" + `, name, description, active_group_id) VALUES ('default', '默认用途', '未指定用途时使用', 'a')`,
 		`INSERT IGNORE INTO model_prices (model, input_per_million, output_per_million, cache_creation_per_million, cache_read_per_million) VALUES ('*', 3, 15, 3.75, 0.3)`,
 		`INSERT IGNORE INTO pricing_sync_state (id, remote_url, hash_url, last_error) VALUES (1,
