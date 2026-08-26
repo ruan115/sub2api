@@ -249,7 +249,9 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_rpm,
 			COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_tpm,
 			COALESCE((SELECT f.requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight,
-			COALESCE((SELECT threshold.rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > `+nowSQL+`), 0) AS temporary_rpm
+			CASE WHEN a.rate_limit_downweight_until IS NOT NULL AND a.rate_limit_downweight_until > `+nowSQL+`
+				THEN COALESCE((SELECT threshold.rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > `+nowSQL+`), 0)
+				ELSE 0 END AS temporary_rpm
 			FROM accounts a
 			WHERE a.deleted_at IS NULL AND a.archived_at IS NULL
 			AND `+accountStatePredicate("a", "normal")+`

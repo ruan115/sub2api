@@ -134,6 +134,9 @@ func TestStrategyObservationUsesTemporaryRPMForCapacity(t *testing.T) {
 	bindGroupStrategy(t, handler, strategyID, nil)
 	limited := createGatewayTestAccount(t, a, handler, "limited-capacity", "https://limited.example.test", 0, nil, map[string]any{"access_token": "token-a"})
 	createGatewayTestAccount(t, a, handler, "normal-capacity", "https://normal.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reason = '429_backoff', rate_limit_downweight_until = strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes') WHERE id = ?`, limited.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := a.db.Exec(`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, 3, strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes'))`, limited.ID); err != nil {
 		t.Fatal(err)
 	}

@@ -168,6 +168,9 @@ func auditAction(r *http.Request) (string, string, string) {
 	if strings.Contains(path, "/quota/refresh") {
 		action = "account.quota_refresh"
 	}
+	if strings.Contains(path, "/rate-limit/reset") {
+		action = "account.rate_limit_reset"
+	}
 	if path == "accounts/batch-delete" {
 		action = "account.delete"
 	}

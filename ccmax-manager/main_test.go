@@ -224,7 +224,7 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	var current []group
 	putJSON(t, handler, http.MethodGet, "/api/groups", nil, http.StatusOK, &current)
 	for _, item := range current {
-		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold || item.RateLimitWaitSeconds != defaultRateLimitCooldownSeconds || item.RateLimitSteppedCooldown || item.RateLimitCooldownStep != defaultRateLimitCooldownStepSeconds {
+		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold || item.RateLimitWaitSeconds != defaultRateLimitCooldownSeconds || item.RateLimitSteppedCooldown || item.RateLimitCooldownStep != defaultRateLimitCooldownStepSeconds || item.RateLimitDownweightStepped || item.RateLimitDownweightBase != defaultRateLimitDownweightBaseMinutes || item.RateLimitDownweightStep != defaultRateLimitDownweightStepMinutes {
 			t.Fatalf("group %s did not default to the previous always-on behaviour: %+v", item.ID, item)
 		}
 	}
@@ -234,9 +234,11 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 		"name": "A 分组", "description": "429 降权", "rate_multiplier": 1, "status": "active",
 		"rate_limit_downweight_enabled": false, "rate_limit_cooling_threshold": 7,
 		"rate_limit_wait_seconds": 90, "rate_limit_stepped_cooldown_enabled": true,
-		"rate_limit_cooldown_step_seconds": 15,
+		"rate_limit_cooldown_step_seconds":               15,
+		"rate_limit_downweight_stepped_cooldown_enabled": true,
+		"rate_limit_downweight_base_minutes":             20, "rate_limit_downweight_step_minutes": 35,
 	}, http.StatusOK, &updated)
-	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 || !updated.RateLimitSteppedCooldown || updated.RateLimitCooldownStep != 15 {
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 || !updated.RateLimitSteppedCooldown || updated.RateLimitCooldownStep != 15 || !updated.RateLimitDownweightStepped || updated.RateLimitDownweightBase != 20 || updated.RateLimitDownweightStep != 35 {
 		t.Fatalf("group 429 downweight settings were not persisted: %+v", updated)
 	}
 
@@ -244,7 +246,7 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
 	}, http.StatusOK, &updated)
-	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 || !updated.RateLimitSteppedCooldown || updated.RateLimitCooldownStep != 15 {
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 || !updated.RateLimitSteppedCooldown || updated.RateLimitCooldownStep != 15 || !updated.RateLimitDownweightStepped || updated.RateLimitDownweightBase != 20 || updated.RateLimitDownweightStep != 35 {
 		t.Fatalf("legacy update reset group 429 downweight settings: %+v", updated)
 	}
 
@@ -267,6 +269,62 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 			"name": "A 分组", "description": "无效阶梯", "rate_multiplier": 1, "status": "active",
 			"rate_limit_cooldown_step_seconds": seconds,
 		}, http.StatusBadRequest, nil)
+	}
+	for _, field := range []string{"rate_limit_downweight_base_minutes", "rate_limit_downweight_step_minutes"} {
+		for _, minutes := range []int{0, maxRateLimitDownweightMinutes + 1} {
+			putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+				"name": "A 分组", "description": "无效降峰阶梯", "rate_multiplier": 1, "status": "active",
+				field: minutes,
+			}, http.StatusBadRequest, nil)
+		}
+	}
+}
+
+func TestGroupFiveHourReleaseStaggerSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var current []group
+	putJSON(t, handler, http.MethodGet, "/api/groups", nil, http.StatusOK, &current)
+	for _, item := range current {
+		if !item.FiveHourStaggerEnabled || item.FiveHourStaggerMin != defaultFiveHourReleaseStaggerMinMinutes || item.FiveHourStaggerMax != defaultFiveHourReleaseStaggerMaxMinutes {
+			t.Fatalf("group %s did not preserve the existing 15-30 minute stagger: %+v", item.ID, item)
+		}
+	}
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "5h 错峰", "rate_multiplier": 1, "status": "active",
+		"five_hour_release_stagger_enabled":     false,
+		"five_hour_release_stagger_min_minutes": 2,
+		"five_hour_release_stagger_max_minutes": 4,
+	}, http.StatusOK, &updated)
+	if updated.FiveHourStaggerEnabled || updated.FiveHourStaggerMin != 2 || updated.FiveHourStaggerMax != 4 {
+		t.Fatalf("group 5h stagger settings were not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if updated.FiveHourStaggerEnabled || updated.FiveHourStaggerMin != 2 || updated.FiveHourStaggerMax != 4 {
+		t.Fatalf("legacy update reset group 5h stagger settings: %+v", updated)
+	}
+
+	for _, payload := range []map[string]any{
+		{"five_hour_release_stagger_min_minutes": 5},
+		{"five_hour_release_stagger_min_minutes": 5, "five_hour_release_stagger_max_minutes": 4},
+		{"five_hour_release_stagger_min_minutes": 0, "five_hour_release_stagger_max_minutes": maxFiveHourReleaseStaggerMinutes + 1},
+	} {
+		payload["name"] = "A 分组"
+		payload["description"] = "无效错峰"
+		payload["rate_multiplier"] = 1
+		payload["status"] = "active"
+		putJSON(t, handler, http.MethodPut, "/api/groups/a", payload, http.StatusBadRequest, nil)
 	}
 }
 
@@ -319,6 +377,32 @@ func TestGroupRejectDistillationPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	}, http.StatusOK, &updated)
 	if !updated.RejectDistillation {
 		t.Fatalf("legacy update reset group distillation guard: %+v", updated)
+	}
+}
+
+func TestGroupRequestFormatFilterPersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "请求格式过滤", "rate_multiplier": 1, "status": "active",
+		"request_format_filter_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.RequestFormatFilter {
+		t.Fatalf("group request format filter was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.RequestFormatFilter {
+		t.Fatalf("legacy update reset group request format filter: %+v", updated)
 	}
 }
 
@@ -400,6 +484,18 @@ func TestLegacyABGroupConstraintIsMigrated(t *testing.T) {
 	defer a.db.Close()
 	if _, err := a.db.Exec(`INSERT INTO groups (id, name) VALUES ('c', 'C 分组')`); err != nil {
 		t.Fatalf("dynamic group insert after migration: %v", err)
+	}
+	groups, err := a.listGroups()
+	if err != nil {
+		t.Fatalf("read groups after legacy migration: %v", err)
+	}
+	if len(groups) != 3 {
+		t.Fatalf("groups after legacy migration = %d, want 3", len(groups))
+	}
+	for _, item := range groups {
+		if item.RateLimitDownweightStepped || item.RateLimitDownweightBase != defaultRateLimitDownweightBaseMinutes || item.RateLimitDownweightStep != defaultRateLimitDownweightStepMinutes {
+			t.Fatalf("legacy group %s has invalid downweight defaults: %+v", item.ID, item)
+		}
 	}
 	var invalidReferences int
 	rows, err := a.db.Query(`PRAGMA foreign_key_check`)
@@ -539,7 +635,10 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 		"rate_multiplier": 1, "group_ids": []string{"a"}, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
 	}, http.StatusCreated, &pending)
 	futureCooldown := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
-	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '5h', rate_limit_reason = '429_cooling', consecutive_429 = 3, last_429_at = ? WHERE id = ?`, futureCooldown, time.Now().UTC().Format(time.RFC3339Nano), ready.ID); err != nil {
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '5h', rate_limit_reason = '429_cooling', consecutive_429 = 3, last_429_at = ?, rate_limit_downweight_until = ? WHERE id = ?`, futureCooldown, time.Now().UTC().Format(time.RFC3339Nano), futureCooldown, ready.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, 1, ?)`, ready.ID, futureCooldown); err != nil {
 		t.Fatal(err)
 	}
 
@@ -582,6 +681,13 @@ func TestAccountBatchScheduleOnlyEnablesAuthorizedProxiedAccounts(t *testing.T) 
 	}
 	if rateLimitWindow != "" || rateLimitReason != "" || consecutive429 != 0 || last429.Valid {
 		t.Fatalf("manual resume kept 429 state = window %q reason %q consecutive %d last %v", rateLimitWindow, rateLimitReason, consecutive429, last429)
+	}
+	var thresholdCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_thresholds WHERE account_id = ?`, ready.ID).Scan(&thresholdCount); err != nil {
+		t.Fatal(err)
+	}
+	if thresholdCount != 0 {
+		t.Fatalf("manual resume kept %d learned RPM thresholds", thresholdCount)
 	}
 }
 

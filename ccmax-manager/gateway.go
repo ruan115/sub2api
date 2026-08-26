@@ -59,6 +59,7 @@ type gatewayKey struct {
 	AnthropicBetaPassthrough   bool
 	RejectAnthropicDowngrade   bool
 	RejectDistillation         bool
+	RequestFormatFilter        bool
 	QuotaHeaderMasking         bool
 	CacheCreationDetail        bool
 	OverloadCooldownSeconds    int
@@ -67,6 +68,12 @@ type gatewayKey struct {
 	RateLimitWaitSeconds       int
 	RateLimitSteppedCooldown   bool
 	RateLimitCooldownStep      int
+	RateLimitDownweightStepped bool
+	RateLimitDownweightBase    int
+	RateLimitDownweightStep    int
+	FiveHourStaggerEnabled     bool
+	FiveHourStaggerMin         int
+	FiveHourStaggerMax         int
 	CapacityQueueEnabled       bool
 	CapacityQueueTimeout       int
 	StrategyRequiredEnabled    bool
@@ -255,6 +262,14 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		attributeGatewayErrorEvent(w, "distillation_blocked", distillationRejectedStatus, "Not allowed")
 		writeAnthropicGatewayError(w, distillationRejectedStatus, "permission_error", "Not allowed")
 		return
+	}
+	if key.RequestFormatFilter {
+		if formatErr := validateFilteredRequestFormat(body); formatErr != nil {
+			message := formatErr.Error()
+			attributeGatewayErrorEvent(w, requestFormatBlockedCategory, http.StatusBadRequest, message)
+			writeAnthropicGatewayError(w, http.StatusBadRequest, "invalid_request_error", message)
+			return
+		}
 	}
 	if !countTokens && !envelope.Stream && !gatewayOpenAIChatRequest(r.Context()) {
 		adapter := newAnthropicNonStreamResponseWriter(w)
@@ -567,10 +582,9 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			return
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			// Success deliberately does not lift a rate-limit penalty: the
-			// account has already shown it reaches its ceiling in this quota
-			// window. Only the window rolling over, or an administrator,
-			// clears it.
+			// Success deliberately does not lift a rate-limit penalty. The
+			// configured downweight deadline, an explicit upstream quota reset,
+			// or an administrator action clears it.
 			if countTokens {
 				if forwardErr != nil {
 					return
@@ -660,6 +674,13 @@ func (k gatewayKey) rateLimitPolicy() rateLimitPolicy {
 		CooldownSeconds:        k.RateLimitWaitSeconds,
 		SteppedCooldownEnabled: k.RateLimitSteppedCooldown,
 		CooldownStepSeconds:    k.RateLimitCooldownStep,
+		DownweightStepped:      k.RateLimitDownweightStepped,
+		DownweightBaseMinutes:  k.RateLimitDownweightBase,
+		DownweightStepMinutes:  k.RateLimitDownweightStep,
+		FiveHourStaggerSet:     true,
+		FiveHourStaggerEnabled: k.FiveHourStaggerEnabled,
+		FiveHourStaggerMin:     k.FiveHourStaggerMin,
+		FiveHourStaggerMax:     k.FiveHourStaggerMax,
 	}
 }
 
@@ -1600,11 +1621,11 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, cacheCreationDetail, rateLimitDownweight, rateLimitSteppedCooldown, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, requestFormatFilter, quotaHeaderMasking, cacheCreationDetail, rateLimitDownweight, rateLimitSteppedCooldown, rateLimitDownweightStepped, fiveHourStaggerEnabled, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.request_format_filter_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.rate_limit_downweight_stepped_cooldown_enabled, g.rate_limit_downweight_base_minutes, g.rate_limit_downweight_step_minutes, g.five_hour_release_stagger_enabled, g.five_hour_release_stagger_min_minutes, g.five_hour_release_stagger_max_minutes, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &quotaHeaderMasking, &cacheCreationDetail, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &requestFormatFilter, &quotaHeaderMasking, &cacheCreationDetail, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &rateLimitDownweightStepped, &key.RateLimitDownweightBase, &key.RateLimitDownweightStep, &fiveHourStaggerEnabled, &key.FiveHourStaggerMin, &key.FiveHourStaggerMax, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
@@ -1616,10 +1637,13 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	key.AnthropicBetaPassthrough = anthropicBetaPassthrough == 1
 	key.RejectAnthropicDowngrade = rejectAnthropicDowngrade == 1
 	key.RejectDistillation = rejectDistillation == 1
+	key.RequestFormatFilter = requestFormatFilter == 1
 	key.QuotaHeaderMasking = quotaHeaderMasking == 1
 	key.CacheCreationDetail = cacheCreationDetail == 1
 	key.RateLimitDownweightEnabled = rateLimitDownweight == 1
 	key.RateLimitSteppedCooldown = rateLimitSteppedCooldown == 1
+	key.RateLimitDownweightStepped = rateLimitDownweightStepped == 1
+	key.FiveHourStaggerEnabled = fiveHourStaggerEnabled == 1
 	key.CapacityQueueEnabled = capacityQueueEnabled == 1
 	key.StrategyRequiredEnabled = strategyRequired == 1
 	return key, err
@@ -1920,7 +1944,9 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		// aligned with the branch above.
 		weightTier = `CASE WHEN ? IS NULL THEN 1 ELSE 1 END`
 	}
-	temporaryRPM := `COALESCE((SELECT rpm_limit FROM account_rpm_thresholds t WHERE t.account_id = a.id AND t.reset_at > ` + nowSQL + `), 0)`
+	temporaryRPM := `CASE WHEN a.rate_limit_downweight_until IS NOT NULL AND a.rate_limit_downweight_until > ` + nowSQL + `
+		THEN COALESCE((SELECT rpm_limit FROM account_rpm_thresholds t WHERE t.account_id = a.id AND t.reset_at > ` + nowSQL + `), 0)
+		ELSE 0 END`
 	if !key.RateLimitDownweightEnabled {
 		temporaryRPM = `0`
 	}

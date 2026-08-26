@@ -815,7 +815,8 @@ func TestResponsesToChatCompletions_Reasoning(t *testing.T) {
 		Status: "completed",
 		Output: []ResponsesOutput{
 			{
-				Type: "reasoning",
+				Type:             "reasoning",
+				EncryptedContent: "upstream-signature",
 				Summary: []ResponsesSummary{
 					{Type: "summary_text", Text: "I thought about it."},
 				},
@@ -836,6 +837,7 @@ func TestResponsesToChatCompletions_Reasoning(t *testing.T) {
 	require.NoError(t, json.Unmarshal(chat.Choices[0].Message.Content, &content))
 	assert.Equal(t, "The answer is 42.", content)
 	assert.Equal(t, "I thought about it.", chat.Choices[0].Message.ReasoningContent)
+	assert.Equal(t, "upstream-signature", chat.Choices[0].Message.ReasoningSignature)
 }
 
 func TestChatCompletionsToResponses_ToolArrayContent(t *testing.T) {
@@ -1323,6 +1325,23 @@ func TestResponsesEventToChatChunks_ReasoningDelta(t *testing.T) {
 		Type: "response.reasoning_summary_text.done",
 	}, state)
 	require.Len(t, chunks, 0)
+}
+
+func TestResponsesEventToChatChunks_ReasoningSignature(t *testing.T) {
+	state := NewResponsesEventToChatState()
+	state.Model = "claude-test"
+	state.SentRole = true
+
+	chunks := ResponsesEventToChatChunks(&ResponsesStreamEvent{
+		Type: "response.output_item.done",
+		Item: &ResponsesOutput{
+			Type:             "reasoning",
+			EncryptedContent: "upstream-signature",
+		},
+	}, state)
+	require.Len(t, chunks, 1)
+	require.NotNil(t, chunks[0].Choices[0].Delta.ReasoningSignature)
+	assert.Equal(t, "upstream-signature", *chunks[0].Choices[0].Delta.ReasoningSignature)
 }
 
 func TestResponsesEventToChatChunks_ReasoningThenTextAutoCloseTag(t *testing.T) {

@@ -81,6 +81,9 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "reject_distillation_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "groups", "request_format_filter_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	// Off by default: enabling it hides the pooled account's unified ratelimit
 	// headers from clients, so Claude Code stops falling back to Opus 4.8 when
 	// the account crosses the advertised fallback percentage.
@@ -119,6 +122,33 @@ func (a *app) migrateAdvancedFeatures() error {
 	}
 	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_cooldown_step_seconds = ? WHERE rate_limit_cooldown_step_seconds < 1 OR rate_limit_cooldown_step_seconds > ?`, defaultRateLimitCooldownStepSeconds, maxRateLimitCooldownStepSeconds); err != nil {
 		return fmt.Errorf("normalise group 429 cooldown step seconds: %w", err)
+	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_downweight_stepped_cooldown_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_downweight_base_minutes", "INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_downweight_base_minutes BETWEEN 1 AND 315)"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_downweight_step_minutes", "INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_downweight_step_minutes BETWEEN 1 AND 315)"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_downweight_base_minutes = ? WHERE rate_limit_downweight_base_minutes < ? OR rate_limit_downweight_base_minutes > ?`, defaultRateLimitDownweightBaseMinutes, minRateLimitDownweightMinutes, maxRateLimitDownweightMinutes); err != nil {
+		return fmt.Errorf("normalise group 429 downweight base minutes: %w", err)
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_downweight_step_minutes = ? WHERE rate_limit_downweight_step_minutes < ? OR rate_limit_downweight_step_minutes > ?`, defaultRateLimitDownweightStepMinutes, minRateLimitDownweightMinutes, maxRateLimitDownweightMinutes); err != nil {
+		return fmt.Errorf("normalise group 429 downweight step minutes: %w", err)
+	}
+	if err := addColumnIfMissing(a.db, "groups", "five_hour_release_stagger_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "five_hour_release_stagger_min_minutes", "INTEGER NOT NULL DEFAULT 15 CHECK (five_hour_release_stagger_min_minutes BETWEEN 0 AND 315)"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "five_hour_release_stagger_max_minutes", "INTEGER NOT NULL DEFAULT 30 CHECK (five_hour_release_stagger_max_minutes BETWEEN 0 AND 315)"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET five_hour_release_stagger_min_minutes = ?, five_hour_release_stagger_max_minutes = ? WHERE five_hour_release_stagger_min_minutes < 0 OR five_hour_release_stagger_max_minutes < five_hour_release_stagger_min_minutes OR five_hour_release_stagger_max_minutes > ?`, defaultFiveHourReleaseStaggerMinMinutes, defaultFiveHourReleaseStaggerMaxMinutes, maxFiveHourReleaseStaggerMinutes); err != nil {
+		return fmt.Errorf("normalise group 5h release stagger minutes: %w", err)
 	}
 	if err := addColumnIfMissing(a.db, "groups", "strategy_id", "INTEGER REFERENCES dispatch_strategies(id) ON DELETE SET NULL"); err != nil {
 		return err
@@ -510,14 +540,32 @@ func (a *app) migrateDynamicGroups() error {
 			anthropic_beta_passthrough_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_anthropic_downgrade_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_distillation_enabled INTEGER NOT NULL DEFAULT 0,
+			request_format_filter_enabled INTEGER NOT NULL DEFAULT 0,
+			quota_header_masking_enabled INTEGER NOT NULL DEFAULT 0,
+			cache_creation_detail_enabled INTEGER NOT NULL DEFAULT 0,
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
+			rate_limit_downweight_enabled INTEGER NOT NULL DEFAULT 1,
+			rate_limit_cooling_threshold INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10),
+			rate_limit_wait_seconds INTEGER NOT NULL DEFAULT 120 CHECK (rate_limit_wait_seconds BETWEEN 60 AND 120),
+			rate_limit_stepped_cooldown_enabled INTEGER NOT NULL DEFAULT 0,
+			rate_limit_cooldown_step_seconds INTEGER NOT NULL DEFAULT 30 CHECK (rate_limit_cooldown_step_seconds BETWEEN 1 AND 60),
+			rate_limit_downweight_stepped_cooldown_enabled INTEGER NOT NULL DEFAULT 0,
+			rate_limit_downweight_base_minutes INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_downweight_base_minutes BETWEEN 1 AND 315),
+			rate_limit_downweight_step_minutes INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_downweight_step_minutes BETWEEN 1 AND 315),
+			five_hour_release_stagger_enabled INTEGER NOT NULL DEFAULT 1,
+			five_hour_release_stagger_min_minutes INTEGER NOT NULL DEFAULT 15 CHECK (five_hour_release_stagger_min_minutes BETWEEN 0 AND 315),
+			five_hour_release_stagger_max_minutes INTEGER NOT NULL DEFAULT 30 CHECK (five_hour_release_stagger_max_minutes BETWEEN 0 AND 315),
+			capacity_queue_enabled INTEGER NOT NULL DEFAULT 0,
+			capacity_queue_timeout_seconds INTEGER NOT NULL DEFAULT 30 CHECK (capacity_queue_timeout_seconds BETWEEN 1 AND 600),
+			strategy_required_enabled INTEGER NOT NULL DEFAULT 0,
+			strategy_id INTEGER REFERENCES dispatch_strategies(id) ON DELETE SET NULL,
 			reserve_pool_enabled INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		)`,
-		`INSERT INTO groups_dynamic (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, overload_cooldown_seconds, reserve_pool_enabled, status, created_at, updated_at)
-		 SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, overload_cooldown_seconds, reserve_pool_enabled, status, created_at, updated_at FROM groups`,
+		`INSERT INTO groups_dynamic (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at)
+		 SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at FROM groups`,
 		`DROP TABLE groups`,
 		`ALTER TABLE groups_dynamic RENAME TO groups`,
 	}

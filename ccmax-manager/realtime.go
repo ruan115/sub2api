@@ -85,8 +85,15 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
 			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
 			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.concurrency_limit > 0), 0),
+		COALESCE((SELECT MIN(ds.rpm_limit)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.rpm_limit > 0), 0),
 		CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN 1 ELSE 0 END,
-		COALESCE((SELECT rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > ` + nowSQL + `), 0)
+		CASE WHEN a.rate_limit_downweight_until IS NOT NULL AND a.rate_limit_downweight_until > ` + nowSQL + `
+			THEN COALESCE((SELECT rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > ` + nowSQL + `), 0)
+			ELSE 0 END
 	FROM accounts a
 	LEFT JOIN recent_rpm rr ON rr.account_id = a.id
 	LEFT JOIN recent_tokens rt ON rt.account_id = a.id
@@ -94,7 +101,7 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	WHERE ` + strings.Join(where, " AND ") + `
 	ORDER BY COALESCE(rr.rpm, 0) DESC, COALESCE(ai.requests, 0) DESC, a.priority, a.id`
 
-	queryArgs := append([]any{groupID, groupID}, args...)
+	queryArgs := append([]any{groupID, groupID, groupID, groupID}, args...)
 	rows, err := a.db.Query(query, queryArgs...)
 	if err != nil {
 		writeDBError(w, err)
@@ -108,12 +115,18 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	}
 	for rows.Next() {
 		var item accountRealtimeLoad
-		var eligible, strategyConcurrency int
-		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.ITPM, &item.CacheReadTPM, &item.OTPM, &item.Inflight, &item.Concurrency, &strategyConcurrency, &eligible, &item.TemporaryRPM); err != nil {
+		var eligible, strategyConcurrency, strategyRPM int
+		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.ITPM, &item.CacheReadTPM, &item.OTPM, &item.Inflight, &item.Concurrency, &strategyConcurrency, &strategyRPM, &eligible, &item.TemporaryRPM); err != nil {
 			writeDBError(w, err)
 			return
 		}
 		item.EffectiveRPM = item.BaseRPM
+		// This mirrors gateway candidate resolution: an account-level strategy
+		// wins over the group strategy through COALESCE above, while a zero RPM
+		// does not force an override and therefore falls back to the account.
+		if strategyRPM > 0 {
+			item.EffectiveRPM = strategyRPM
+		}
 		if strategyConcurrency > 0 && (item.Concurrency <= 0 || strategyConcurrency < item.Concurrency) {
 			item.Concurrency = strategyConcurrency
 		}

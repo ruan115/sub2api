@@ -103,6 +103,10 @@ func (a *app) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "archived account not found")
 		return
 	}
+	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id = ?`, id); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeDBError(w, err)
 		return

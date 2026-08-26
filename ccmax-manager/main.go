@@ -89,6 +89,7 @@ type group struct {
 	AnthropicBetaPassthrough   bool     `json:"anthropic_beta_passthrough_enabled"`
 	RejectAnthropicDowngrade   bool     `json:"reject_anthropic_downgrade_enabled"`
 	RejectDistillation         bool     `json:"reject_distillation_enabled"`
+	RequestFormatFilter        bool     `json:"request_format_filter_enabled"`
 	QuotaHeaderMasking         bool     `json:"quota_header_masking_enabled"`
 	CacheCreationDetail        bool     `json:"cache_creation_detail_enabled"`
 	OverloadCooldownSeconds    int      `json:"overload_cooldown_seconds"`
@@ -97,6 +98,12 @@ type group struct {
 	RateLimitWaitSeconds       int      `json:"rate_limit_wait_seconds"`
 	RateLimitSteppedCooldown   bool     `json:"rate_limit_stepped_cooldown_enabled"`
 	RateLimitCooldownStep      int      `json:"rate_limit_cooldown_step_seconds"`
+	RateLimitDownweightStepped bool     `json:"rate_limit_downweight_stepped_cooldown_enabled"`
+	RateLimitDownweightBase    int      `json:"rate_limit_downweight_base_minutes"`
+	RateLimitDownweightStep    int      `json:"rate_limit_downweight_step_minutes"`
+	FiveHourStaggerEnabled     bool     `json:"five_hour_release_stagger_enabled"`
+	FiveHourStaggerMin         int      `json:"five_hour_release_stagger_min_minutes"`
+	FiveHourStaggerMax         int      `json:"five_hour_release_stagger_max_minutes"`
 	CapacityQueueEnabled       bool     `json:"capacity_queue_enabled"`
 	CapacityQueueTimeout       int      `json:"capacity_queue_timeout_seconds"`
 	StrategyRequiredEnabled    bool     `json:"strategy_required_enabled"`
@@ -129,6 +136,7 @@ type groupInput struct {
 	AnthropicBetaPassthrough   *bool    `json:"anthropic_beta_passthrough_enabled"`
 	RejectAnthropicDowngrade   *bool    `json:"reject_anthropic_downgrade_enabled"`
 	RejectDistillation         *bool    `json:"reject_distillation_enabled"`
+	RequestFormatFilter        *bool    `json:"request_format_filter_enabled"`
 	QuotaHeaderMasking         *bool    `json:"quota_header_masking_enabled"`
 	CacheCreationDetail        *bool    `json:"cache_creation_detail_enabled"`
 	OverloadCooldownSeconds    *int     `json:"overload_cooldown_seconds"`
@@ -137,6 +145,12 @@ type groupInput struct {
 	RateLimitWaitSeconds       *int     `json:"rate_limit_wait_seconds"`
 	RateLimitSteppedCooldown   *bool    `json:"rate_limit_stepped_cooldown_enabled"`
 	RateLimitCooldownStep      *int     `json:"rate_limit_cooldown_step_seconds"`
+	RateLimitDownweightStepped *bool    `json:"rate_limit_downweight_stepped_cooldown_enabled"`
+	RateLimitDownweightBase    *int     `json:"rate_limit_downweight_base_minutes"`
+	RateLimitDownweightStep    *int     `json:"rate_limit_downweight_step_minutes"`
+	FiveHourStaggerEnabled     *bool    `json:"five_hour_release_stagger_enabled"`
+	FiveHourStaggerMin         *int     `json:"five_hour_release_stagger_min_minutes"`
+	FiveHourStaggerMax         *int     `json:"five_hour_release_stagger_max_minutes"`
 	CapacityQueueEnabled       *bool    `json:"capacity_queue_enabled"`
 	CapacityQueueTimeout       *int     `json:"capacity_queue_timeout_seconds"`
 	StrategyRequiredEnabled    *bool    `json:"strategy_required_enabled"`
@@ -567,6 +581,7 @@ func (a *app) migrate() error {
 			anthropic_beta_passthrough_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_anthropic_downgrade_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_distillation_enabled INTEGER NOT NULL DEFAULT 0,
+			request_format_filter_enabled INTEGER NOT NULL DEFAULT 0,
 			quota_header_masking_enabled INTEGER NOT NULL DEFAULT 0,
 			cache_creation_detail_enabled INTEGER NOT NULL DEFAULT 0,
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
@@ -575,6 +590,12 @@ func (a *app) migrate() error {
 			rate_limit_wait_seconds INTEGER NOT NULL DEFAULT 120 CHECK (rate_limit_wait_seconds BETWEEN 60 AND 120),
 			rate_limit_stepped_cooldown_enabled INTEGER NOT NULL DEFAULT 0,
 			rate_limit_cooldown_step_seconds INTEGER NOT NULL DEFAULT 30 CHECK (rate_limit_cooldown_step_seconds BETWEEN 1 AND 60),
+			rate_limit_downweight_stepped_cooldown_enabled INTEGER NOT NULL DEFAULT 0,
+			rate_limit_downweight_base_minutes INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_downweight_base_minutes BETWEEN 1 AND 315),
+			rate_limit_downweight_step_minutes INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_downweight_step_minutes BETWEEN 1 AND 315),
+			five_hour_release_stagger_enabled INTEGER NOT NULL DEFAULT 1,
+			five_hour_release_stagger_min_minutes INTEGER NOT NULL DEFAULT 15 CHECK (five_hour_release_stagger_min_minutes BETWEEN 0 AND 315),
+			five_hour_release_stagger_max_minutes INTEGER NOT NULL DEFAULT 30 CHECK (five_hour_release_stagger_max_minutes BETWEEN 0 AND 315),
 			capacity_queue_enabled INTEGER NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INTEGER NOT NULL DEFAULT 30 CHECK (capacity_queue_timeout_seconds BETWEEN 1 AND 600),
 			strategy_required_enabled INTEGER NOT NULL DEFAULT 0,
@@ -767,6 +788,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{id}/archive", a.handleAccountArchive)
 	mux.HandleFunc("POST /api/accounts/{id}/restore", a.handleAccountRestore)
 	mux.HandleFunc("POST /api/accounts/{id}/quota/refresh", a.handleAccountQuotaRefresh)
+	mux.HandleFunc("POST /api/accounts/{id}/rate-limit/reset", a.handleAccountRateLimitReset)
 	mux.HandleFunc("POST /api/accounts/{id}/auth-url", a.handleAccountAuthURL)
 	mux.HandleFunc("POST /api/accounts/{id}/oauth-exchange", a.handleAccountOAuthExchange)
 	mux.HandleFunc("POST /api/accounts/{id}/session-auth", a.handleAccountSessionAuth)
@@ -959,7 +981,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -969,7 +991,7 @@ func (a *app) listGroups() ([]group, error) {
 		var item group
 		var daily, monthly sql.NullFloat64
 		var strategyID sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.QuotaHeaderMasking, &item.CacheCreationDetail, &item.OverloadCooldownSeconds, &item.RateLimitDownweightEnabled, &item.RateLimitCoolingThreshold, &item.RateLimitWaitSeconds, &item.RateLimitSteppedCooldown, &item.RateLimitCooldownStep, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.RequestFormatFilter, &item.QuotaHeaderMasking, &item.CacheCreationDetail, &item.OverloadCooldownSeconds, &item.RateLimitDownweightEnabled, &item.RateLimitCoolingThreshold, &item.RateLimitWaitSeconds, &item.RateLimitSteppedCooldown, &item.RateLimitCooldownStep, &item.RateLimitDownweightStepped, &item.RateLimitDownweightBase, &item.RateLimitDownweightStep, &item.FiveHourStaggerEnabled, &item.FiveHourStaggerMin, &item.FiveHourStaggerMax, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -1027,6 +1049,24 @@ func normalizeGroupInput(input *groupInput) error {
 	}
 	if input.RateLimitCooldownStep != nil && (*input.RateLimitCooldownStep < 1 || *input.RateLimitCooldownStep > maxRateLimitCooldownStepSeconds) {
 		return fmt.Errorf("429 cooldown step must be between 1 and %d seconds", maxRateLimitCooldownStepSeconds)
+	}
+	if input.RateLimitDownweightBase != nil && (*input.RateLimitDownweightBase < minRateLimitDownweightMinutes || *input.RateLimitDownweightBase > maxRateLimitDownweightMinutes) {
+		return fmt.Errorf("429 downweight base must be between %d and %d minutes", minRateLimitDownweightMinutes, maxRateLimitDownweightMinutes)
+	}
+	if input.RateLimitDownweightStep != nil && (*input.RateLimitDownweightStep < minRateLimitDownweightMinutes || *input.RateLimitDownweightStep > maxRateLimitDownweightMinutes) {
+		return fmt.Errorf("429 downweight step must be between %d and %d minutes", minRateLimitDownweightMinutes, maxRateLimitDownweightMinutes)
+	}
+	if input.FiveHourStaggerMin != nil && (*input.FiveHourStaggerMin < 0 || *input.FiveHourStaggerMin > maxFiveHourReleaseStaggerMinutes) {
+		return fmt.Errorf("5h release stagger minimum must be between 0 and %d minutes", maxFiveHourReleaseStaggerMinutes)
+	}
+	if input.FiveHourStaggerMax != nil && (*input.FiveHourStaggerMax < 0 || *input.FiveHourStaggerMax > maxFiveHourReleaseStaggerMinutes) {
+		return fmt.Errorf("5h release stagger maximum must be between 0 and %d minutes", maxFiveHourReleaseStaggerMinutes)
+	}
+	if (input.FiveHourStaggerMin == nil) != (input.FiveHourStaggerMax == nil) {
+		return errors.New("5h release stagger minimum and maximum must be provided together")
+	}
+	if input.FiveHourStaggerMin != nil && input.FiveHourStaggerMax != nil && *input.FiveHourStaggerMin > *input.FiveHourStaggerMax {
+		return errors.New("5h release stagger minimum cannot exceed maximum")
 	}
 	if input.CapacityQueueTimeout != nil && (*input.CapacityQueueTimeout < 1 || *input.CapacityQueueTimeout > 600) {
 		return errors.New("capacity queue timeout must be between 1 and 600 seconds")
@@ -1152,7 +1192,7 @@ func (a *app) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	for attempt := 0; attempt < 5; attempt++ {
 		id = "g_" + randomSecret(6)
-		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), boolInt(boolPointerValue(input.CacheCreationDetail, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitDownweightEnabled, true)), intPointerValue(input.RateLimitCoolingThreshold, defaultRateLimitCoolingThreshold), intPointerValue(input.RateLimitWaitSeconds, defaultRateLimitCooldownSeconds), boolInt(boolPointerValue(input.RateLimitSteppedCooldown, false)), intPointerValue(input.RateLimitCooldownStep, defaultRateLimitCooldownStepSeconds), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
+		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.RequestFormatFilter, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), boolInt(boolPointerValue(input.CacheCreationDetail, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitDownweightEnabled, true)), intPointerValue(input.RateLimitCoolingThreshold, defaultRateLimitCoolingThreshold), intPointerValue(input.RateLimitWaitSeconds, defaultRateLimitCooldownSeconds), boolInt(boolPointerValue(input.RateLimitSteppedCooldown, false)), intPointerValue(input.RateLimitCooldownStep, defaultRateLimitCooldownStepSeconds), boolInt(boolPointerValue(input.RateLimitDownweightStepped, false)), intPointerValue(input.RateLimitDownweightBase, defaultRateLimitDownweightBaseMinutes), intPointerValue(input.RateLimitDownweightStep, defaultRateLimitDownweightStepMinutes), boolInt(boolPointerValue(input.FiveHourStaggerEnabled, true)), intPointerValue(input.FiveHourStaggerMin, defaultFiveHourReleaseStaggerMinMinutes), intPointerValue(input.FiveHourStaggerMax, defaultFiveHourReleaseStaggerMaxMinutes), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
 		if err == nil {
 			break
 		}
@@ -1255,6 +1295,10 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.RejectDistillation != nil {
 		rejectDistillation = boolInt(*input.RejectDistillation)
 	}
+	var requestFormatFilter any
+	if input.RequestFormatFilter != nil {
+		requestFormatFilter = boolInt(*input.RequestFormatFilter)
+	}
 	var quotaHeaderMasking any
 	if input.QuotaHeaderMasking != nil {
 		quotaHeaderMasking = boolInt(*input.QuotaHeaderMasking)
@@ -1287,6 +1331,30 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.RateLimitCooldownStep != nil {
 		rateLimitCooldownStep = *input.RateLimitCooldownStep
 	}
+	var rateLimitDownweightStepped any
+	if input.RateLimitDownweightStepped != nil {
+		rateLimitDownweightStepped = boolInt(*input.RateLimitDownweightStepped)
+	}
+	var rateLimitDownweightBase any
+	if input.RateLimitDownweightBase != nil {
+		rateLimitDownweightBase = *input.RateLimitDownweightBase
+	}
+	var rateLimitDownweightStep any
+	if input.RateLimitDownweightStep != nil {
+		rateLimitDownweightStep = *input.RateLimitDownweightStep
+	}
+	var fiveHourStaggerEnabled any
+	if input.FiveHourStaggerEnabled != nil {
+		fiveHourStaggerEnabled = boolInt(*input.FiveHourStaggerEnabled)
+	}
+	var fiveHourStaggerMin any
+	if input.FiveHourStaggerMin != nil {
+		fiveHourStaggerMin = *input.FiveHourStaggerMin
+	}
+	var fiveHourStaggerMax any
+	if input.FiveHourStaggerMax != nil {
+		fiveHourStaggerMax = *input.FiveHourStaggerMax
+	}
 	var capacityQueueEnabled any
 	if input.CapacityQueueEnabled != nil {
 		capacityQueueEnabled = boolInt(*input.CapacityQueueEnabled)
@@ -1309,7 +1377,7 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), cache_creation_detail_enabled = COALESCE(?, cache_creation_detail_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_downweight_enabled = COALESCE(?, rate_limit_downweight_enabled), rate_limit_cooling_threshold = COALESCE(?, rate_limit_cooling_threshold), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), rate_limit_stepped_cooldown_enabled = COALESCE(?, rate_limit_stepped_cooldown_enabled), rate_limit_cooldown_step_seconds = COALESCE(?, rate_limit_cooldown_step_seconds), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, cacheCreationDetail, overloadCooldown, rateLimitDownweight, rateLimitCoolingThreshold, rateLimitWaitSeconds, rateLimitSteppedCooldown, rateLimitCooldownStep, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), request_format_filter_enabled = COALESCE(?, request_format_filter_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), cache_creation_detail_enabled = COALESCE(?, cache_creation_detail_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_downweight_enabled = COALESCE(?, rate_limit_downweight_enabled), rate_limit_cooling_threshold = COALESCE(?, rate_limit_cooling_threshold), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), rate_limit_stepped_cooldown_enabled = COALESCE(?, rate_limit_stepped_cooldown_enabled), rate_limit_cooldown_step_seconds = COALESCE(?, rate_limit_cooldown_step_seconds), rate_limit_downweight_stepped_cooldown_enabled = COALESCE(?, rate_limit_downweight_stepped_cooldown_enabled), rate_limit_downweight_base_minutes = COALESCE(?, rate_limit_downweight_base_minutes), rate_limit_downweight_step_minutes = COALESCE(?, rate_limit_downweight_step_minutes), five_hour_release_stagger_enabled = COALESCE(?, five_hour_release_stagger_enabled), five_hour_release_stagger_min_minutes = COALESCE(?, five_hour_release_stagger_min_minutes), five_hour_release_stagger_max_minutes = COALESCE(?, five_hour_release_stagger_max_minutes), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, requestFormatFilter, quotaHeaderMasking, cacheCreationDetail, overloadCooldown, rateLimitDownweight, rateLimitCoolingThreshold, rateLimitWaitSeconds, rateLimitSteppedCooldown, rateLimitCooldownStep, rateLimitDownweightStepped, rateLimitDownweightBase, rateLimitDownweightStep, fiveHourStaggerEnabled, fiveHourStaggerMin, fiveHourStaggerMax, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2366,24 +2434,39 @@ func (a *app) handleAccountBatchSchedule(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "no selected accounts were found")
 		return
 	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
 	var result sql.Result
-	var err error
 	if input.Schedulable {
-		result, err = a.db.Exec(`UPDATE accounts SET status = 'active', schedulable = 1,
+		result, err = tx.Exec(`UPDATE accounts SET status = 'active', schedulable = 1,
 			rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
 			rate_limit_downweight_until = NULL, quota_refreshed_at = `+nowSQL+`,
 			error_message = '', updated_at = `+nowSQL+`
 			WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`) AND auth_status = 'valid' AND proxy_id IS NOT NULL
 			AND EXISTS (SELECT 1 FROM proxies p WHERE p.id = accounts.proxy_id AND p.status = 'active' AND p.deleted_at IS NULL)`, args...)
 	} else {
-		result, err = a.db.Exec(`UPDATE accounts SET schedulable = 0, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`)`, args...)
+		result, err = tx.Exec(`UPDATE accounts SET schedulable = 0, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`)`, args...)
 	}
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
+	if input.Schedulable {
+		if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id IN (`+placeholders+`)`, args...); err != nil {
+			writeDBError(w, err)
+			return
+		}
+	}
 	updated, err := result.RowsAffected()
 	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeDBError(w, err)
 		return
 	}

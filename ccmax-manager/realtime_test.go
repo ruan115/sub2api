@@ -58,7 +58,11 @@ func TestRealtimeStatsUsesRollingMinute(t *testing.T) {
 	if len(result.Accounts) != 2 || result.Accounts[0].AccountID != first.ID || result.Accounts[0].RPM != 2 || result.Accounts[0].TPM != 150 {
 		t.Fatalf("realtime accounts = %+v", result.Accounts)
 	}
-	a.captureAccountRPMThreshold("a", first.ID, time.Now().UTC().Add(time.Minute))
+	thresholdReset := time.Now().UTC().Add(time.Minute)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`, thresholdReset.Format(time.RFC3339Nano), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.captureAccountRPMThreshold("a", first.ID, thresholdReset)
 	var limited realtimeLoad
 	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=a", nil, http.StatusOK, &limited)
 	if limited.EligibleAccounts != 1 || limited.RPMCapacity != 10 || limited.ConcurrencyCapacity != 4 || limited.WaitingRequests != 3 || limited.Accounts[0].EffectiveRPM != 1 || limited.Accounts[0].TemporaryRPM != 1 || limited.Accounts[0].Eligible {
@@ -70,6 +74,72 @@ func TestRealtimeStatsUsesRollingMinute(t *testing.T) {
 	if len(empty.Accounts) != 0 || empty.RPM != 0 || empty.TPM != 0 || empty.WaitingRequests != 0 {
 		t.Fatalf("group filter leaked realtime data: %+v", empty)
 	}
+}
+
+func TestRealtimeStatsResolvesRPMFromStrategyGroupThenAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+
+	groupStrategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "group-rpm-7", "rpm_limit": 7, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+	})
+	directStrategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "direct-rpm-11", "rpm_limit": 11, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+	})
+	bindGroupStrategy(t, handler, groupStrategyID, nil)
+
+	direct := createGatewayTestAccount(t, a, handler, "direct-strategy-rpm", "https://direct.example.test", 0, nil, map[string]any{"access_token": "token-direct"})
+	group := createGatewayTestAccount(t, a, handler, "group-strategy-rpm", "https://group.example.test", 0, nil, map[string]any{"access_token": "token-group"})
+	accountOnly := createGatewayTestAccount(t, a, handler, "account-rpm", "https://account.example.test", 0, nil, map[string]any{"access_token": "token-account"})
+	if _, err := a.db.Exec(`UPDATE accounts SET base_rpm = CASE id WHEN ? THEN 3 WHEN ? THEN 4 ELSE 5 END, strategy_id = CASE WHEN id = ? THEN ? ELSE NULL END WHERE id IN (?, ?, ?)`,
+		direct.ID, group.ID, direct.ID, directStrategyID, direct.ID, group.ID, accountOnly.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`DELETE FROM account_groups WHERE account_id = ?`, accountOnly.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO account_groups (account_id, group_id) VALUES (?, 'b')`, accountOnly.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCapacity := func(path string, wantCapacity int64, want map[int64]int) {
+		t.Helper()
+		var result realtimeLoad
+		putJSON(t, handler, http.MethodGet, path, nil, http.StatusOK, &result)
+		if result.RPMCapacity != wantCapacity || result.Unlimited {
+			t.Fatalf("%s capacity = %d unlimited=%v, want %d/false", path, result.RPMCapacity, result.Unlimited, wantCapacity)
+		}
+		got := map[int64]int{}
+		for _, item := range result.Accounts {
+			got[item.AccountID] = item.EffectiveRPM
+		}
+		for accountID, rpm := range want {
+			if got[accountID] != rpm {
+				t.Fatalf("%s account %d effective RPM = %d, want %d (all=%+v)", path, accountID, got[accountID], rpm, got)
+			}
+		}
+	}
+
+	assertCapacity("/api/stats/realtime", 23, map[int64]int{
+		direct.ID: 11, group.ID: 7, accountOnly.ID: 5,
+	})
+	assertCapacity("/api/stats/realtime?group_id=a", 18, map[int64]int{
+		direct.ID: 11, group.ID: 7,
+	})
+	assertCapacity("/api/stats/realtime?group_id=b", 5, map[int64]int{
+		accountOnly.ID: 5,
+	})
+
+	// A strategy with rpm_limit=0 controls other dispatch settings but does not
+	// force RPM, so the group-bound account falls back to its own base_rpm.
+	unlimitedStrategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "group-rpm-unforced", "rpm_limit": 0, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+	})
+	bindGroupStrategy(t, handler, unlimitedStrategyID, nil)
+	assertCapacity("/api/stats/realtime?group_id=a", 15, map[int64]int{
+		direct.ID: 11, group.ID: 4,
+	})
 }
 
 func TestRPMConcentratedDispatchFillsOneAccountBeforeNext(t *testing.T) {

@@ -60,6 +60,23 @@ func (a *app) handleAccountQuotaRefresh(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, quota)
 }
 
+func (a *app) handleAccountRateLimitReset(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	reset, err := a.clearAccount429State(accountID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "account not found")
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"reset": reset})
+}
+
 func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (accountQuota, error) {
 	var authType, credentialsJSON string
 	var proxyID sql.NullInt64
@@ -278,6 +295,10 @@ func resetHeaderTime(raw string) string {
 }
 
 func (a *app) captureAccountUpstreamState(accountID int64, response *http.Response) {
+	a.captureAccountUpstreamStateWithPolicy(accountID, response, rateLimitPolicy{})
+}
+
+func (a *app) captureAccountUpstreamStateWithPolicy(accountID int64, response *http.Response, policy rateLimitPolicy) {
 	if response == nil {
 		return
 	}
@@ -314,10 +335,7 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 	}
 	// Keep the sampled quota reset untouched, but stagger quota-limited accounts
 	// before making them dispatchable so a large cohort does not return at once.
-	eligibleAt := resetAt.UTC()
-	if window == "5h" || window == "7d" {
-		eligibleAt = staggeredAccountQuotaRelease(accountID, eligibleAt)
-	}
+	eligibleAt := policy.quotaReleaseDeadline(accountID, window, resetAt.UTC())
 	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, eligibleAt.Format(time.RFC3339Nano), window, accountID)
 	logDatabaseWriteError("record account quota cooldown", err)
 }
@@ -415,6 +433,13 @@ type rateLimitPolicy struct {
 	CooldownSeconds        int
 	SteppedCooldownEnabled bool
 	CooldownStepSeconds    int
+	DownweightStepped      bool
+	DownweightBaseMinutes  int
+	DownweightStepMinutes  int
+	FiveHourStaggerSet     bool
+	FiveHourStaggerEnabled bool
+	FiveHourStaggerMin     int
+	FiveHourStaggerMax     int
 }
 
 func (p rateLimitPolicy) threshold() int {
@@ -457,19 +482,57 @@ func (p rateLimitPolicy) cooldownForStrikes(strikes int) int {
 	return cooldown
 }
 
+func (p rateLimitPolicy) downweightMinutesForStrikes(strikes int) int {
+	base := p.DownweightBaseMinutes
+	if base < minRateLimitDownweightMinutes || base > maxRateLimitDownweightMinutes {
+		base = defaultRateLimitDownweightBaseMinutes
+	}
+	step := p.DownweightStepMinutes
+	if step < minRateLimitDownweightMinutes || step > maxRateLimitDownweightMinutes {
+		step = defaultRateLimitDownweightStepMinutes
+	}
+	return min(maxRateLimitDownweightMinutes, base+(max(1, strikes)-1)*step)
+}
+
+func (p rateLimitPolicy) fiveHourReleaseRange() (bool, time.Duration, time.Duration) {
+	if p.FiveHourStaggerSet && !p.FiveHourStaggerEnabled {
+		return false, 0, 0
+	}
+	minimum, maximum := p.FiveHourStaggerMin, p.FiveHourStaggerMax
+	if minimum < 0 || maximum < minimum || maximum > maxFiveHourReleaseStaggerMinutes || (!p.FiveHourStaggerSet && minimum == 0 && maximum == 0) {
+		minimum = defaultFiveHourReleaseStaggerMinMinutes
+		maximum = defaultFiveHourReleaseStaggerMaxMinutes
+	}
+	return true, time.Duration(minimum) * time.Minute, time.Duration(maximum) * time.Minute
+}
+
+func (p rateLimitPolicy) quotaReleaseDeadline(accountID int64, window string, resetAt time.Time) time.Time {
+	switch window {
+	case "5h":
+		enabled, minimum, maximum := p.fiveHourReleaseRange()
+		if !enabled {
+			return resetAt.UTC()
+		}
+		return staggeredAccountQuotaReleaseRange(accountID, resetAt, minimum, maximum)
+	case "7d":
+		return staggeredAccountQuotaRelease(accountID, resetAt)
+	default:
+		return resetAt.UTC()
+	}
+}
+
 func (a *app) captureGatewayUpstreamState(accountID int64, groupID, model string, overloadCooldownSeconds int, policy rateLimitPolicy, response *http.Response) {
-	a.captureAccountUpstreamState(accountID, response)
+	a.captureAccountUpstreamStateWithPolicy(accountID, response, policy)
 	if response == nil {
 		return
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		_, transient := a.captureAccount429State(accountID, policy, response)
+		downweightUntil, transient := a.captureAccount429State(accountID, policy, response)
 		if transient {
-			// A short retry cooldown only absorbs the immediate burst. The learned
-			// peak must survive for the rest of the active 5h window, otherwise the
-			// account returns at the same RPM and immediately produces another 429.
-			thresholdResetAt := a.nextAccount5HReset(accountID, response.Header, time.Now().UTC())
-			a.captureAccountRPMThreshold(groupID, accountID, thresholdResetAt)
+			// The learned peak and the scheduling penalty are one policy. Keeping
+			// their deadlines aligned ensures the configurable downweight staircase
+			// actually releases both parts of the penalty at the same time.
+			a.captureAccountRPMThreshold(groupID, accountID, downweightUntil)
 		}
 	}
 	if response.StatusCode == 529 {
@@ -481,15 +544,24 @@ const (
 	// How many strikes escalate an account to the maximum configured short
 	// cooldown. The group can override it; it never turns an ambiguous 429 into
 	// a synthetic 5h quota exhaustion.
-	defaultRateLimitCoolingThreshold    = 3
-	maxRateLimitCoolingThreshold        = 10
-	minRateLimitCooldownSeconds         = 60
-	defaultRateLimitCooldownSeconds     = 120
-	maxRateLimitCooldownSeconds         = 120
-	defaultRateLimitCooldownStepSeconds = 30
-	maxRateLimitCooldownStepSeconds     = maxRateLimitCooldownSeconds - minRateLimitCooldownSeconds
-	accountQuotaReleaseDelayMin         = 15 * time.Minute
-	accountQuotaReleaseDelayMax         = 30 * time.Minute
+	defaultRateLimitCoolingThreshold        = 3
+	maxRateLimitCoolingThreshold            = 10
+	minRateLimitCooldownSeconds             = 60
+	defaultRateLimitCooldownSeconds         = 120
+	maxRateLimitCooldownSeconds             = 120
+	defaultRateLimitCooldownStepSeconds     = 30
+	maxRateLimitCooldownStepSeconds         = maxRateLimitCooldownSeconds - minRateLimitCooldownSeconds
+	minRateLimitDownweightMinutes           = 1
+	defaultRateLimitDownweightBaseMinutes   = 60
+	defaultRateLimitDownweightStepMinutes   = 60
+	maxRateLimitDownweightMinutes           = 5*60 + 15
+	defaultFiveHourReleaseStaggerMinMinutes = 15
+	defaultFiveHourReleaseStaggerMaxMinutes = 30
+	maxFiveHourReleaseStaggerMinutes        = 315
+	highQuota429UtilizationPercent          = 90
+	highQuotaSampleFreshness                = 10 * time.Minute
+	accountQuotaReleaseDelayMin             = 15 * time.Minute
+	accountQuotaReleaseDelayMax             = 30 * time.Minute
 	// Upstream rate limiting hits every in-flight request on an account at
 	// once. Without a debounce a concurrency-3 account would collect three
 	// strikes from a single burst, so strikes within this window count once.
@@ -509,8 +581,9 @@ const (
 // administrator-controlled schedulable flag. Explicit quota exhaustion follows
 // the upstream reset window. Ambiguous 429s first enter a short cooldown, then
 // return as downweighted accounts with a learned RPM ceiling. Repeated strikes
-// increase only the short cooldown; a 5h/7d park requires an explicit upstream
-// quota-window signal.
+// can increase both local durations when their group enables the corresponding
+// staircase; a 5h/7d park still requires an explicit upstream quota-window
+// signal.
 func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, response *http.Response) (time.Time, bool) {
 	if accountID <= 0 {
 		return time.Time{}, false
@@ -522,8 +595,10 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 		eligibleAt := quotaResetAt
 		message := "上游 " + explicitWindow + " 配额窗口已满，等待窗口刷新"
 		if explicitWindow == "5h" || explicitWindow == "7d" {
-			eligibleAt = staggeredAccountQuotaRelease(accountID, quotaResetAt)
-			message = fmt.Sprintf("上游 %s 配额窗口已满，刷新后错峰等待至 %s", explicitWindow, eligibleAt.Local().Format("01/02 15:04"))
+			eligibleAt = policy.quotaReleaseDeadline(accountID, explicitWindow, quotaResetAt)
+			if eligibleAt.After(quotaResetAt) {
+				message = fmt.Sprintf("上游 %s 配额窗口已满，刷新后错峰等待至 %s", explicitWindow, eligibleAt.Local().Format("01/02 15:04"))
+			}
 		}
 		_, err := a.db.Exec(`UPDATE accounts SET
 			consecutive_429 = consecutive_429 + 1,
@@ -569,13 +644,17 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 	}
 	strikes := 1
 	_ = a.db.QueryRow(`SELECT consecutive_429 FROM accounts WHERE id = ?`, accountID).Scan(&strikes)
-	downweightUntil := a.nextAccount5HReset(accountID, response.Header, now)
+	retryAfterAt, hasRetryAfter := retryAfterDeadline(response.Header, now)
+	downweightUntil, downweightMessage := a.transient429DownweightDeadline(accountID, policy, response.Header, now, strikes, retryAfterAt, hasRetryAfter)
 	cooldownSeconds := policy.cooldownForStrikes(strikes)
 	cooldown := time.Duration(cooldownSeconds) * time.Second
 	resetAt := now.Add(cooldown)
-	message := fmt.Sprintf("上游瞬时 429，账号短暂冷却 %d 秒；随后按降峰 RPM 运行至 5h 窗口刷新", int(cooldown/time.Second))
+	if hasRetryAfter {
+		resetAt = retryAfterAt
+	}
+	message := fmt.Sprintf("上游瞬时 429，账号短暂冷却 %s；%s", resetAt.Sub(now).Round(time.Second), downweightMessage)
 	if cooldownSeconds >= policy.cooldownSeconds() {
-		message = fmt.Sprintf("连续 %d 次上游 429，账号短暂冷却 %d 秒；未伪造 5h 配额冷却，随后按降峰 RPM 运行", strikes, int(cooldown/time.Second))
+		message = fmt.Sprintf("连续 %d 次上游 429，账号短暂冷却 %s；%s", strikes, resetAt.Sub(now).Round(time.Second), downweightMessage)
 	}
 	// Never shorten a cooldown already in force: captureAccountUpstreamState runs
 	// first and may have recorded an explicit retry-after of up to an hour, which
@@ -591,6 +670,42 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 		return time.Time{}, false
 	}
 	return downweightUntil, true
+}
+
+func (a *app) transient429DownweightDeadline(accountID int64, policy rateLimitPolicy, headers http.Header, now time.Time, strikes int, retryAfterAt time.Time, hasRetryAfter bool) (time.Time, string) {
+	if hasRetryAfter {
+		return retryAfterAt, fmt.Sprintf("上游已明确返回冷却时间，降峰同步持续至 %s", retryAfterAt.Local().Format("01/02 15:04:05"))
+	}
+	if !policy.DownweightStepped {
+		deadline := a.nextAccount5HReset(accountID, headers, now)
+		return deadline, "随后按降峰 RPM 运行至 5h 窗口刷新"
+	}
+	if utilization, ok := a.recentFiveHourUtilization(accountID, headers, now); ok && utilization >= highQuota429UtilizationPercent {
+		deadline := now.Add(time.Duration(maxRateLimitDownweightMinutes) * time.Minute)
+		return deadline, fmt.Sprintf("5h 用量 %.0f%%，直接采用最大降峰时间 %d 分钟", utilization, maxRateLimitDownweightMinutes)
+	}
+	minutes := policy.downweightMinutesForStrikes(strikes)
+	deadline := now.Add(time.Duration(minutes) * time.Minute)
+	return deadline, fmt.Sprintf("第 %d 次独立 429 按阶梯降峰 %d 分钟", max(1, strikes), minutes)
+}
+
+func (a *app) recentFiveHourUtilization(accountID int64, headers http.Header, now time.Time) (float64, bool) {
+	raw := strings.TrimSpace(headers.Get("anthropic-ratelimit-unified-5h-utilization"))
+	if raw != "" {
+		if value, err := strconv.ParseFloat(raw, 64); err == nil && value >= 0 {
+			return value * 100, true
+		}
+	}
+	var utilization float64
+	var sampledAt any
+	if err := a.db.QueryRow(`SELECT quota_5h_utilization, quota_sampled_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&utilization, &sampledAt); err != nil {
+		return 0, false
+	}
+	sampled, ok := databaseQuotaTime(sampledAt)
+	if !ok || sampled.After(now.Add(time.Minute)) || now.Sub(sampled) > highQuotaSampleFreshness {
+		return 0, false
+	}
+	return utilization, true
 }
 
 func (a *app) nextAccount5HReset(accountID int64, headers http.Header, now time.Time) time.Time {
@@ -614,11 +729,19 @@ func (a *app) nextAccount5HReset(accountID int64, headers http.Header, now time.
 // observe the same response; they must compute the same release instead of
 // extending it on every write.
 func staggeredAccountQuotaRelease(accountID int64, quotaResetAt time.Time) time.Time {
+	return staggeredAccountQuotaReleaseRange(accountID, quotaResetAt, accountQuotaReleaseDelayMin, accountQuotaReleaseDelayMax)
+}
+
+func staggeredAccountQuotaReleaseRange(accountID int64, quotaResetAt time.Time, minimum, maximum time.Duration) time.Time {
+	if minimum < 0 || maximum < minimum {
+		minimum = accountQuotaReleaseDelayMin
+		maximum = accountQuotaReleaseDelayMax
+	}
 	seed := fmt.Sprintf("%d:%d", accountID, quotaResetAt.UTC().Unix())
 	digest := sha256.Sum256([]byte(seed))
-	spanSeconds := uint64((accountQuotaReleaseDelayMax-accountQuotaReleaseDelayMin)/time.Second) + 1
+	spanSeconds := uint64((maximum-minimum)/time.Second) + 1
 	offset := time.Duration(binary.BigEndian.Uint64(digest[:8])%spanSeconds) * time.Second
-	return quotaResetAt.UTC().Add(accountQuotaReleaseDelayMin + offset)
+	return quotaResetAt.UTC().Add(minimum + offset)
 }
 
 type quotaReleaseRepair struct {
@@ -641,17 +764,15 @@ func databaseQuotaTime(value any) (time.Time, bool) {
 	}
 }
 
-// enforceQuotaReleaseStagger upgrades live rows written by older releases.
-// New responses already store the staggered deadline, but legacy rows may
-// still become dispatchable at the exact 5h/7d reset and release a whole cohort
-// at once. This repair only extends an active quota-owned deadline; it never
-// shortens a later deadline or touches cooldowns owned by other subsystems.
+// enforceQuotaReleaseStagger upgrades only legacy 429_cooling rows. New
+// quota_exhausted rows already carry the triggering group's policy and must not
+// be extended on restart when that group has disabled 5h staggering.
 func (a *app) enforceQuotaReleaseStagger() {
 	rows, err := a.db.Query(`SELECT id, rate_limit_window, rate_limit_reset_at,
 		quota_5h_reset_at, quota_7d_reset_at
 		FROM accounts
 		WHERE deleted_at IS NULL
-		AND rate_limit_reason IN ('429_cooling', 'quota_exhausted')
+		AND rate_limit_reason = '429_cooling'
 		AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at > ` + nowSQL)
 	if err != nil {
 		logDatabaseWriteError("read legacy quota release deadlines", err)
@@ -725,7 +846,7 @@ func (a *app) enforceQuotaReleaseStagger() {
 			END,
 			error_message = CASE WHEN auth_error = '' THEN ? ELSE error_message END, updated_at = `+nowSQL+`
 			WHERE id = ? AND deleted_at IS NULL
-			AND rate_limit_reason IN ('429_cooling', 'quota_exhausted')
+			AND rate_limit_reason = '429_cooling'
 			AND (rate_limit_window = ? OR rate_limit_window = '')
 			AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at < ?`,
 			stamp, repair.window, stamp, stamp, message, repair.accountID, repair.window, stamp)
@@ -762,20 +883,48 @@ func (a *app) nextAccountQuotaReset(accountID int64, headers http.Header, now ti
 // It only releases the cooldown that the 429 path itself set: rate_limit_reset_at
 // is also written by the stream-idle guard and the token refresh backoff, and
 // clearing those would discard a cooldown this code does not own.
-func (a *app) clearAccount429State(accountID int64) {
+func (a *app) clearAccount429State(accountID int64) (bool, error) {
 	if accountID <= 0 {
-		return
+		return false, sql.ErrNoRows
 	}
-	_, err := a.db.Exec(`UPDATE accounts SET
+	tx, err := a.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists == 0 {
+		return false, sql.ErrNoRows
+	}
+	result, err := tx.Exec(`UPDATE accounts SET
 		rate_limit_reset_at = CASE WHEN rate_limit_reason IN ('429_cooling', 'quota_exhausted') THEN NULL ELSE rate_limit_reset_at END,
 		rate_limit_window = CASE WHEN rate_limit_reason IN ('429_cooling', 'quota_exhausted') THEN '' ELSE rate_limit_window END,
 		error_message = CASE WHEN rate_limit_reason != '' AND auth_error = '' THEN '' ELSE error_message END,
 		rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
 		rate_limit_downweight_until = NULL, quota_refreshed_at = `+nowSQL+`, updated_at = `+nowSQL+`
 		WHERE id = ? AND deleted_at IS NULL AND (consecutive_429 > 0 OR rate_limit_reason != '' OR rate_limit_downweight_until IS NOT NULL)`, accountID)
-	logDatabaseWriteError("clear account 429 state", err)
-	_, err = a.db.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id = ?`, accountID)
-	logDatabaseWriteError("clear account learned RPM threshold", err)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	result, err = tx.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id = ?`, accountID)
+	if err != nil {
+		return false, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return updated > 0 || deleted > 0, nil
 }
 
 const accountRateLimitSweepInterval = time.Minute
@@ -827,7 +976,14 @@ func (a *app) sweepExpiredRuntimeState() {
 		`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`,
 		`DELETE FROM dispatch_sessions WHERE expires_at <= ` + nowSQL,
 		`DELETE FROM account_model_cooldowns WHERE reset_at <= ` + nowSQL,
-		`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL,
+		`DELETE FROM account_rpm_thresholds
+			WHERE reset_at <= ` + nowSQL + `
+			OR NOT EXISTS (
+				SELECT 1 FROM accounts a
+				WHERE a.id = account_rpm_thresholds.account_id
+				AND a.rate_limit_downweight_until IS NOT NULL
+				AND a.rate_limit_downweight_until > ` + nowSQL + `
+			)`,
 	}
 	for _, query := range queries {
 		for batch := 0; batch < 4; batch++ {
@@ -864,7 +1020,7 @@ func (a *app) sweepAccountRateLimitState() {
 		END,
 		error_message = CASE
 			WHEN auth_error != '' THEN error_message
-			WHEN rate_limit_downweight_until > ` + nowSQL + ` THEN '上游 429，已降低调度权重和峰值 RPM，等待 5h 窗口刷新'
+			WHEN rate_limit_downweight_until > ` + nowSQL + ` THEN '上游 429，已降低调度权重和峰值 RPM，等待当前降峰时间结束'
 			ELSE ''
 		END,
 		updated_at = ` + nowSQL + `

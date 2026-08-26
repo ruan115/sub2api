@@ -112,6 +112,12 @@ func TestAccountStatisticsSubscriptionAndDispatchState(t *testing.T) {
 	}
 
 	a.markAccountReauth(got.ID, "token expired")
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), got.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, 1, ?)`, got.ID, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
 	var dashboard dashboard
 	putJSON(t, handler, http.MethodGet, "/api/dashboard", nil, http.StatusOK, &dashboard)
 	if dashboard.AccountsDead != 1 || dashboard.AccountsActive != 0 {
@@ -127,6 +133,13 @@ func TestAccountStatisticsSubscriptionAndDispatchState(t *testing.T) {
 	}
 	if status != "active" || schedulable != 1 {
 		t.Fatalf("reauthorized account status/schedulable = %s/%d", status, schedulable)
+	}
+	var thresholdCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_thresholds WHERE account_id = ?`, got.ID).Scan(&thresholdCount); err != nil {
+		t.Fatal(err)
+	}
+	if thresholdCount != 0 {
+		t.Fatalf("reauthorized account kept %d learned RPM thresholds", thresholdCount)
 	}
 	var onboardedEvents, invalidatedEvents int
 	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_lifecycle_events WHERE account_id = ? AND event_type = 'onboarded'`, got.ID).Scan(&onboardedEvents); err != nil {

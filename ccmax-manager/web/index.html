@@ -498,7 +498,7 @@
               <label><span>并发数</span><input id="batch-concurrency" type="number" min="1" value="10" /></label>
               <label><span>基础 RPM</span><input id="batch-base-rpm" type="number" min="0" max="10000" value="15" /></label>
               <label><span>RPM 策略</span><select id="batch-rpm-strategy"><option value="tiered">三区模型</option><option value="sticky_exempt">粘性豁免</option><option value="fixed">固定硬限</option></select></label>
-              <label><span>粘性豁免 n</span><input id="batch-rpm-buffer" type="number" min="0" value="0" /><small>固定硬限下粘性会话可超出基础 RPM 的额度</small></label>
+              <label><span>粘性缓冲 n</span><input id="batch-rpm-buffer" type="number" min="0" value="0" /><small id="batch-rpm-buffer-hint">三区模型：n 为粘性缓冲；0 按并发与会话数自动计算</small></label>
               <label><span>调度策略</span><select id="batch-strategy"><option value="">跟随分组</option></select><small>绑定后该账号的限流与算法优先使用策略配置</small></label>
               <fieldset class="group-picker" id="batch-group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
               <div class="span-2 batch-auth-actions"><button class="button primary write-action" id="batch-auth-submit" type="submit"><i data-lucide="key-round"></i><span>开始批量授权</span></button></div>
@@ -1359,7 +1359,7 @@
               min="0"
               value="0"
             /><small id="account-rpm-buffer-hint"
-              >0 使用并发数与基础 RPM 自动计算</small
+              >三区模型：n 为粘性缓冲；0 按并发与会话数自动计算</small
             ></label
           ><label
             ><span>用户消息限速</span
@@ -1658,6 +1658,19 @@
           </div>
           <div class="group-mode-setting">
             <div>
+              <strong>请求格式过滤网</strong>
+              <small title="开启后，在账号调度前拒绝同时携带 temperature 与 top_p 的请求，以及结构非法的 system 内容块；直接返回 HTTP 400，不修改请求、不占用账号、不访问上游">命中采样参数冲突或非法 system 时直接返回 400，不自动修正</small>
+            </div>
+            <label class="compact-toggle" title="请求格式过滤网">
+              <input
+                id="group-request-format-filter"
+                type="checkbox"
+                aria-label="请求格式过滤网" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
               <strong>屏蔽上游限额响应头</strong>
               <small title="开启后不向客户端返回 anthropic-ratelimit-*、anthropic-organization-id、anthropic-workspace-id 和 X-CCMAX-Account。账号利用率超过 fallback 阈值时，Claude Code 会据此把会话自动降级到 Opus 4.8，并会泄露账号邮箱；关闭时全部原样透传">屏蔽 anthropic-ratelimit-* 等头，防止 Claude Code 客户端自动降级到 Opus 4.8 并防止账号信息泄露</small>
             </div>
@@ -1859,8 +1872,8 @@
           </div>
           <div class="group-mode-setting">
             <div>
-              <strong>429 峰值阶梯冷却</strong>
-              <small>开启后，每次独立 429 峰值按配置秒数递增冷却；同一分钟内的并发 429 仍只计算一次</small>
+              <strong>429 短冷却阶梯</strong>
+              <small>开启后，每次独立 429 按配置秒数递增瞬时冷却；同一分钟内的并发 429 仍只计算一次</small>
             </div>
             <label class="compact-toggle" title="429 峰值阶梯冷却">
               <input
@@ -1868,6 +1881,105 @@
                 type="checkbox"
                 aria-label="429 峰值阶梯冷却" />
               <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>429 降峰时长阶梯</strong>
+              <small>开启后，不再默认降峰至 5h 窗口；按次数使用下方分钟数。上游明确返回冷却时间时服从上游，5h 用量达到 90% 时直接降峰 315 分钟</small>
+            </div>
+            <label class="compact-toggle" title="429 降峰时长阶梯">
+              <input
+                id="group-rate-limit-downweight-stepped"
+                type="checkbox"
+                aria-label="429 降峰时长阶梯" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>首次降峰时间</strong>
+              <small>首次独立 429 的降峰时长；后续按递增时间叠加，最大 315 分钟</small>
+            </div>
+            <label class="compact-number" title="首次降峰时间">
+              <input
+                id="group-rate-limit-downweight-base"
+                type="number"
+                min="1"
+                max="315"
+                step="1"
+                value="60"
+                required
+                aria-label="首次降峰分钟数" />
+              <span>分钟</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>降峰递增时间</strong>
+              <small>第 N 次独立 429：首次时间 + (N - 1) × 递增时间，最大 315 分钟</small>
+            </div>
+            <label class="compact-number" title="降峰递增时间">
+              <input
+                id="group-rate-limit-downweight-step"
+                type="number"
+                min="1"
+                max="315"
+                step="1"
+                value="60"
+                required
+                aria-label="降峰递增分钟数" />
+              <span>分钟</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>5h 刷新后错峰</strong>
+              <small>开启后，5h 配额刷新的账号在配置区间内稳定错峰恢复；关闭后在上游刷新时间立即恢复</small>
+            </div>
+            <label class="compact-toggle" title="5h 刷新后错峰">
+              <input
+                id="group-five-hour-stagger-enabled"
+                type="checkbox"
+                checked
+                aria-label="5h 刷新后错峰" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>5h 错峰最小时间</strong>
+              <small>账号最早在配额刷新后多少分钟恢复</small>
+            </div>
+            <label class="compact-number" title="5h 错峰最小时间">
+              <input
+                id="group-five-hour-stagger-min"
+                type="number"
+                min="0"
+                max="315"
+                step="1"
+                value="15"
+                required
+                aria-label="5h 错峰最小分钟数" />
+              <span>分钟</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>5h 错峰最大时间</strong>
+              <small>账号最晚在配额刷新后多少分钟恢复，不得小于最小时间</small>
+            </div>
+            <label class="compact-number" title="5h 错峰最大时间">
+              <input
+                id="group-five-hour-stagger-max"
+                type="number"
+                min="0"
+                max="315"
+                step="1"
+                value="30"
+                required
+                aria-label="5h 错峰最大分钟数" />
+              <span>分钟</span>
             </label>
           </div>
           <div class="group-mode-setting">
@@ -2017,12 +2129,12 @@
               <option value="sticky_exempt">粘性豁免</option>
             </select></label
           ><label
-            ><span>粘性豁免 n</span
+            ><span>粘性缓冲 n</span
             ><input
               id="strategy-buffer"
               type="number"
               min="0"
-              value="0" /><small>固定硬限下粘性会话可超出的额度</small></label
+              value="0" /><small id="strategy-buffer-hint">固定硬限：最大 RPM = 基础 RPM + n；n=0 表示完全硬限</small></label
           ><label
             ><span>调度算法</span
             ><select id="strategy-dispatch-mode">

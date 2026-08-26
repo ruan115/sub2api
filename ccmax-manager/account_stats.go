@@ -980,6 +980,9 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 	if updated, _ := result.RowsAffected(); updated == 0 {
 		return sql.ErrNoRows
 	}
+	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id = ?`, accountID); err != nil {
+		return err
+	}
 	if err := setAccountGroups(tx, accountID, input.GroupIDs, 50); err != nil {
 		return err
 	}

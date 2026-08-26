@@ -47,6 +47,7 @@ func (a *app) migrateMySQL() error {
 			anthropic_beta_passthrough_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			reject_anthropic_downgrade_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				reject_distillation_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				request_format_filter_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				quota_header_masking_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				cache_creation_detail_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
@@ -55,6 +56,12 @@ func (a *app) migrateMySQL() error {
 				rate_limit_wait_seconds INT NOT NULL DEFAULT 120,
 				rate_limit_stepped_cooldown_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				rate_limit_cooldown_step_seconds INT NOT NULL DEFAULT 30,
+				rate_limit_downweight_stepped_cooldown_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				rate_limit_downweight_base_minutes INT NOT NULL DEFAULT 60,
+				rate_limit_downweight_step_minutes INT NOT NULL DEFAULT 60,
+				five_hour_release_stagger_enabled TINYINT(1) NOT NULL DEFAULT 1,
+				five_hour_release_stagger_min_minutes INT NOT NULL DEFAULT 15,
+				five_hour_release_stagger_max_minutes INT NOT NULL DEFAULT 30,
 				capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INT NOT NULL DEFAULT 30,
 			strategy_required_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -555,7 +562,37 @@ func (a *app) migrateMySQL() error {
 	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_cooldown_step_seconds = ? WHERE rate_limit_cooldown_step_seconds < 1 OR rate_limit_cooldown_step_seconds > ?`, defaultRateLimitCooldownStepSeconds, maxRateLimitCooldownStepSeconds); err != nil {
 		return fmt.Errorf("normalise MySQL group 429 cooldown step seconds: %w", err)
 	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_downweight_stepped_cooldown_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_downweight_base_minutes", "INT NOT NULL DEFAULT 60"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_downweight_step_minutes", "INT NOT NULL DEFAULT 60"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_downweight_base_minutes = ? WHERE rate_limit_downweight_base_minutes < ? OR rate_limit_downweight_base_minutes > ?`, defaultRateLimitDownweightBaseMinutes, minRateLimitDownweightMinutes, maxRateLimitDownweightMinutes); err != nil {
+		return fmt.Errorf("normalise MySQL group 429 downweight base minutes: %w", err)
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_downweight_step_minutes = ? WHERE rate_limit_downweight_step_minutes < ? OR rate_limit_downweight_step_minutes > ?`, defaultRateLimitDownweightStepMinutes, minRateLimitDownweightMinutes, maxRateLimitDownweightMinutes); err != nil {
+		return fmt.Errorf("normalise MySQL group 429 downweight step minutes: %w", err)
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "five_hour_release_stagger_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "five_hour_release_stagger_min_minutes", "INT NOT NULL DEFAULT 15"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "five_hour_release_stagger_max_minutes", "INT NOT NULL DEFAULT 30"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET five_hour_release_stagger_min_minutes = ?, five_hour_release_stagger_max_minutes = ? WHERE five_hour_release_stagger_min_minutes < 0 OR five_hour_release_stagger_max_minutes < five_hour_release_stagger_min_minutes OR five_hour_release_stagger_max_minutes > ?`, defaultFiveHourReleaseStaggerMinMinutes, defaultFiveHourReleaseStaggerMaxMinutes, maxFiveHourReleaseStaggerMinutes); err != nil {
+		return fmt.Errorf("normalise MySQL group 5h release stagger minutes: %w", err)
+	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "quota_header_masking_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "request_format_filter_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "cache_creation_detail_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {

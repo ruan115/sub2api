@@ -754,6 +754,9 @@ func (a *app) saveClaudeTokenWithCondition(accountID int64, authType string, tok
 			err = errAccountTokenLeaseLost
 		}
 	}
+	if err == nil && !preserveRefresh {
+		_, err = a.db.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id = ?`, accountID)
+	}
 	if err == nil && (!previousOnboarded.Valid || previousInvalidated.Valid) {
 		a.recordAccountLifecycle(accountID, "onboarded")
 	}

@@ -31,6 +31,7 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 
 	var contentText string
 	var reasoningText string
+	var reasoningSignature string
 	var toolCalls []ChatToolCall
 
 	for _, item := range resp.Output {
@@ -51,6 +52,9 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 				},
 			})
 		case "reasoning":
+			if item.EncryptedContent != "" {
+				reasoningSignature = item.EncryptedContent
+			}
 			for _, s := range item.Summary {
 				if s.Type == "summary_text" && s.Text != "" {
 					reasoningText += s.Text
@@ -71,6 +75,9 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 	}
 	if reasoningText != "" {
 		msg.ReasoningContent = reasoningText
+	}
+	if reasoningSignature != "" {
+		msg.ReasoningSignature = reasoningSignature
 	}
 
 	finishReason := responsesStatusToChatFinishReason(resp.Status, resp.IncompleteDetails, toolCalls)
@@ -147,6 +154,8 @@ func ResponsesEventToChatChunks(evt *ResponsesStreamEvent, state *ResponsesEvent
 		return resToChatHandleTextDelta(evt, state)
 	case "response.output_item.added":
 		return resToChatHandleOutputItemAdded(evt, state)
+	case "response.output_item.done":
+		return resToChatHandleOutputItemDone(evt, state)
 	case "response.function_call_arguments.delta",
 		// custom/freeform 工具（如新版 apply_patch）的输入增量与 function_call 参数增量同形，
 		// 均按 OutputIndex 累加到对应工具调用。
@@ -260,6 +269,14 @@ func resToChatHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 			},
 		}},
 	})}
+}
+
+func resToChatHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	if evt.Item == nil || evt.Item.Type != "reasoning" || evt.Item.EncryptedContent == "" {
+		return nil
+	}
+	signature := evt.Item.EncryptedContent
+	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{ReasoningSignature: &signature})}
 }
 
 func resToChatHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {

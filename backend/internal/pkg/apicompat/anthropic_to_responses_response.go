@@ -33,15 +33,19 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "thinking":
-			if block.Thinking != "" {
-				outputs = append(outputs, ResponsesOutput{
-					Type: "reasoning",
-					ID:   generateItemID(),
-					Summary: []ResponsesSummary{{
+			if block.Thinking != "" || block.Signature != "" {
+				item := ResponsesOutput{
+					Type:             "reasoning",
+					ID:               generateItemID(),
+					EncryptedContent: block.Signature,
+				}
+				if block.Thinking != "" {
+					item.Summary = []ResponsesSummary{{
 						Type: "summary_text",
 						Text: block.Thinking,
-					}},
-				})
+					}}
+				}
+				outputs = append(outputs, item)
 			}
 		case "text":
 			if block.Text != "" {
@@ -161,9 +165,10 @@ type AnthropicEventToResponsesState struct {
 	CurrentName   string
 
 	// Content of the currently open item, folded into Outputs when it closes.
-	CurrentContent []ResponsesContentPart // message
-	CurrentArgs    string                 // function_call
-	CurrentSummary string                 // reasoning
+	CurrentContent          []ResponsesContentPart // message
+	CurrentArgs             string                 // function_call
+	CurrentSummary          string                 // reasoning
+	CurrentEncryptedContent string                 // reasoning signature
 
 	// Outputs accumulates every closed output item so that response.completed
 	// can carry the full output list. The OpenAI SDK's get_final_response()
@@ -280,6 +285,7 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 		state.CurrentItemID = generateItemID()
 		state.CurrentItemType = "reasoning"
 		state.ContentIndex = 0
+		state.CurrentEncryptedContent = evt.ContentBlock.Signature
 
 		events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{
 			OutputIndex: state.OutputIndex,
@@ -391,7 +397,9 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 		})}
 
 	case "signature_delta":
-		// Anthropic signature deltas have no Responses equivalent; skip
+		// Responses carries provider reasoning signatures as encrypted_content.
+		// Keep the exact upstream bytes and attach them to output_item.done.
+		state.CurrentEncryptedContent += evt.Delta.Signature
 		return nil
 	}
 
@@ -520,6 +528,7 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 		}
 		item.Arguments = args
 	case "reasoning":
+		item.EncryptedContent = state.CurrentEncryptedContent
 		if state.CurrentSummary != "" {
 			item.Summary = []ResponsesSummary{{Type: "summary_text", Text: state.CurrentSummary}}
 		}
@@ -534,6 +543,7 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 	state.CurrentContent = nil
 	state.CurrentArgs = ""
 	state.CurrentSummary = ""
+	state.CurrentEncryptedContent = ""
 	state.TextAccum = ""
 	state.OutputIndex++
 	state.ContentIndex = 0
