@@ -73,6 +73,7 @@ type proxyRecord struct {
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 	ArchivedAt         string `json:"archived_at,omitempty"`
+	ReuseApprovedAt    string `json:"reuse_approved_at,omitempty"`
 }
 
 type parsedProxy struct {
@@ -174,6 +175,7 @@ func (a *app) migrateProxyFeatures() error {
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_rpm ON account_rpm_events(account_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_account_rpm_created ON account_rpm_events(created_at, account_id)`,
 		`CREATE TABLE IF NOT EXISTS dispatch_sessions (
 			session_hash TEXT NOT NULL,
 			api_key_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
@@ -181,6 +183,7 @@ func (a *app) migrateProxyFeatures() error {
 			expires_at TEXT NOT NULL,
 			PRIMARY KEY (session_hash, api_key_id)
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_dispatch_sessions_expiry ON dispatch_sessions(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS account_inflight (
 			account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
 			requests INTEGER NOT NULL DEFAULT 0 CHECK (requests >= 0)
@@ -207,6 +210,9 @@ func (a *app) migrateProxyFeatures() error {
 		return err
 	}
 	if err := addColumnIfMissing(a.db, "proxy_pools", "single_use_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "proxies", "reuse_approved_at", "TEXT"); err != nil {
 		return err
 	}
 	if _, err := a.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_pools_system_kind ON proxy_pools(system_kind) WHERE system_kind != ''`); err != nil {
@@ -465,11 +471,11 @@ func proxyNotQuarantinedPredicate(alias string) string {
 }
 
 func proxyIdentityUnusedPredicate(alias string) string {
-	return `NOT EXISTS (SELECT 1 FROM proxy_account_history used_history
+	return `(` + alias + `.reuse_approved_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM proxy_account_history used_history
 		JOIN proxies used_proxy ON used_proxy.id = used_history.proxy_id
 		WHERE used_proxy.protocol = ` + alias + `.protocol AND used_proxy.host = ` + alias + `.host
 		AND used_proxy.port = ` + alias + `.port AND used_proxy.username = ` + alias + `.username
-		AND used_proxy.password = ` + alias + `.password)`
+		AND used_proxy.password = ` + alias + `.password))`
 }
 
 func proxyAvailableToAccountPredicate(proxyAlias, poolAlias string) string {
@@ -692,7 +698,7 @@ const proxySelect = `SELECT x.id, x.pool_id, p.name, x.name, x.protocol, x.host,
 		JOIN proxies used_proxy ON used_proxy.id = used_history.proxy_id
 		WHERE used_proxy.protocol = x.protocol AND used_proxy.host = x.host AND used_proxy.port = x.port
 		AND used_proxy.username = x.username AND used_proxy.password = x.password),
-	p.single_use_enabled, x.created_at, x.updated_at,
+	p.single_use_enabled, x.created_at, x.updated_at, x.reuse_approved_at,
 	CASE WHEN p.system_kind = 'dead' THEN x.updated_at ELSE x.deleted_at END
 	FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id`
 
@@ -700,12 +706,13 @@ func scanProxy(row scanner) (proxyRecord, error) {
 	var item proxyRecord
 	var latency sql.NullInt64
 	var lastTest sql.NullString
-	var archivedAt sql.NullString
+	var archivedAt, reuseApprovedAt sql.NullString
 	var singleUseEnabled int
-	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.HistoricalAccounts, &item.UsedAccountCount, &singleUseEnabled, &item.CreatedAt, &item.UpdatedAt, &archivedAt)
+	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.HistoricalAccounts, &item.UsedAccountCount, &singleUseEnabled, &item.CreatedAt, &item.UpdatedAt, &reuseApprovedAt, &archivedAt)
 	item.LatencyMS = nullIntPointer(latency)
 	item.LastTestAt = nullText(lastTest)
 	item.ArchivedAt = nullText(archivedAt)
+	item.ReuseApprovedAt = nullText(reuseApprovedAt)
 	item.SingleUseEnabled = singleUseEnabled == 1
 	return item, err
 }
@@ -774,6 +781,79 @@ func (a *app) handleArchivedProxies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (a *app) handleProxyRestore(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		PoolID int64 `json:"pool_id"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.PoolID <= 0 {
+		writeError(w, http.StatusBadRequest, "target proxy pool is required")
+		return
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	var protocol, host, username, password, systemKind string
+	var port int
+	var deletedAt sql.NullString
+	if err := tx.QueryRow(`SELECT x.protocol, x.host, x.port, x.username, x.password, p.system_kind, x.deleted_at
+		FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id WHERE x.id = ?`, id).Scan(&protocol, &host, &port, &username, &password, &systemKind, &deletedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "archived proxy not found")
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+	if systemKind != deadProxyPoolKind && !deletedAt.Valid {
+		writeError(w, http.StatusConflict, "proxy is not archived")
+		return
+	}
+	var targetExists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = '' AND status = 'active'`, input.PoolID).Scan(&targetExists); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if targetExists == 0 {
+		writeError(w, http.StatusConflict, "target proxy pool is unavailable")
+		return
+	}
+	var duplicate int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies WHERE id != ? AND deleted_at IS NULL
+		AND protocol = ? AND host = ? AND port = ? AND username = ? AND password = ?`, id, protocol, host, port, username, password).Scan(&duplicate); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if duplicate > 0 {
+		writeError(w, http.StatusConflict, "the same proxy endpoint already exists in an active pool")
+		return
+	}
+	if _, err := tx.Exec(`UPDATE proxies SET pool_id = ?, status = 'active', last_error = '', deleted_at = NULL,
+		reuse_approved_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, input.PoolID, id); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	item, err := scanProxy(a.db.QueryRow(proxySelect+` WHERE x.id = ? AND x.deleted_at IS NULL AND p.system_kind = ''`, id))
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (a *app) handleProxyBatch(w http.ResponseWriter, r *http.Request) {
@@ -1747,14 +1827,16 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 }
 
 func recordProxyAssignment(tx *databaseTx, proxyID, accountID int64) error {
-	if tx.dialect != dialectMySQL {
-		return nil
+	if tx.dialect == dialectMySQL {
+		if _, err := tx.Exec(`INSERT INTO proxy_account_history
+			(proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
+			VALUES (?, ?, `+nowSQL+`, `+nowSQL+`, 1)
+			ON DUPLICATE KEY UPDATE
+				last_bound_at = VALUES(last_bound_at),
+				bind_count = proxy_account_history.bind_count + 1`, proxyID, accountID); err != nil {
+			return err
+		}
 	}
-	_, err := tx.Exec(`INSERT INTO proxy_account_history
-		(proxy_id, account_id, first_bound_at, last_bound_at, bind_count)
-		VALUES (?, ?, `+nowSQL+`, `+nowSQL+`, 1)
-		ON DUPLICATE KEY UPDATE
-			last_bound_at = VALUES(last_bound_at),
-			bind_count = proxy_account_history.bind_count + 1`, proxyID, accountID)
+	_, err := tx.Exec(`UPDATE proxies SET reuse_approved_at = NULL WHERE id = ?`, proxyID)
 	return err
 }

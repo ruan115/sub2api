@@ -112,12 +112,39 @@ func TestStrategyObservationReportsPendingAccountsForConcentrated(t *testing.T) 
 	if strategy.AccountsPending != 1 {
 		t.Fatalf("pending accounts = %d, want 1", strategy.AccountsPending)
 	}
+	if strategy.RPMCapacity != 10 || strategy.RPMCapacityUnlimited {
+		t.Fatalf("rpm capacity = %d unlimited=%v, want 10/false", strategy.RPMCapacity, strategy.RPMCapacityUnlimited)
+	}
 	states := map[string]string{}
 	for _, account := range strategy.Accounts {
 		states[account.Name] = account.Dispatch
 	}
 	if states["cc-active"] != "active" || states["cc-idle"] != "pending" {
 		t.Fatalf("account dispatch states = %+v", states)
+	}
+}
+
+func TestStrategyObservationUsesTemporaryRPMForCapacity(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "temporary-capacity", "rpm_limit": 8, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	limited := createGatewayTestAccount(t, a, handler, "limited-capacity", "https://limited.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	createGatewayTestAccount(t, a, handler, "normal-capacity", "https://normal.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, 3, strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes'))`, limited.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []strategyObservation
+	putJSON(t, handler, http.MethodGet, "/api/strategies/observe", nil, http.StatusOK, &observed)
+	if len(observed) != 1 {
+		t.Fatalf("observations = %d, want 1", len(observed))
+	}
+	if observed[0].RPMCapacity != 11 || observed[0].RPMCapacityUnlimited {
+		t.Fatalf("rpm capacity = %d unlimited=%v, want 11/false", observed[0].RPMCapacity, observed[0].RPMCapacityUnlimited)
 	}
 }
 
@@ -141,8 +168,8 @@ func TestStrategyObservationExcludesUnavailableAccounts(t *testing.T) {
 		t.Fatalf("observations = %d, want 1", len(observed))
 	}
 	strategy := observed[0]
-	if strategy.BoundAccounts != 1 || strategy.AccountsAlive != 1 || len(strategy.Accounts) != 1 {
-		t.Fatalf("available strategy accounts = bound:%d alive:%d rows:%d, want 1/1/1", strategy.BoundAccounts, strategy.AccountsAlive, len(strategy.Accounts))
+	if strategy.BoundAccounts != 2 || strategy.AccountsAlive != 1 || len(strategy.Accounts) != 1 {
+		t.Fatalf("strategy accounts = bound:%d alive:%d observation rows:%d, want 2/1/1", strategy.BoundAccounts, strategy.AccountsAlive, len(strategy.Accounts))
 	}
 	if strategy.Accounts[0].AccountID != available.ID {
 		t.Fatalf("observed account = %d, want available account %d", strategy.Accounts[0].AccountID, available.ID)

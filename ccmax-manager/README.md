@@ -41,10 +41,11 @@
 ## 本地运行
 
 ```bash
+CCMAX_MYSQL_DSN='ccmax:password@tcp(127.0.0.1:3306)/ccmax?charset=utf8mb4&collation=utf8mb4_unicode_ci&timeout=5s&readTimeout=30s&writeTimeout=30s' \
 go run .
 ```
 
-默认地址为 `http://127.0.0.1:8088`，数据库为当前目录的 `ccmax-manager.db`。首次启动会创建管理员：
+默认地址为 `http://127.0.0.1:8088`。生产服务只使用 MySQL，缺少 `CCMAX_MYSQL_DSN` 时会拒绝启动，不会回退 SQLite。首次启动会创建管理员：
 
 ```text
 用户名：admin
@@ -55,7 +56,7 @@ go run .
 
 ```bash
 CCMAX_ADDR=0.0.0.0:8088 \
-CCMAX_DATA=/data/ccmax-manager.db \
+CCMAX_MYSQL_DSN='ccmax:password@tcp(127.0.0.1:3306)/ccmax?charset=utf8mb4&collation=utf8mb4_unicode_ci&timeout=5s&readTimeout=30s&writeTimeout=30s' \
 CCMAX_ADMIN_USER=admin \
 CCMAX_ADMIN_PASSWORD='replace-with-a-strong-password' \
 go run .
@@ -64,7 +65,8 @@ go run .
 | 变量                         | 默认值             | 说明                                          |
 | ---------------------------- | ------------------ | --------------------------------------------- |
 | `CCMAX_ADDR`                 | `127.0.0.1:8088`   | HTTP 监听地址                                 |
-| `CCMAX_DATA`                 | `ccmax-manager.db` | SQLite 数据文件                               |
+| `CCMAX_MYSQL_DSN`            | 无，必填           | MySQL DSN；生产服务唯一持久化数据库           |
+| `CCMAX_REDIS_ADDR`           | 空                 | 可选 Redis 地址，仅用于临时调度协调           |
 | `CCMAX_ADMIN_USER`           | `admin`            | 首次初始化的管理员用户名                      |
 | `CCMAX_ADMIN_PASSWORD`       | `ccmax-admin`      | 首次初始化的管理员密码                        |
 | `CCMAX_AUTH_DISABLED`        | `false`            | 仅用于本机测试；设为 `1` 会关闭管理端认证     |
@@ -179,9 +181,17 @@ host:port@user:pass
 ```bash
 docker build -t ccmax-manager .
 docker run --rm -p 8088:8088 \
-  -v ccmax-data:/data \
+  -e CCMAX_MYSQL_DSN='ccmax:password@tcp(mysql:3306)/ccmax?charset=utf8mb4&collation=utf8mb4_unicode_ci&timeout=5s&readTimeout=30s&writeTimeout=30s' \
   -e CCMAX_ADMIN_PASSWORD='replace-with-a-strong-password' \
   ccmax-manager
+```
+
+历史 SQLite 数据只能通过离线迁移入口导入 MySQL，不能作为服务运行库：
+
+```bash
+CCMAX_MIGRATE_FROM_SQLITE=/path/to/ccmax-snapshot.db \
+CCMAX_MYSQL_DSN='ccmax:password@tcp(127.0.0.1:3306)/ccmax?charset=utf8mb4&collation=utf8mb4_unicode_ci' \
+go run -tags sqlite_migrate .
 ```
 
 ## 验证

@@ -7,7 +7,15 @@ const state = {
   strategiesLoaded: false,
   strategiesLoading: null,
   accounts: [],
+  deadAccounts: [],
   archivedAccounts: [],
+  strategyAccountOptions: [],
+  accountStatusCounts: {},
+  deadCounts: { pending: 0, archived: 0 },
+  deadSummary: null,
+  accountSort: { key: "id", order: "asc" },
+  deadSort: { key: "error_time", order: "desc" },
+  tableFreeze: {},
   accountSummary: null,
   realtime: null,
   realtimeLoading: null,
@@ -37,6 +45,7 @@ const state = {
   deadSearch: "",
   accountsLoadedAt: 0,
   accountsLoading: null,
+  deadAccountsLoading: null,
   accountAutoRefresh: true,
   breakdown: "group",
 	proxyPoolFilter: "",
@@ -53,6 +62,7 @@ const state = {
   selectedStrategyAccountIDs: new Set(),
   strategyAccountMode: "bind",
   strategyAccountID: "",
+  strategyAccountGroup: "",
 };
 
 const viewMeta = {
@@ -114,6 +124,7 @@ const uiChoices = new Map();
 const sidebarStorageKey = "ccmax.sidebar.collapsed";
 const accountAutoRefreshStorageKey = "ccmax.accounts.auto-refresh";
 const accountColumnWidthsStorageKey = "ccmax.accounts.column-widths";
+const tableFreezeStorageKey = "ccmax.table-freeze.v1";
 const accountAutoRefreshInterval = 30000;
 const realtimeRefreshInterval = 5000;
 const paginationTables = {
@@ -158,7 +169,7 @@ function renderPagination(key, total, page, pageSize, totalPages) {
   }
   footer.hidden = total === 0;
   footer.innerHTML = `
-    <span class="pagination-summary">共 <b>${total.toLocaleString("zh-CN")}</b> 条</span>
+    <div class="pagination-meta"><span class="pagination-summary">共 <b>${total.toLocaleString("zh-CN")}</b> 条</span><button type="button" class="pagination-freeze" data-table-freeze="${key}" title="固定前后行"><i data-lucide="pin"></i></button></div>
     <div class="pagination-controls">
       <label class="pagination-size"><span>每页</span><select data-pagination-size="${key}" aria-label="${key} 每页条数">${[10, 20, 50, 100]
         .map(
@@ -171,6 +182,60 @@ function renderPagination(key, total, page, pageSize, totalPages) {
       <button type="button" data-pagination-go="${key}" title="跳转" aria-label="跳转到指定页"><i data-lucide="arrow-right-to-line"></i></button>
       <button type="button" data-pagination-key="${key}" data-page-step="1" title="下一页" aria-label="下一页" ${page >= totalPages ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>
     </div>`;
+  refreshIcons();
+  window.requestAnimationFrame(() => applyTableFreeze(key));
+}
+
+function loadTableFreezeSettings() {
+  try {
+    state.tableFreeze = JSON.parse(localStorage.getItem(tableFreezeStorageKey) || "{}") || {};
+  } catch {
+    state.tableFreeze = {};
+  }
+}
+
+function applyTableFreeze(key) {
+  const config = paginationTables[key];
+  const body = config ? document.getElementById(config.body) : null;
+  const table = body?.closest("table");
+  const wrap = table?.closest(".table-wrap");
+  if (!body || !table || !wrap) return;
+  const rows = [...body.rows];
+  rows.forEach((row) => {
+    row.classList.remove("frozen-top-row", "frozen-bottom-row");
+    row.style.removeProperty("--frozen-row-offset");
+  });
+  const setting = state.tableFreeze[key] || {};
+  const topCount = Math.min(Math.max(0, Number(setting.top || 0)), rows.length);
+  const bottomCount = Math.min(
+    Math.max(0, Number(setting.bottom || 0)),
+    Math.max(0, rows.length - topCount),
+  );
+  wrap.classList.toggle("has-frozen-rows", topCount + bottomCount > 0);
+  let topOffset = table.tHead?.getBoundingClientRect().height || 0;
+  rows.slice(0, topCount).forEach((row) => {
+    row.classList.add("frozen-top-row");
+    row.style.setProperty("--frozen-row-offset", `${topOffset}px`);
+    topOffset += row.getBoundingClientRect().height;
+  });
+  let bottomOffset = 0;
+  rows
+    .slice(rows.length - bottomCount)
+    .reverse()
+    .forEach((row) => {
+      row.classList.add("frozen-bottom-row");
+      row.style.setProperty("--frozen-row-offset", `${bottomOffset}px`);
+      bottomOffset += row.getBoundingClientRect().height;
+    });
+}
+
+function openTableFreezeDialog(key) {
+  const setting = state.tableFreeze[key] || {};
+  $("#table-freeze-key").value = key;
+  $("#table-freeze-top").value = Number(setting.top || 0);
+  $("#table-freeze-bottom").value = Number(setting.bottom || 0);
+  $("#table-freeze-title").textContent = `固定表格行 · ${key}`;
+  showInitializedDialog("#table-freeze-dialog");
   refreshIcons();
 }
 function paginatedItems(key, items) {
@@ -219,7 +284,9 @@ function paginationParams(key) {
 }
 
 async function loadServerPage(key) {
-  if (key === "usage") return loadBilling();
+  if (key === "accounts") return loadAccountPage();
+  if (key === "dead") return loadDeadPage();
+  if (key === "usage") return loadUsagePage();
   if (key === "audit") return loadAudit();
   if (key === "cacheAudit") return loadCacheAudit();
   if (key === "authorization") return loadAuthorization();
@@ -272,6 +339,7 @@ function initializeResizableTable() {
   table.dataset.resizableReady = "true";
   const minimumWidths = {
     select: 36,
+    id: 48,
     account: 140,
     status: 88,
     subscription: 64,
@@ -280,6 +348,8 @@ function initializeResizableTable() {
     quota: 186,
     requests: 48,
     onboarded: 72,
+    reauthorized: 78,
+    "reauth-count": 58,
     survival: 70,
     "last-used": 72,
     actions: 84,
@@ -586,6 +656,7 @@ function showApp() {
 async function boot() {
   initUIComponents();
   initializeSidebar();
+  loadTableFreezeSettings();
   try {
     const session = await api("/api/auth/session");
     if (!session.authenticated) {
@@ -631,6 +702,10 @@ function configureRole() {
 async function loadCore() {
   $("#connection-status").textContent = "同步中";
   try {
+    const health = await api("/api/health");
+    $("#database-engine").textContent = String(
+      health.database || "database",
+    ).toUpperCase();
     if (canView("overview")) {
       state.dashboard = await api("/api/dashboard");
       state.purposes = state.dashboard.purposes;
@@ -646,34 +721,12 @@ async function loadCore() {
     if (state.groups.length) hydrateGroupControls();
     if (canView("billing") && !canView("overview"))
       state.purposes = await api("/api/purposes");
-    const inventoryLoads = [];
-    if (canView("accounts") || canView("dead") || canView("onboarding"))
-      inventoryLoads.push(loadAccounts());
-    if (canView("proxies") || canView("onboarding"))
-      inventoryLoads.push(loadProxyInventory());
-    await Promise.all(inventoryLoads);
-    if (canView("pricing")) {
-      [state.prices, state.pricingSync] = await Promise.all([
-        api("/api/prices"),
-        api("/api/prices/sync-status"),
-      ]);
-      renderPriceTable();
-      renderPriceSync();
-    }
-    if (canView("access")) {
-      if (state.me.role === "user") {
-        state.me = await api("/api/me");
-        $("#identity-name").textContent = state.me.name || state.me.username;
-      }
-      state.keys = await api("/api/api-keys");
-      if (isAdmin()) state.users = await api("/api/users");
-      renderAccess();
-    } else if (canView("billing")) {
-      // The ledger needs the key list for its SK filter even when the caller
-      // cannot open the access page.
-      state.keys = await api("/api/api-keys");
-    }
     populateSelects();
+    if (state.view === "accounts") await loadAccountPage();
+    if (state.view === "dead") await loadDeadPage();
+    if (state.view === "proxies") await loadProxyInventory();
+    if (state.view === "pricing") await loadPricingInventory();
+    if (state.view === "access") await loadAccessInventory();
     $("#connection-status").textContent = "运行正常";
     refreshIcons();
   } catch (error) {
@@ -682,40 +735,100 @@ async function loadCore() {
   }
 }
 
-async function loadAccounts() {
-  if (!canView("accounts") && !canView("dead") && !canView("onboarding"))
-    return;
+async function loadAccountPage() {
+  if (!canView("accounts")) return;
   if (state.accountsLoading) return state.accountsLoading;
   state.accountsLoading = (async () => {
-    const [accounts, archivedAccounts] = await Promise.all([
-      api("/api/accounts"),
-      canView("dead") ? api("/api/accounts?archived=only") : Promise.resolve([]),
-    ]);
-    state.accounts = accounts;
-    state.archivedAccounts = archivedAccounts;
-    const accountIDs = new Set(state.accounts.map((item) => item.id));
+    const params = new URLSearchParams({
+      ...paginationParams("accounts"),
+      paginated: "1",
+      sort: state.accountSort.key,
+      order: state.accountSort.order,
+    });
+    if (state.accountGroup) params.set("group_id", state.accountGroup);
+    if (state.accountStatus) params.set("status", state.accountStatus);
+    if (state.accountSearch) params.set("search", state.accountSearch);
+    const payload = await api(`/api/accounts?${params}`);
+    state.accounts = payload.items;
+    state.accountStatusCounts = payload.status_counts || {};
+    setServerPagination("accounts", payload);
+    const visibleIDs = new Set(state.accounts.map((item) => item.id));
     state.selectedAccountIDs = new Set(
-      [...state.selectedAccountIDs].filter((id) => accountIDs.has(id)),
-    );
-    const deadIDs = new Set(
-      state.accounts
-        .filter((item) => item.dispatch_status === "error")
-        .map((item) => item.id),
-    );
-    state.selectedDeadAccountIDs = new Set(
-      [...state.selectedDeadAccountIDs].filter((id) => deadIDs.has(id)),
+      [...state.selectedAccountIDs].filter((id) => visibleIDs.has(id)),
     );
     state.accountsLoadedAt = performance.now();
     renderAccounts();
-    renderDeadAccounts();
-    if (canView("accounts"))
-      await Promise.all([loadAccountSummary(), loadRealtime()]);
+    await Promise.all([loadAccountSummary(), loadRealtime()]);
   })();
   try {
     return await state.accountsLoading;
   } finally {
     state.accountsLoading = null;
   }
+}
+
+async function loadDeadPage() {
+  if (!canView("dead")) return;
+  if (state.deadAccountsLoading) return state.deadAccountsLoading;
+  state.deadAccountsLoading = (async () => {
+    const params = new URLSearchParams({
+      ...paginationParams("dead"),
+      paginated: "1",
+      sort: state.deadSort.key,
+      order: state.deadSort.order,
+    });
+    if (state.deadSearch) params.set("search", state.deadSearch);
+    if (state.deadStatus === "archived") params.set("archived", "only");
+    else params.set("status", "error");
+    const opposite = new URLSearchParams({
+      paginated: "1",
+      page: "1",
+      page_size: "1",
+    });
+    if (state.deadStatus === "archived") opposite.set("status", "error");
+    else opposite.set("archived", "only");
+    const [payload, other] = await Promise.all([
+      api(`/api/accounts?${params}`),
+      api(`/api/accounts?${opposite}`),
+    ]);
+    if (state.deadStatus === "archived") {
+      state.archivedAccounts = payload.items;
+      state.deadCounts.archived = Number(payload.total || 0);
+      state.deadCounts.pending = Number(other.total || 0);
+    } else {
+      state.deadAccounts = payload.items;
+      state.deadCounts.pending = Number(payload.total || 0);
+      state.deadCounts.archived = Number(other.total || 0);
+    }
+    const visibleIDs = new Set(
+      (state.deadStatus === "archived"
+        ? state.archivedAccounts
+        : state.deadAccounts
+      ).map((item) => item.id),
+    );
+    state.selectedDeadAccountIDs = new Set(
+      [...state.selectedDeadAccountIDs].filter((id) => visibleIDs.has(id)),
+    );
+    state.deadSummary = payload.summary || null;
+    setServerPagination("dead", payload);
+    renderDeadAccounts();
+  })();
+  try {
+    return await state.deadAccountsLoading;
+  } finally {
+    state.deadAccountsLoading = null;
+  }
+}
+
+async function loadAccounts() {
+  if (state.view === "dead") return loadDeadPage();
+  return loadAccountPage();
+}
+
+async function loadStrategyAccountOptions() {
+  const items = await api("/api/accounts");
+  state.strategyAccountOptions = items;
+  return items;
 }
 
 async function loadProxyInventory() {
@@ -725,6 +838,28 @@ async function loadProxyInventory() {
 		canView("proxies") ? api("/api/proxies/archived") : Promise.resolve([]),
 	]);
   if (canView("proxies")) renderProxies();
+}
+
+async function loadPricingInventory() {
+  if (!canView("pricing")) return;
+  [state.prices, state.pricingSync] = await Promise.all([
+    api("/api/prices"),
+    api("/api/prices/sync-status"),
+  ]);
+  renderPriceTable();
+  renderPriceSync();
+}
+
+async function loadAccessInventory() {
+  if (!canView("access")) return;
+  if (state.me.role === "user") {
+    state.me = await api("/api/me");
+    $("#identity-name").textContent = state.me.name || state.me.username;
+  }
+  state.keys = await api("/api/api-keys");
+  if (isAdmin()) state.users = await api("/api/users");
+  renderAccess();
+  populateSelects();
 }
 
 async function loadRealtime() {
@@ -800,16 +935,18 @@ function initializeAccountAutoRefresh() {
     )
       return;
     try {
-      await loadAccounts();
+      if (state.view === "dead") await loadDeadPage();
+      else if (state.view === "accounts") await loadAccountPage();
     } catch {
       // Keep the last good account snapshot; the next interval retries.
     }
   }, accountAutoRefreshInterval);
 }
 
-async function loadBilling() {
-  if (!canView("billing")) return;
-  const params = new URLSearchParams(paginationParams("usage"));
+function billingFilterParams(includePagination = false) {
+  const params = new URLSearchParams(
+    includePagination ? paginationParams("usage") : {},
+  );
   if ($("#billing-search").value.trim())
     params.set("search", $("#billing-search").value.trim());
   for (const [key, selector] of [
@@ -820,15 +957,39 @@ async function loadBilling() {
     ["api_key_id", "#billing-api-key"],
   ])
     if ($(selector).value) params.set(key, $(selector).value);
+  return params;
+}
+
+async function loadBillingSummary() {
+  const params = billingFilterParams(false);
+  params.set("breakdown", state.breakdown === "key" ? "api_key" : state.breakdown);
+  state.billing = await api(`/api/billing?${params}`);
+  renderBilling();
+}
+
+async function loadUsagePage() {
+  const usage = await api(`/api/usage?${billingFilterParams(true)}`);
+  state.usage = usage.items;
+  setServerPagination("usage", usage);
+  renderBilling();
+}
+
+async function loadBilling() {
+  if (!canView("billing")) return;
   try {
-    const [billing, usage] = await Promise.all([
-      api(`/api/billing?${params}`),
-      api(`/api/usage?${params}`),
-    ]);
-    state.billing = billing;
-    state.usage = usage.items;
-    setServerPagination("usage", usage);
-    renderBilling();
+    await Promise.all([loadBillingSummary(), loadUsagePage()]);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function loadBillingView() {
+  if (!canView("billing")) return;
+  try {
+    state.keys = await api("/api/api-keys");
+    if (!state.purposes.length) state.purposes = await api("/api/purposes");
+    populateSelects();
+    await loadBilling();
   } catch (error) {
     toast(error.message, "error");
   }
@@ -1150,6 +1311,15 @@ function strategyLimitText(value, unit = "") {
   return value > 0 ? `${Number(value).toLocaleString("zh-CN")}${unit}` : "不限";
 }
 
+function strategyRPMCapacityText(item) {
+  if (item.rpm_capacity_unlimited) return "不限";
+  if (item.rpm_capacity !== null && item.rpm_capacity !== undefined)
+    return Number(item.rpm_capacity || 0).toLocaleString("zh-CN");
+  if (Number(item.rpm_limit || 0) > 0)
+    return Number(item.rpm_limit * item.accounts_alive).toLocaleString("zh-CN");
+  return "不限";
+}
+
 function renderStrategies() {
   const strategies = state.strategies || [];
   $("#strategy-empty").hidden = strategies.length > 0;
@@ -1174,7 +1344,7 @@ function renderStrategies() {
         </div>
         <p class="strategy-card-desc">${escapeHTML(item.description || strategyModeLabels[item.dispatch_mode] || "")}</p>
         <div class="strategy-card-grid">
-          <div><span>RPM</span><b>${item.current_rpm} / ${strategyLimitText(item.rpm_limit)}</b></div>
+          <div title="当前 RPM / 最大承接 RPM"><span>RPM</span><b>${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyRPMCapacityText(item)}</b></div>
           <div><span>TPM</span><b>${Number(item.current_tpm).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}</b></div>
           <div><span>并发</span><b>${item.current_inflight} / ${strategyLimitText(item.concurrency_limit)}</b></div>
           <div><span>存活账号</span><b class="${item.accounts_alive < item.bound_accounts ? "warn" : ""}">${item.accounts_alive} / ${item.bound_accounts}${item.accounts_pending ? `<small> · 待调度 ${item.accounts_pending}</small>` : ""}</b></div>
@@ -1195,13 +1365,18 @@ function renderStrategies() {
 function strategyAccountCandidates(strategyID, mode) {
   const currentID = Number(strategyID);
   const search = $("#strategy-account-search")?.value.trim().toLowerCase() || "";
-  return (state.accounts || [])
-    .filter((account) => account.dispatch_status === "normal")
+  const groupID = state.strategyAccountGroup;
+  return (state.strategyAccountOptions || [])
     .filter((account) =>
       mode === "unbind"
         ? Number(account.strategy_id || 0) === currentID
         : Number(account.strategy_id || 0) !== currentID,
     )
+    .filter((account) => {
+      if (!groupID) return true;
+      if (groupID === "__ungrouped") return !(account.group_ids || []).length;
+      return (account.group_ids || []).includes(groupID);
+    })
     .filter((account) => {
       if (!search) return true;
       return [
@@ -1227,7 +1402,13 @@ function renderStrategyAccountList() {
   const selected = candidates.filter((item) =>
     state.selectedStrategyAccountIDs.has(item.id),
   );
-  $("#strategy-account-count").textContent = `${selected.length} / ${candidates.length} 个账号`;
+  const selectedTotal = state.selectedStrategyAccountIDs.size;
+  $("#strategy-account-count").textContent = `${selectedTotal} 已选 · ${candidates.length} 个结果`;
+  const allVisibleSelected =
+    candidates.length > 0 && selected.length === candidates.length;
+  $("#strategy-account-select-visible").textContent = allVisibleSelected
+    ? "取消当前结果"
+    : "选择当前结果";
   $("#strategy-account-list").innerHTML = candidates.length
     ? candidates
         .map((item) => {
@@ -1253,7 +1434,7 @@ function renderStrategyAccountList() {
 }
 
 async function openStrategyAccountDialog(strategyID, mode) {
-  if (!state.accounts.length && canView("accounts")) await loadAccounts();
+  await loadStrategyAccountOptions();
   const item = state.strategies.find(
     (entry) => String(entry.id) === String(strategyID),
   );
@@ -1268,6 +1449,15 @@ async function openStrategyAccountDialog(strategyID, mode) {
   $("#strategy-account-id").value = item.id;
   $("#strategy-account-mode").value = mode;
   $("#strategy-account-search").value = "";
+  state.strategyAccountGroup = "";
+  $("#strategy-account-group").innerHTML = [
+    '<option value="">全部分组</option>',
+    '<option value="__ungrouped">无分组</option>',
+    ...state.groups.map(
+      (group) =>
+        `<option value="${escapeHTML(group.id)}">${escapeHTML(group.name)}</option>`,
+    ),
+  ].join("");
   renderStrategyAccountList();
   showInitializedDialog("#strategy-account-dialog");
 }
@@ -1376,7 +1566,7 @@ function renderStrategyAccordion(strategies) {
                   </span>
                 </button>
               </td>
-              <td class="num" title="当前 ${item.current_rpm}，限制 ${strategyLimitText(item.rpm_limit)}">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyLimitText(item.rpm_limit)}</small></td>
+              <td class="num" title="当前 RPM / 最大承接 RPM：${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyRPMCapacityText(item)}">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyRPMCapacityText(item)}</small></td>
               <td class="num" title="当前 ${Number(item.current_tpm || 0).toLocaleString("zh-CN")}，限制 ${strategyLimitText(item.tpm_limit)}">${Number(item.current_tpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyLimitText(item.tpm_limit)}</small></td>
               <td><span class="pill ${status.className}" title="${escapeHTML(status.label)}">${escapeHTML(status.label)}</span><small class="strategy-survival" title="${item.accounts_alive} 个存活，${item.bound_accounts} 个已绑定">${item.accounts_alive} / ${item.bound_accounts}</small></td>
               <td><span class="strategy-account-groups" title="${escapeHTML(`${item.bound_groups} 个分组 · ${dispatchMode}`)}">${item.bound_groups} 个分组 · ${escapeHTML(dispatchMode)}</span></td>
@@ -1485,7 +1675,7 @@ function renderDashboard() {
         item.speed_passthrough_enabled,
         item.anthropic_beta_passthrough_enabled,
       ].filter(Boolean).length;
-      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>429 阶梯</span><strong>${item.rate_limit_stepped_cooldown_enabled ? `+${Number(item.rate_limit_cooldown_step_seconds || 30)}s` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -1667,9 +1857,7 @@ function survivalCell(item) {
 }
 function updateSurvivalClocks() {
   $$('[data-account-survival]').forEach((node) => {
-    const item = state.accounts.find(
-      (account) => account.id === Number(node.dataset.accountSurvival),
-    );
+    const item = findLoadedAccount(node.dataset.accountSurvival);
     if (!item) return;
     const minutes = liveSurvivalMinutes(item);
     node.textContent = durationClockText(minutes, minutes !== null);
@@ -1709,7 +1897,13 @@ function accountLiveLoadInner(load, fallbackBaseRPM = 0) {
 function renderRealtime() {
   const data = state.realtime;
   if (!data) return;
-  $("#realtime-rpm").textContent = Number(data.rpm || 0).toLocaleString("zh-CN");
+  const currentRPM = Number(data.rpm || 0).toLocaleString("zh-CN");
+  const maximumRPM = data.unlimited_capacity
+    ? "∞"
+    : Number(data.rpm_capacity || 0).toLocaleString("zh-CN");
+  const rpmCapacityText = `${currentRPM} / ${maximumRPM}`;
+  $("#realtime-rpm").textContent = rpmCapacityText;
+  $("#realtime-rpm").title = `当前 RPM / 最大承接 RPM：${rpmCapacityText}`;
   $("#realtime-tpm").textContent = compact(data.tpm);
   $("#realtime-itpm").textContent = compact(data.itpm);
   $("#realtime-cache-read-tpm").textContent = compact(data.cache_read_tpm);
@@ -1724,11 +1918,11 @@ function renderRealtime() {
   $("#realtime-queue-item").title = waiting
     ? `${waiting.toLocaleString("zh-CN")} 个请求正在等待账号并发或 RPM 容量释放`
     : "当前没有请求等待账号容量";
-  const capacity = data.unlimited_capacity
-    ? "含不限速账号"
-    : `容量 ${Number(data.rpm_capacity || 0).toLocaleString("zh-CN")} RPM`;
-  $("#realtime-rpm-capacity").textContent = capacity;
-  $("#realtime-rpm-capacity").title = capacity;
+  const capacityHint = data.unlimited_capacity
+    ? "当前 / 最大承接 RPM · 含不限速账号"
+    : "当前 / 最大承接 RPM";
+  $("#realtime-rpm-capacity").textContent = capacityHint;
+  $("#realtime-rpm-capacity").title = capacityHint;
   const updated = new Date(data.updated_at);
   const updatedText = Number.isNaN(updated.getTime())
     ? "刚刚更新"
@@ -1805,57 +1999,33 @@ function renderAccountSummary() {
 }
 function renderAccounts() {
   closeAccountActionMenu();
-  const search = state.accountSearch.toLowerCase();
-  const scoped = state.accounts.filter(
-    (item) =>
-      (!state.accountGroup || item.group_ids.includes(state.accountGroup)) &&
-      (!search ||
-        `${item.name} ${item.notes} ${item.credential_hint}`
-          .toLowerCase()
-          .includes(search)),
-  );
-  const counts = {
-    normal: scoped.filter((item) => item.dispatch_status === "normal").length,
-    unavailable: scoped.filter(
-      (item) => item.dispatch_status === "unavailable",
-    ).length,
-    limited_5h: scoped.filter((item) => accountMatchesStatus(item, "limited_5h"))
-      .length,
-    limited_7d: scoped.filter((item) => accountMatchesStatus(item, "limited_7d"))
-      .length,
-    cooling_429: scoped.filter((item) =>
-      accountMatchesStatus(item, "cooling_429"),
-    ).length,
-    error: scoped.filter((item) => item.dispatch_status === "error").length,
-  };
-  $("#status-all-count").textContent = scoped.length;
-  $("#status-normal-count").textContent = counts.normal;
-  $("#status-unavailable-count").textContent = counts.unavailable;
-  $("#status-limited-5h-count").textContent = counts.limited_5h;
-  $("#status-limited-7d-count").textContent = counts.limited_7d;
-  $("#status-cooling-429-count").textContent = counts.cooling_429;
-  $("#status-error-count").textContent = counts.error;
+  const counts = state.accountStatusCounts || {};
+  syncTableSortButtons("account", state.accountSort);
+  $("#status-all-count").textContent = Number(counts.all || 0);
+  $("#status-normal-count").textContent = Number(counts.normal || 0);
+  $("#status-unavailable-count").textContent = Number(counts.unavailable || 0);
+  $("#status-limited-5h-count").textContent = Number(counts.limited_5h || 0);
+  $("#status-limited-7d-count").textContent = Number(counts.limited_7d || 0);
+  $("#status-cooling-429-count").textContent = Number(counts.cooling_429 || 0);
+  $("#status-error-count").textContent = Number(counts.error || 0);
   $$("#account-status-tabs button").forEach((node) => {
     node.classList.toggle(
       "active",
       node.dataset.accountStatus === state.accountStatus,
     );
   });
-  const filtered = scoped.filter((item) =>
-    accountMatchesStatus(item, state.accountStatus),
-  );
-  $("#account-list-count").textContent = `${filtered.length} 个账号`;
-  $("#nav-account-count").textContent = state.accounts.length;
-  $("#accounts-empty").hidden = filtered.length > 0;
+  const filtered = state.accounts;
+  const total = Number(state.serverPagination.accounts?.total || 0);
+  $("#account-list-count").textContent = `${total} 个账号`;
+  $("#nav-account-count").textContent = Number(counts.all || total);
+  $("#accounts-empty").hidden = total > 0;
   const pageItems = paginatedItems("accounts", filtered);
   $("#accounts-body").innerHTML = pageItems
     .map((item) => {
       const [statusText, statusClass, statusTitle] = accountStatus(item);
       const [authText] = accountAuthStatus(item);
       const groups = item.group_ids.map((id) => groupMark(id, "pill")).join("");
-      const actions = isAdmin()
-        ? `<span class="row-actions account-primary-actions"><button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权" aria-label="更新授权"><i data-lucide="key-round"></i></button><button data-refresh-quota="${item.id}" title="测试并刷新账号配额" aria-label="测试并刷新账号配额"><i data-lucide="activity"></i></button><button data-account-menu="${item.id}" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false"><i data-lucide="ellipsis"></i></button></span>`
-        : '<span class="muted">只读</span>';
+      const actions = `<span class="row-actions account-primary-actions"><button data-copy-account="${item.id}" title="复制账号信息" aria-label="复制账号信息"><i data-lucide="copy"></i></button>${isAdmin() ? `<button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权" aria-label="更新授权"><i data-lucide="key-round"></i></button><button data-refresh-quota="${item.id}" title="测试并刷新账号配额" aria-label="测试并刷新账号配额"><i data-lucide="activity"></i></button><button data-account-menu="${item.id}" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false"><i data-lucide="ellipsis"></i></button>` : ""}</span>`;
       const authDetail = item.auth_error || authText;
       const checked = item.auth_checked_at
         ? ` · 检测 ${dateTime(item.auth_checked_at)}`
@@ -1868,12 +2038,13 @@ function renderAccounts() {
         .filter(Boolean)
         .join(" · ");
       const onboardedAt = dateTime(item.onboarded_at);
+      const reauthorizedAt = dateTime(item.reauthorized_at);
       const lastUsedAt = dateTime(item.last_used_at);
       const subscription = accountSubscriptionName(item);
       const subscriptionTitle = item.rate_limit_tier
         ? `${subscription} · ${item.rate_limit_tier}`
         : subscription;
-      return `<tr><td class="select-column admin-only-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}" title="${escapeHTML(statusTitle)}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions admin-only-column">${actions}</td></tr>`;
+      return `<tr><td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} /></td><td class="mono">#${item.id}</td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}" title="${escapeHTML(statusTitle)}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td class="mono time-cell" title="${escapeHTML(reauthorizedAt)}">${reauthorizedAt}</td><td class="num mono">${Number(item.reauthorization_count || 0)}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions">${actions}</td></tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -1884,24 +2055,16 @@ function selectedAccountIDs() {
   return [...state.selectedAccountIDs];
 }
 function syncAccountSelection() {
-  const search = state.accountSearch.toLowerCase();
-  const selectable = state.accounts.filter(
-    (item) =>
-      (!state.accountGroup || item.group_ids.includes(state.accountGroup)) &&
-      (!search ||
-        `${item.name} ${item.notes} ${item.credential_hint}`
-          .toLowerCase()
-          .includes(search)) &&
-      accountMatchesStatus(item, state.accountStatus),
-  );
+  const selectable = state.accounts;
   const selected = selectable.filter((item) =>
     state.selectedAccountIDs.has(item.id),
   ).length;
   const selectAll = $("#select-all-accounts");
-  selectAll.disabled = !isAdmin() || selectable.length === 0;
+  selectAll.disabled = selectable.length === 0;
   selectAll.checked = selectable.length > 0 && selected === selectable.length;
   selectAll.indeterminate = selected > 0 && selected < selectable.length;
   $("#selected-account-count").textContent = state.selectedAccountIDs.size;
+  $("#copy-selected-accounts").disabled = state.selectedAccountIDs.size === 0;
   $("#delete-selected-accounts").disabled =
     !isAdmin() || state.selectedAccountIDs.size === 0;
   $("#edit-selected-accounts").disabled =
@@ -1913,18 +2076,16 @@ function syncAccountSelection() {
 }
 
 function renderDeadAccounts() {
-  const pending = state.accounts.filter(
-    (item) => item.dispatch_status === "error",
-  );
+  const pending = state.deadAccounts;
   const archived = state.archivedAccounts;
   const source = state.deadStatus === "archived" ? archived : pending;
-  const dead = source.filter(deadAccountMatchesSearch);
-  $("#nav-dead-count").textContent = pending.length;
-  $("#dead-pending-count").textContent = pending.length;
-  $("#dead-archived-count").textContent = archived.length;
-  $("#dead-list-count").textContent = state.deadSearch.trim()
-    ? `${dead.length} / ${source.length} 个账号`
-    : `${dead.length} 个账号`;
+  const dead = source;
+  syncTableSortButtons("dead", state.deadSort);
+  const total = Number(state.serverPagination.dead?.total || 0);
+  $("#nav-dead-count").textContent = state.deadCounts.pending;
+  $("#dead-pending-count").textContent = state.deadCounts.pending;
+  $("#dead-archived-count").textContent = state.deadCounts.archived;
+  $("#dead-list-count").textContent = `${total} 个账号`;
   $("#dead-table-title").textContent = state.deadStatus === "archived" ? "归档账户" : "死亡账户";
   $("#dead-empty").hidden = dead.length > 0;
   $("#dead-empty strong").textContent = state.deadSearch.trim()
@@ -1937,38 +2098,32 @@ function renderDeadAccounts() {
     : state.deadStatus === "archived"
       ? "归档后的死亡账户会保留在这里。"
       : "授权失效或状态错误的账号会显示在这里。";
-  const average =
-    dead.length > 0
-      ? dead.reduce((sum, item) => sum + item.survival_seconds, 0) / dead.length
-      : 0;
+  const summary = state.deadSummary || {};
+  const average = total > 0 ? Number(summary.survival_seconds || 0) / total : 0;
   $("#dead-metrics").innerHTML = [
-    metric(state.deadStatus === "archived" ? "ARCHIVED ACCOUNTS" : "DEAD ACCOUNTS", dead.length, state.deadStatus === "archived" ? "已释放代理 IP" : "授权失效或账号错误", "b"),
+    metric(state.deadStatus === "archived" ? "ARCHIVED ACCOUNTS" : "DEAD ACCOUNTS", total, state.deadStatus === "archived" ? "已释放代理 IP" : "授权失效或账号错误", "b"),
     metric(
       "TOTAL REQUESTS",
-      compact(dead.reduce((sum, item) => sum + item.request_count, 0)),
+      compact(summary.requests || 0),
       "死亡账号历史请求",
     ),
     metric(
       "TOTAL BILLED",
-      money(dead.reduce((sum, item) => sum + item.total_billed_cost, 0)),
+      money(summary.billed_cost || 0),
       "死亡账号历史计费",
     ),
     metric("AVERAGE LIFETIME", durationText(average), "平均存活时间", "a"),
   ].join("");
   $("#dead-accounts-body").innerHTML = paginatedItems("dead", dead)
     .map((item) => {
-      const actions = isAdmin()
-        ? state.deadStatus === "archived"
-          ? `<span class="row-actions"><button data-restore-account="${item.id}" title="移出归档"><i data-lucide="archive-restore"></i></button></span>`
-          : `<span class="row-actions"><button data-auth-account="${item.id}" class="attention" title="重新授权"><i data-lucide="key-round"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button data-archive-account="${item.id}" title="归档并释放 IP"><i data-lucide="archive"></i></button></span>`
-        : '<span class="muted">只读</span>';
-      const selectable = isAdmin() && state.deadStatus === "pending";
+      const actions = `<span class="row-actions"><button data-copy-account="${item.id}" title="复制账号信息"><i data-lucide="copy"></i></button>${isAdmin() ? state.deadStatus === "archived" ? `<button data-restore-account="${item.id}" title="移出归档"><i data-lucide="archive-restore"></i></button><button class="danger" data-delete-account="${item.id}" title="删除归档数据"><i data-lucide="trash-2"></i></button>` : `<button data-auth-account="${item.id}" class="attention" title="重新授权"><i data-lucide="key-round"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button data-archive-account="${item.id}" title="归档并释放 IP"><i data-lucide="archive"></i></button>` : ""}</span>`;
+      const selectable = true;
       const proxyHint = item.proxy_hint || "—";
       const proxyDetail =
         item.proxy_ip && !proxyHint.includes(item.proxy_ip)
           ? `${proxyHint} · ${item.proxy_ip}`
           : proxyHint;
-      return `<tr><td class="select-column admin-only-column">${selectable ? `<input type="checkbox" data-dead-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedDeadAccountIDs.has(item.id) ? "checked" : ""} />` : "—"}</td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle">${escapeHTML(item.credential_hint)}</span></td><td>${escapeHTML(accountSubscriptionName(item))}</td><td><span class="row-title" title="${escapeHTML(item.proxy_name || "未绑定")}">${escapeHTML(item.proxy_name || "未绑定")}</span><span class="row-subtitle mono" title="${escapeHTML(proxyDetail)}">${escapeHTML(proxyDetail)}</span></td><td class="mono time-cell">${dateTime(item.onboarded_at)}</td><td class="mono time-cell">${dateTime(item.invalidated_at)}</td><td class="mono time-cell">${dateTime(item.archived_at)}</td><td>${survivalCell(item)}</td><td class="num mono">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="num money-cell">${money(item.total_billed_cost)}</td><td class="error-copy" title="${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}">${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}</td><td class="actions">${actions}</td></tr>`;
+      return `<tr><td class="select-column">${selectable ? `<input type="checkbox" data-dead-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedDeadAccountIDs.has(item.id) ? "checked" : ""} />` : "—"}</td><td class="mono">#${item.id}</td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle">${escapeHTML(item.credential_hint)}</span></td><td>${escapeHTML(accountSubscriptionName(item))}</td><td><span class="row-title" title="${escapeHTML(item.proxy_name || "未绑定")}">${escapeHTML(item.proxy_name || "未绑定")}</span><span class="row-subtitle mono" title="${escapeHTML(proxyDetail)}">${escapeHTML(proxyDetail)}</span></td><td class="mono time-cell">${dateTime(item.onboarded_at)}</td><td class="mono time-cell">${dateTime(item.reauthorized_at)}</td><td class="num mono">${Number(item.reauthorization_count || 0)}</td><td class="mono time-cell">${dateTime(item.invalidated_at)}</td><td class="mono time-cell">${dateTime(item.archived_at)}</td><td>${survivalCell(item)}</td><td class="num mono">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="num money-cell">${money(item.total_billed_cost)}</td><td class="error-copy" title="${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}">${escapeHTML(item.auth_error || item.error_message || "账号状态错误")}</td><td class="actions">${actions}</td></tr>`;
     })
     .join("");
   syncDeadSelection();
@@ -1993,20 +2148,77 @@ function deadAccountMatchesSearch(item) {
     .includes(search);
 }
 
+function syncTableSortButtons(prefix, sort) {
+  $$(`[data-${prefix}-sort]`).forEach((button) => {
+    const active = button.dataset[`${prefix}Sort`] === sort.key;
+    button.classList.toggle("active", active);
+    button.dataset.order = active ? sort.order : "";
+    button.title = active
+      ? `当前${sort.order === "asc" ? "升序" : "降序"}，点击切换`
+      : "点击排序";
+  });
+}
+
+function accountCopyText(items) {
+  const clean = (value) => String(value ?? "").replace(/[\t\r\n]+/g, " ").trim();
+  const header = [
+    "ID",
+    "账号",
+    "订阅",
+    "状态",
+    "分组",
+    "代理/IP",
+    "账号价格",
+    "总计费",
+    "请求数",
+    "上号时间",
+    "二次授权时间",
+    "二次授权次数",
+    "失效时间",
+    "归档时间",
+  ];
+  const rows = items.map((item) => [
+    item.id,
+    item.name,
+    accountSubscriptionName(item),
+    accountStatus(item)[0],
+    (item.group_ids || []).join(","),
+    item.proxy_ip || item.proxy_hint || "",
+    Number(item.account_price || 0).toFixed(2),
+    Number(item.total_billed_cost || 0).toFixed(2),
+    Number(item.request_count || 0),
+    dateTime(item.onboarded_at),
+    dateTime(item.reauthorized_at),
+    Number(item.reauthorization_count || 0),
+    dateTime(item.invalidated_at),
+    dateTime(item.archived_at),
+  ]);
+  return [header, ...rows].map((row) => row.map(clean).join("\t")).join("\n");
+}
+
+async function copyAccounts(items) {
+  if (!items.length) return;
+  await copyToClipboard(accountCopyText(items));
+  toast(`已复制 ${items.length} 个账号`);
+}
+
 function syncDeadSelection() {
-  const pending = state.accounts.filter(
-    (item) => item.dispatch_status === "error" && deadAccountMatchesSearch(item),
-  );
-  const selected = pending.filter((item) => state.selectedDeadAccountIDs.has(item.id));
+  const source =
+    state.deadStatus === "archived" ? state.archivedAccounts : state.deadAccounts;
+  const selected = source.filter((item) => state.selectedDeadAccountIDs.has(item.id));
   $("#selected-dead-count").textContent = selected.length;
   const archiveButton = $("#archive-selected-accounts");
   archiveButton.hidden = state.deadStatus !== "pending";
   archiveButton.disabled = !isAdmin() || state.deadStatus !== "pending" || selected.length === 0;
+  const deleteButton = $("#delete-archived-accounts");
+  deleteButton.hidden = state.deadStatus !== "archived";
+  deleteButton.disabled = !isAdmin() || state.deadStatus !== "archived" || selected.length === 0;
+  $("#copy-selected-dead").disabled = selected.length === 0;
   const selectAll = $("#select-all-dead");
-  selectAll.hidden = state.deadStatus !== "pending";
-  selectAll.disabled = !isAdmin() || state.deadStatus !== "pending" || pending.length === 0;
-  selectAll.checked = pending.length > 0 && selected.length === pending.length;
-  selectAll.indeterminate = selected.length > 0 && selected.length < pending.length;
+  selectAll.hidden = false;
+  selectAll.disabled = source.length === 0;
+  selectAll.checked = source.length > 0 && selected.length === source.length;
+  selectAll.indeterminate = selected.length > 0 && selected.length < source.length;
 }
 
 function renderDaily() {
@@ -2282,7 +2494,7 @@ function renderProxies() {
 					<td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
 					<td><span class="pill off" title="已从正常代理池归档，不再参与分配">已归档</span></td>
 					<td class="mono" title="${escapeHTML(dateTime(item.archived_at))}">${dateTime(item.archived_at)}</td>
-					<td class="actions"><span class="muted">留存</span></td>
+					<td class="actions">${isAdmin() ? `<span class="row-actions"><button data-restore-proxy="${item.id}" title="恢复并重新使用"><i data-lucide="archive-restore"></i></button></span>` : '<span class="muted">只读</span>'}</td>
 				</tr>`;
 			}
 			const retired = Boolean(
@@ -2738,12 +2950,15 @@ function setView(view) {
     Boolean(action) &&
     (isAdmin() || (state.me?.role === "user" && view === "access"));
   $("#primary-action").hidden = !canAct;
-  if (view === "billing") loadBilling();
+  if (view === "billing") loadBillingView();
   if (view === "audit") loadActiveAudit();
   if (view === "accounts") {
-    loadAccountSummary();
-    loadRealtime();
+    loadAccountPage();
   }
+  if (view === "dead") loadDeadPage();
+  if (view === "proxies") loadProxyInventory();
+  if (view === "pricing") loadPricingInventory();
+  if (view === "access") loadAccessInventory();
   if (view === "daily") loadDaily();
   if (view === "authorization") {
     loadAuthorization();
@@ -2751,10 +2966,12 @@ function setView(view) {
   }
   if (view === "errors") loadErrors();
   if (view === "strategies") loadStrategies();
-  if (view === "onboarding")
+  if (view === "onboarding") {
+    loadProxyInventory();
     ensureStrategiesLoaded().then(() =>
       fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value),
     );
+  }
   refreshIcons();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -3009,8 +3226,11 @@ async function switchPurposeGroup(purposeID, groupID) {
 }
 function syncGroupRateLimitDownweightFields() {
   const disabled = !$("#group-rate-limit-downweight-enabled").checked;
+  const stepped = !disabled && $("#group-rate-limit-stepped-cooldown").checked;
   $("#group-rate-limit-wait-seconds").disabled = disabled;
-  $("#group-rate-limit-cooling-threshold").disabled = disabled;
+  $("#group-rate-limit-stepped-cooldown").disabled = disabled;
+  $("#group-rate-limit-cooldown-step").disabled = !stepped;
+  $("#group-rate-limit-cooling-threshold").disabled = disabled || stepped;
 }
 
 // The rows are driven by the strategies the group's accounts actually resolve,
@@ -3097,6 +3317,9 @@ function openGroup(item = null) {
   $("#group-quota-header-masking").checked = Boolean(
     item?.quota_header_masking_enabled,
   );
+  $("#group-cache-creation-detail").checked = Boolean(
+    item?.cache_creation_detail_enabled,
+  );
   $("#group-mcp-tool-names").checked = Boolean(item?.mcp_tool_names_enabled);
   $("#group-passthrough-service-tier").checked = Boolean(
     item?.service_tier_passthrough_enabled,
@@ -3125,6 +3348,12 @@ function openGroup(item = null) {
   );
   $("#group-rate-limit-wait-seconds").value = Number(
     item?.rate_limit_wait_seconds || 120,
+  );
+  $("#group-rate-limit-stepped-cooldown").checked = Boolean(
+    item?.rate_limit_stepped_cooldown_enabled,
+  );
+  $("#group-rate-limit-cooldown-step").value = Number(
+    item?.rate_limit_cooldown_step_seconds || 30,
   );
   syncGroupRateLimitDownweightFields();
   $("#group-strategy-required").checked = Boolean(item?.strategy_required_enabled);
@@ -3155,6 +3384,23 @@ function openPool(item = null) {
   $("#proxy-pool-headers").value = item?.api_headers || "{}";
   toggleAPISource();
   showInitializedDialog("#proxy-pool-dialog");
+}
+function openProxyRestore(item) {
+  if (!item) return;
+  $("#proxy-restore-form").reset();
+  $("#proxy-restore-id").value = item.id;
+  $("#proxy-restore-name").value = `${item.name} · ${item.host}:${item.port}`;
+  $("#proxy-restore-pool").innerHTML =
+    '<option value="">选择目标代理池</option>' +
+    state.proxyPools
+      .filter((pool) => pool.status === "active")
+      .map(
+        (pool) =>
+          `<option value="${pool.id}">${escapeHTML(pool.name)} · ${pool.single_use_enabled ? "一次性" : "可复用"}</option>`,
+      )
+      .join("");
+  showInitializedDialog("#proxy-restore-dialog");
+  refreshIcons();
 }
 function toggleAPISource() {
   $$(".api-source-field").forEach((node) => {
@@ -3262,6 +3508,7 @@ function openProxyImport() {
   showInitializedDialog("#proxy-import-dialog");
 }
 function openAccountAuth(account) {
+  if (!account) return;
   state.oauthSessionID = "";
   $("#auth-account-id").value = account.id;
   $("#account-auth-title").textContent = `更新授权 · ${account.name}`;
@@ -3275,6 +3522,13 @@ function openAccountAuth(account) {
   );
   showInitializedDialog("#account-auth-dialog");
   refreshIcons();
+}
+
+function findLoadedAccount(id) {
+  const accountID = Number(id);
+  return [...state.accounts, ...state.deadAccounts, ...state.archivedAccounts].find(
+    (item) => item.id === accountID,
+  );
 }
 
 document.addEventListener("click", async (event) => {
@@ -3315,6 +3569,32 @@ document.addEventListener("click", async (event) => {
     );
     return;
   }
+  if (target.dataset.tableFreeze) {
+    openTableFreezeDialog(target.dataset.tableFreeze);
+    return;
+  }
+  if (target.dataset.accountSort) {
+    const key = target.dataset.accountSort;
+    state.accountSort.order =
+      state.accountSort.key === key && state.accountSort.order === "asc"
+        ? "desc"
+        : "asc";
+    state.accountSort.key = key;
+    resetPagination("accounts");
+    await loadAccountPage();
+    return;
+  }
+  if (target.dataset.deadSort) {
+    const key = target.dataset.deadSort;
+    state.deadSort.order =
+      state.deadSort.key === key && state.deadSort.order === "asc"
+        ? "desc"
+        : "asc";
+    state.deadSort.key = key;
+    resetPagination("dead");
+    await loadDeadPage();
+    return;
+  }
   if (target.hasAttribute("data-close-dialog")) {
     target.closest("dialog")?.close();
     return;
@@ -3323,18 +3603,12 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.viewJump) setView(target.dataset.viewJump);
   if (target.hasAttribute("data-open-purpose")) openPurpose();
   if (target.hasAttribute("data-open-group")) openGroup();
-  if (target.dataset.editAccount)
-    openAccount(
-      state.accounts.find(
-        (item) => item.id === Number(target.dataset.editAccount),
-      ),
-    );
+  if (target.dataset.editAccount) {
+    if (!state.proxyPools.length) await loadProxyInventory();
+    openAccount(findLoadedAccount(target.dataset.editAccount));
+  }
   if (target.dataset.authAccount)
-    openAccountAuth(
-      state.accounts.find(
-        (item) => item.id === Number(target.dataset.authAccount),
-      ),
-    );
+    openAccountAuth(findLoadedAccount(target.dataset.authAccount));
   if (target.dataset.editPurpose)
     openPurpose(
       state.dashboard.purposes.find(
@@ -3378,7 +3652,11 @@ document.addEventListener("click", async (event) => {
         node.dataset.breakdown === state.breakdown,
       ),
     );
-    renderBreakdown();
+    try {
+      await loadBillingSummary();
+    } catch (error) {
+      toast(error.message, "error");
+    }
   }
   if (
     target.dataset.group !== undefined &&
@@ -3390,7 +3668,7 @@ document.addEventListener("click", async (event) => {
     $$("#account-group-filter button").forEach((node) =>
       node.classList.toggle("active", node === target),
     );
-    renderAccounts();
+    loadAccountPage();
     loadAccountSummary();
     loadRealtime();
   }
@@ -3425,9 +3703,7 @@ document.addEventListener("click", async (event) => {
       await loadCore();
     }
     if (target.dataset.archiveAccount) {
-      const item = state.accounts.find(
-        (value) => value.id === Number(target.dataset.archiveAccount),
-      );
+      const item = findLoadedAccount(target.dataset.archiveAccount);
       if (!item) return;
       const confirmed = await confirmAction(
         `归档“${item.name}”`,
@@ -3461,6 +3737,11 @@ document.addEventListener("click", async (event) => {
       });
       toast("账号已移出归档，请重新分配代理或授权后再打开调度");
       await loadCore();
+      return;
+    }
+    if (target.dataset.copyAccount) {
+      const item = findLoadedAccount(target.dataset.copyAccount);
+      if (item) await copyAccounts([item]);
       return;
     }
     if (target.dataset.copyKey) {
@@ -3541,6 +3822,14 @@ document.addEventListener("click", async (event) => {
       }
       return;
     }
+    if (target.dataset.restoreProxy) {
+      openProxyRestore(
+        state.archivedProxies.find(
+          (item) => item.id === Number(target.dataset.restoreProxy),
+        ),
+      );
+      return;
+    }
     if (target.dataset.deletePool) {
       const item = state.proxyPools.find(
         (value) => value.id === Number(target.dataset.deletePool),
@@ -3575,8 +3864,23 @@ document.addEventListener("click", async (event) => {
       await loadCore();
       return;
     }
+    if (target.dataset.deleteAccount) {
+      const item = findLoadedAccount(target.dataset.deleteAccount);
+      if (!item) return;
+      const confirmed = await confirmAction(
+        `删除“${item.name}”`,
+        item.archived_at
+          ? "账号将从归档列表移除；计费、授权、审计和生命周期记录继续保留。"
+          : "账号将立即停止调度；计费、授权、审计和生命周期记录继续保留。",
+        "确认删除",
+      );
+      if (!confirmed) return;
+      await api(`/api/accounts/${item.id}`, { method: "DELETE" });
+      toast("账号数据已删除");
+      await loadCore();
+      return;
+    }
     for (const [dataset, path, collection, label] of [
-      ["deleteAccount", "/api/accounts/", state.accounts, "账号"],
       ["deleteUser", "/api/users/", state.users, "用户"],
       ["deleteKey", "/api/api-keys/", state.keys, "SK"],
       ["deletePrice", "/api/prices/", state.prices, "价格"],
@@ -3680,9 +3984,12 @@ $("#sidebar-toggle").addEventListener("click", () => {
     // The drawer still works when persistence is unavailable.
   }
 });
-$("#primary-action").addEventListener("click", () => {
+$("#primary-action").addEventListener("click", async () => {
   if (state.view === "overview") openPurpose();
-  if (state.view === "accounts") openAccount();
+  if (state.view === "accounts") {
+    if (!state.proxyPools.length) await loadProxyInventory();
+    openAccount();
+  }
   if (state.view === "proxies") openProxyImport();
   if (state.view === "access") openKey();
   if (state.view === "billing") openUsage();
@@ -3735,7 +4042,7 @@ $("#delete-selected-accounts").addEventListener("click", async (event) => {
   const ids = selectedAccountIDs();
   if (!ids.length) return;
   const selectedNames = ids
-    .map((id) => state.accounts.find((item) => item.id === id)?.name)
+    .map((id) => findLoadedAccount(id)?.name)
     .filter(Boolean);
   const preview = selectedNames.slice(0, 3).join("、");
   const remainder = selectedNames.length > 3 ? ` 等 ${ids.length} 个账号` : "";
@@ -3760,12 +4067,26 @@ $("#delete-selected-accounts").addEventListener("click", async (event) => {
   }
 });
 
+$("#copy-selected-accounts").addEventListener("click", async () => {
+  await copyAccounts(
+    state.accounts.filter((item) => state.selectedAccountIDs.has(item.id)),
+  );
+});
+
+$("#copy-selected-dead").addEventListener("click", async () => {
+  const source =
+    state.deadStatus === "archived" ? state.archivedAccounts : state.deadAccounts;
+  await copyAccounts(
+    source.filter((item) => state.selectedDeadAccountIDs.has(item.id)),
+  );
+});
+
 $("#archive-selected-accounts").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   const ids = [...state.selectedDeadAccountIDs];
   if (!ids.length) return;
   const selectedNames = ids
-    .map((id) => state.accounts.find((item) => item.id === id)?.name)
+    .map((id) => findLoadedAccount(id)?.name)
     .filter(Boolean);
   const preview = selectedNames.slice(0, 3).join("、");
   const remainder = selectedNames.length > 3 ? ` 等 ${ids.length} 个账号` : "";
@@ -3791,6 +4112,32 @@ $("#archive-selected-accounts").addEventListener("click", async (event) => {
     toast(error.message, "error");
   } finally {
     syncDeadSelection();
+  }
+});
+
+$("#delete-archived-accounts").addEventListener("click", async (event) => {
+  const ids = [...state.selectedDeadAccountIDs];
+  if (!ids.length || state.deadStatus !== "archived") return;
+  const confirmed = await confirmAction(
+    `删除 ${ids.length} 个归档账号`,
+    "账号会从归档列表移除；历史计费、请求、授权、审计和生命周期记录继续保留。",
+    `确认删除 ${ids.length} 个`,
+  );
+  if (!confirmed) return;
+  const button = event.currentTarget;
+  try {
+    button.disabled = true;
+    const result = await api("/api/accounts/batch-delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    state.selectedDeadAccountIDs.clear();
+    toast(`已删除 ${result.deleted} 个归档账号`);
+    await loadDeadPage();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -4012,9 +4359,8 @@ $("#account-search").addEventListener("input", (event) => {
   state.accountSearch = event.target.value;
   state.selectedAccountIDs.clear();
   resetPagination("accounts");
-  renderAccounts();
   clearTimeout(accountSearchTimer);
-  accountSearchTimer = setTimeout(loadAccountSummary, 250);
+  accountSearchTimer = setTimeout(loadAccountPage, 250);
 });
 $("#account-status-tabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-account-status]");
@@ -4022,8 +4368,7 @@ $("#account-status-tabs").addEventListener("click", (event) => {
   state.accountStatus = button.dataset.accountStatus;
   state.selectedAccountIDs.clear();
   resetPagination("accounts");
-  renderAccounts();
-  loadAccountSummary();
+  loadAccountPage();
 });
 $("#dead-status-tabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-dead-status]");
@@ -4034,27 +4379,18 @@ $("#dead-status-tabs").addEventListener("click", (event) => {
   $$("#dead-status-tabs button").forEach((node) =>
     node.classList.toggle("active", node === button),
   );
-  renderDeadAccounts();
+  loadDeadPage();
 });
+let deadSearchTimer;
 $("#dead-search").addEventListener("input", (event) => {
   state.deadSearch = event.target.value;
   state.selectedDeadAccountIDs.clear();
   resetPagination("dead");
-  renderDeadAccounts();
+  clearTimeout(deadSearchTimer);
+  deadSearchTimer = setTimeout(loadDeadPage, 250);
 });
 $("#select-all-accounts").addEventListener("change", (event) => {
-  const search = state.accountSearch.toLowerCase();
-  state.accounts
-    .filter(
-      (item) =>
-        (!state.accountGroup || item.group_ids.includes(state.accountGroup)) &&
-        (!search ||
-          `${item.name} ${item.notes} ${item.credential_hint}`
-            .toLowerCase()
-            .includes(search)) &&
-        accountMatchesStatus(item, state.accountStatus),
-    )
-    .forEach((item) =>
+  state.accounts.forEach((item) =>
       event.target.checked
         ? state.selectedAccountIDs.add(item.id)
         : state.selectedAccountIDs.delete(item.id),
@@ -4073,11 +4409,9 @@ $("#accounts-body").addEventListener("change", (event) => {
   }
 });
 $("#select-all-dead").addEventListener("change", (event) => {
-  const pending = state.accounts.filter(
-    (item) =>
-      item.dispatch_status === "error" && deadAccountMatchesSearch(item),
-  );
-  pending.forEach((item) =>
+  const source =
+    state.deadStatus === "archived" ? state.archivedAccounts : state.deadAccounts;
+  source.forEach((item) =>
     event.target.checked
       ? state.selectedDeadAccountIDs.add(item.id)
       : state.selectedDeadAccountIDs.delete(item.id),
@@ -4462,6 +4796,10 @@ $("#group-rate-limit-downweight-enabled").addEventListener(
   "change",
   syncGroupRateLimitDownweightFields,
 );
+$("#group-rate-limit-stepped-cooldown").addEventListener(
+  "change",
+  syncGroupRateLimitDownweightFields,
+);
 $("#group-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -4485,6 +4823,8 @@ $("#group-form").addEventListener("submit", async (event) => {
         ).checked,
         reject_distillation_enabled: $("#group-reject-distillation").checked,
         quota_header_masking_enabled: $("#group-quota-header-masking").checked,
+        cache_creation_detail_enabled: $("#group-cache-creation-detail")
+          .checked,
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
         adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
         rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
@@ -4508,6 +4848,12 @@ $("#group-form").addEventListener("submit", async (event) => {
         ),
         rate_limit_wait_seconds: Number(
           $("#group-rate-limit-wait-seconds").value,
+        ),
+        rate_limit_stepped_cooldown_enabled: $(
+          "#group-rate-limit-stepped-cooldown",
+        ).checked,
+        rate_limit_cooldown_step_seconds: Number(
+          $("#group-rate-limit-cooldown-step").value,
         ),
         strategy_required_enabled: $("#group-strategy-required").checked,
         capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,
@@ -4595,7 +4941,24 @@ $("#strategy-cards").addEventListener("click", async (event) => {
   }
 });
 $("#strategy-account-search").addEventListener("input", () => {
-  state.selectedStrategyAccountIDs.clear();
+  renderStrategyAccountList();
+});
+$("#strategy-account-group").addEventListener("change", (event) => {
+  state.strategyAccountGroup = event.target.value;
+  renderStrategyAccountList();
+});
+$("#strategy-account-select-visible").addEventListener("click", () => {
+  const candidates = strategyAccountCandidates(
+    state.strategyAccountID,
+    state.strategyAccountMode,
+  );
+  const allSelected =
+    candidates.length > 0 &&
+    candidates.every((item) => state.selectedStrategyAccountIDs.has(item.id));
+  candidates.forEach((item) => {
+    if (allSelected) state.selectedStrategyAccountIDs.delete(item.id);
+    else state.selectedStrategyAccountIDs.add(item.id);
+  });
   renderStrategyAccountList();
 });
 $("#strategy-account-list").addEventListener("change", (event) => {
@@ -4627,7 +4990,7 @@ $("#strategy-account-form").addEventListener("submit", async (event) => {
     $("#strategy-account-dialog").close();
     state.selectedStrategyAccountIDs.clear();
     toast(mode === "unbind" ? "账号已移出策略池" : "账号已导入策略池");
-    await Promise.all([loadAccounts(), loadStrategies()]);
+    await Promise.all([loadStrategyAccountOptions(), loadStrategies()]);
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -4657,6 +5020,44 @@ $("#proxy-pool-form").addEventListener("submit", async (event) => {
         ? `代理池已保存，已同步 ${saved.protocol_synced} 个代理`
         : "代理池已保存",
     );
+    await loadCore();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+$("#table-freeze-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const key = $("#table-freeze-key").value;
+  state.tableFreeze[key] = {
+    top: Math.min(20, Math.max(0, Number($("#table-freeze-top").value || 0))),
+    bottom: Math.min(
+      20,
+      Math.max(0, Number($("#table-freeze-bottom").value || 0)),
+    ),
+  };
+  try {
+    localStorage.setItem(tableFreezeStorageKey, JSON.stringify(state.tableFreeze));
+  } catch {
+    // The active table can still use the setting for this session.
+  }
+  $("#table-freeze-dialog").close();
+  applyTableFreeze(key);
+});
+$("#proxy-restore-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const id = Number($("#proxy-restore-id").value);
+  const poolID = Number($("#proxy-restore-pool").value);
+  if (!id || !poolID) {
+    toast("请选择目标代理池", "error");
+    return;
+  }
+  try {
+    await api(`/api/proxies/${id}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ pool_id: poolID }),
+    });
+    $("#proxy-restore-dialog").close();
+    toast("IP 已恢复，可重新检测和分配");
     await loadCore();
   } catch (error) {
     toast(error.message, "error");

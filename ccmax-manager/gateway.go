@@ -60,10 +60,13 @@ type gatewayKey struct {
 	RejectAnthropicDowngrade   bool
 	RejectDistillation         bool
 	QuotaHeaderMasking         bool
+	CacheCreationDetail        bool
 	OverloadCooldownSeconds    int
 	RateLimitDownweightEnabled bool
 	RateLimitCoolingThreshold  int
 	RateLimitWaitSeconds       int
+	RateLimitSteppedCooldown   bool
+	RateLimitCooldownStep      int
 	CapacityQueueEnabled       bool
 	CapacityQueueTimeout       int
 	StrategyRequiredEnabled    bool
@@ -138,6 +141,12 @@ type tokenUsage struct {
 	Output        int64
 	CacheCreation int64
 	CacheRead     int64
+	// CacheCreation5M and CacheCreation1H mirror the upstream
+	// usage.cache_creation bucket split. Anthropic only reports it on
+	// message_start, so the distilled usage patch reads it from here when it
+	// rewrites message_delta.
+	CacheCreation5M int64
+	CacheCreation1H int64
 }
 
 func (u tokenUsage) hasUsage() bool {
@@ -386,6 +395,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
 		prepared.MaskQuotaHeaders = key.QuotaHeaderMasking
+		prepared.CacheCreationDetail = key.CacheCreationDetail
 		path := "/v1/messages"
 		if countTokens {
 			path = "/v1/messages/count_tokens"
@@ -645,9 +655,11 @@ func recordGatewayContextFailure(w http.ResponseWriter, r *http.Request, err err
 
 func (k gatewayKey) rateLimitPolicy() rateLimitPolicy {
 	return rateLimitPolicy{
-		DownweightEnabled: k.RateLimitDownweightEnabled,
-		CoolingThreshold:  k.RateLimitCoolingThreshold,
-		CooldownSeconds:   k.RateLimitWaitSeconds,
+		DownweightEnabled:      k.RateLimitDownweightEnabled,
+		CoolingThreshold:       k.RateLimitCoolingThreshold,
+		CooldownSeconds:        k.RateLimitWaitSeconds,
+		SteppedCooldownEnabled: k.RateLimitSteppedCooldown,
+		CooldownStepSeconds:    k.RateLimitCooldownStep,
 	}
 }
 
@@ -1384,7 +1396,7 @@ func restoreGatewaySSELine(line []byte, prepared claudePreparedRequest, usage to
 	}
 	restored := sub2service.RestoreCCMaxCompatibilityResponse(payload, prepared.Compat)
 	if prepared.Compat.Distilled {
-		restored = patchCCMaxDistilledStreamUsage(restored, usage)
+		restored = patchCCMaxDistilledStreamUsage(restored, usage, prepared.CacheCreationDetail)
 		restored = sub2service.NormalizeCCMaxDistilledResponse(restored)
 	}
 	ending := []byte{}
@@ -1411,18 +1423,30 @@ func restoreGatewaySSEBlock(block []byte, prepared claudePreparedRequest, usage 
 	return restored
 }
 
-func patchCCMaxDistilledStreamUsage(body []byte, usage tokenUsage) []byte {
+func patchCCMaxDistilledStreamUsage(body []byte, usage tokenUsage, cacheDetail bool) []byte {
 	if gjson.GetBytes(body, "type").String() != "message_delta" || !gjson.GetBytes(body, "usage").Exists() {
 		return body
 	}
-	updates := []struct {
+	type usagePatch struct {
 		path  string
 		value int64
-	}{
+	}
+	updates := []usagePatch{
 		{"usage.input_tokens", usage.Input},
 		{"usage.output_tokens", usage.Output},
 		{"usage.cache_creation_input_tokens", usage.CacheCreation},
 		{"usage.cache_read_input_tokens", usage.CacheRead},
+	}
+	if cacheDetail {
+		// Anthropic reports the cache_creation bucket split only on
+		// message_start. Stamping the tracked values here keeps the final
+		// message_delta consistent with its own totals, both for streaming
+		// clients and for the non-stream bridge whose aggregation merges this
+		// usage over message_start.
+		updates = append(updates,
+			usagePatch{"usage.cache_creation.ephemeral_5m_input_tokens", usage.CacheCreation5M},
+			usagePatch{"usage.cache_creation.ephemeral_1h_input_tokens", usage.CacheCreation1H},
+		)
 	}
 	for _, update := range updates {
 		if next, err := sjson.SetBytes(body, update.path, update.value); err == nil {
@@ -1478,6 +1502,8 @@ func mergeTokenUsage(current, next tokenUsage) tokenUsage {
 	current.Output = max(current.Output, next.Output)
 	current.CacheCreation = max(current.CacheCreation, next.CacheCreation)
 	current.CacheRead = max(current.CacheRead, next.CacheRead)
+	current.CacheCreation5M = max(current.CacheCreation5M, next.CacheCreation5M)
+	current.CacheCreation1H = max(current.CacheCreation1H, next.CacheCreation1H)
 	return current
 }
 
@@ -1574,11 +1600,11 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, rateLimitDownweight, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.quota_header_masking_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, cacheCreationDetail, rateLimitDownweight, rateLimitSteppedCooldown, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &quotaHeaderMasking, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &quotaHeaderMasking, &cacheCreationDetail, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
@@ -1591,7 +1617,9 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	key.RejectAnthropicDowngrade = rejectAnthropicDowngrade == 1
 	key.RejectDistillation = rejectDistillation == 1
 	key.QuotaHeaderMasking = quotaHeaderMasking == 1
+	key.CacheCreationDetail = cacheCreationDetail == 1
 	key.RateLimitDownweightEnabled = rateLimitDownweight == 1
+	key.RateLimitSteppedCooldown = rateLimitSteppedCooldown == 1
 	key.CapacityQueueEnabled = capacityQueueEnabled == 1
 	key.StrategyRequiredEnabled = strategyRequired == 1
 	return key, err
@@ -1863,22 +1891,10 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		return gatewayAccount{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`); err != nil {
-		return gatewayAccount{}, err
-	}
-	if _, err := tx.Exec(`DELETE FROM dispatch_sessions WHERE expires_at <= ` + nowSQL); err != nil {
-		return gatewayAccount{}, err
-	}
-	if _, err := tx.Exec(`DELETE FROM account_model_cooldowns WHERE reset_at <= ` + nowSQL); err != nil {
-		return gatewayAccount{}, err
-	}
-	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL); err != nil {
-		return gatewayAccount{}, err
-	}
-	// Expired rate-limit state is tidied by startAccountRateLimitSweeper, not
-	// here: accountStatePredicate already admits accounts whose cooldown has
-	// passed, and an unbounded UPDATE in the dispatch transaction deadlocks
-	// against captureAccount429State on MySQL.
+	// Expired runtime rows are tidied by startAccountRateLimitSweeper. Every
+	// predicate below already ignores expired rows, so cleanup must stay out of
+	// this per-request transaction: doing full-table DELETEs here made dispatch
+	// scan and lock the same tables millions of times under production load.
 	var stickyID int64
 	if sessionHash != "" {
 		_ = tx.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ? AND expires_at > `+nowSQL, sessionHash, key.ID).Scan(&stickyID)
@@ -2392,6 +2408,10 @@ func parseAnthropicUsage(body []byte, stream bool) tokenUsage {
 			usage.Output = max(usage.Output, intFromJSON(nested["output_tokens"]))
 			usage.CacheCreation = max(usage.CacheCreation, intFromJSON(nested["cache_creation_input_tokens"]))
 			usage.CacheRead = max(usage.CacheRead, intFromJSON(nested["cache_read_input_tokens"]))
+			if buckets, ok := nested["cache_creation"].(map[string]any); ok {
+				usage.CacheCreation5M = max(usage.CacheCreation5M, intFromJSON(buckets["ephemeral_5m_input_tokens"]))
+				usage.CacheCreation1H = max(usage.CacheCreation1H, intFromJSON(buckets["ephemeral_1h_input_tokens"]))
+			}
 		}
 		if message, ok := value["message"].(map[string]any); ok {
 			apply(message)

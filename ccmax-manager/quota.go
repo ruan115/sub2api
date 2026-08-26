@@ -410,9 +410,11 @@ func (a *app) captureAccountModelOverload(accountID int64, model string, seconds
 // in several groups, so the policy of the group that served the request decides
 // how that request's 429 is recorded — the same shape as the 529 cooldown.
 type rateLimitPolicy struct {
-	DownweightEnabled bool
-	CoolingThreshold  int
-	CooldownSeconds   int
+	DownweightEnabled      bool
+	CoolingThreshold       int
+	CooldownSeconds        int
+	SteppedCooldownEnabled bool
+	CooldownStepSeconds    int
 }
 
 func (p rateLimitPolicy) threshold() int {
@@ -430,6 +432,29 @@ func (p rateLimitPolicy) cooldownSeconds() int {
 		return defaultRateLimitCooldownSeconds
 	}
 	return p.CooldownSeconds
+}
+
+func (p rateLimitPolicy) cooldownStepSeconds() int {
+	if p.CooldownStepSeconds < 1 || p.CooldownStepSeconds > maxRateLimitCooldownStepSeconds {
+		return defaultRateLimitCooldownStepSeconds
+	}
+	return p.CooldownStepSeconds
+}
+
+func (p rateLimitPolicy) cooldownForStrikes(strikes int) int {
+	strikes = max(1, strikes)
+	maximum := p.cooldownSeconds()
+	if p.SteppedCooldownEnabled {
+		return min(maximum, minRateLimitCooldownSeconds+(strikes-1)*p.cooldownStepSeconds())
+	}
+	cooldown := minRateLimitCooldownSeconds
+	if strikes > 1 {
+		cooldown += (maximum - minRateLimitCooldownSeconds) / 2
+	}
+	if strikes >= p.threshold() {
+		cooldown = maximum
+	}
+	return cooldown
 }
 
 func (a *app) captureGatewayUpstreamState(accountID int64, groupID, model string, overloadCooldownSeconds int, policy rateLimitPolicy, response *http.Response) {
@@ -456,13 +481,15 @@ const (
 	// How many strikes escalate an account to the maximum configured short
 	// cooldown. The group can override it; it never turns an ambiguous 429 into
 	// a synthetic 5h quota exhaustion.
-	defaultRateLimitCoolingThreshold = 3
-	maxRateLimitCoolingThreshold     = 10
-	minRateLimitCooldownSeconds      = 60
-	defaultRateLimitCooldownSeconds  = 120
-	maxRateLimitCooldownSeconds      = 120
-	accountQuotaReleaseDelayMin      = 15 * time.Minute
-	accountQuotaReleaseDelayMax      = 30 * time.Minute
+	defaultRateLimitCoolingThreshold    = 3
+	maxRateLimitCoolingThreshold        = 10
+	minRateLimitCooldownSeconds         = 60
+	defaultRateLimitCooldownSeconds     = 120
+	maxRateLimitCooldownSeconds         = 120
+	defaultRateLimitCooldownStepSeconds = 30
+	maxRateLimitCooldownStepSeconds     = maxRateLimitCooldownSeconds - minRateLimitCooldownSeconds
+	accountQuotaReleaseDelayMin         = 15 * time.Minute
+	accountQuotaReleaseDelayMax         = 30 * time.Minute
 	// Upstream rate limiting hits every in-flight request on an account at
 	// once. Without a debounce a concurrency-3 account would collect three
 	// strikes from a single burst, so strikes within this window count once.
@@ -488,7 +515,6 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 	if accountID <= 0 {
 		return time.Time{}, false
 	}
-	threshold := policy.threshold()
 	now := time.Now().UTC()
 	_, explicitWindow, _ := sub2service.ResolveCCMaxCompatibilityCooldownWindow(http.StatusTooManyRequests, response.Header)
 	if explicitWindow == "5h" || explicitWindow == "7d" {
@@ -544,18 +570,11 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 	strikes := 1
 	_ = a.db.QueryRow(`SELECT consecutive_429 FROM accounts WHERE id = ?`, accountID).Scan(&strikes)
 	downweightUntil := a.nextAccount5HReset(accountID, response.Header, now)
-	minCooldown := time.Duration(minRateLimitCooldownSeconds) * time.Second
-	maxCooldown := time.Duration(policy.cooldownSeconds()) * time.Second
-	cooldown := minCooldown
-	if strikes > 1 {
-		cooldown = minCooldown + (maxCooldown-minCooldown)/2
-	}
-	if strikes >= threshold {
-		cooldown = maxCooldown
-	}
+	cooldownSeconds := policy.cooldownForStrikes(strikes)
+	cooldown := time.Duration(cooldownSeconds) * time.Second
 	resetAt := now.Add(cooldown)
 	message := fmt.Sprintf("上游瞬时 429，账号短暂冷却 %d 秒；随后按降峰 RPM 运行至 5h 窗口刷新", int(cooldown/time.Second))
-	if strikes >= threshold {
+	if cooldownSeconds >= policy.cooldownSeconds() {
 		message = fmt.Sprintf("连续 %d 次上游 429，账号短暂冷却 %d 秒；未伪造 5h 配额冷却，随后按降峰 RPM 运行", strikes, int(cooldown/time.Second))
 	}
 	// Never shorten a cooldown already in force: captureAccountUpstreamState runs
@@ -781,12 +800,14 @@ func (a *app) startAccountRateLimitSweeper() func() {
 		defer ticker.Stop()
 		a.enforceQuotaReleaseStagger()
 		a.sweepAccountRateLimitState()
+		a.sweepExpiredRuntimeState()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				a.sweepAccountRateLimitState()
+				a.sweepExpiredRuntimeState()
 			}
 		}
 	}()
@@ -796,6 +817,34 @@ func (a *app) startAccountRateLimitSweeper() func() {
 			cancel()
 			wait.Wait()
 		})
+	}
+}
+
+const runtimeCleanupBatchSize = 5000
+
+func (a *app) sweepExpiredRuntimeState() {
+	queries := []string{
+		`DELETE FROM account_rpm_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`,
+		`DELETE FROM dispatch_sessions WHERE expires_at <= ` + nowSQL,
+		`DELETE FROM account_model_cooldowns WHERE reset_at <= ` + nowSQL,
+		`DELETE FROM account_rpm_thresholds WHERE reset_at <= ` + nowSQL,
+	}
+	for _, query := range queries {
+		for batch := 0; batch < 4; batch++ {
+			statement := query
+			if a.db.dialect == dialectMySQL {
+				statement += ` LIMIT ` + strconv.Itoa(runtimeCleanupBatchSize)
+			}
+			result, err := a.db.Exec(statement)
+			if err != nil {
+				logDatabaseWriteError("sweep expired runtime state", err)
+				break
+			}
+			deleted, err := result.RowsAffected()
+			if err != nil || a.db.dialect != dialectMySQL || deleted < runtimeCleanupBatchSize {
+				break
+			}
+		}
 	}
 }
 

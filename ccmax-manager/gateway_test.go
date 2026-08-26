@@ -687,6 +687,94 @@ func TestDistilledCompatibilityStreamPreservesSignatureAndAddsIterations(t *test
 	}
 }
 
+func TestDistilledCacheCreationDetailByGroup(t *testing.T) {
+	tests := []struct {
+		name    string
+		stream  bool
+		enabled bool
+		want5m  int64
+		want1h  int64
+	}{
+		{name: "enabled_stream_restores_buckets", stream: true, enabled: true, want5m: 2, want1h: 5},
+		{name: "enabled_non_stream_restores_buckets", enabled: true, want5m: 2, want1h: 5},
+		{name: "disabled_non_stream_keeps_legacy_zeros", enabled: false, want5m: 0, want1h: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CCMAX_AUTH_DISABLED", "1")
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				// Real Anthropic reports the cache_creation bucket split only on
+				// message_start; message_delta carries totals without it.
+				_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_detail\",\"type\":\"message\",\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":7,\"cache_read_input_tokens\":4,\"cache_creation\":{\"ephemeral_5m_input_tokens\":2,\"ephemeral_1h_input_tokens\":5},\"output_tokens\":0}}}\n\n")
+				_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+				_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+				_, _ = io.WriteString(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+				_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":33}}\n\n")
+				_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			}))
+			defer upstream.Close()
+
+			a, handler := newGatewayTestApp(t)
+			defer a.db.Close()
+			putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+				"name": "A 分组", "description": "缓存明细", "rate_multiplier": 1, "status": "active",
+				"normal_request_mode":           true,
+				"cache_creation_detail_enabled": tt.enabled,
+			}, http.StatusOK, nil)
+			key := createGatewayTestKey(t, handler)
+			createGatewayTestAccount(t, a, handler, "cache-detail", upstream.URL, 0, nil, map[string]any{"access_token": "token"})
+
+			payload := fmt.Sprintf(`{"model":"claude-fable-5","stream":%t,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, tt.stream)
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload))
+			request.Header.Set("Authorization", "Bearer "+key.Key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+
+			finalUsage := ""
+			if tt.stream {
+				for _, line := range strings.Split(response.Body.String(), "\n") {
+					line = strings.TrimSpace(line)
+					if !strings.HasPrefix(line, "data:") {
+						continue
+					}
+					payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+					if gjson.Get(payload, "type").String() == "message_delta" {
+						finalUsage = gjson.Get(payload, "usage").Raw
+					}
+				}
+			} else {
+				finalUsage = gjson.Get(response.Body.String(), "usage").Raw
+			}
+			if finalUsage == "" {
+				t.Fatalf("final usage not found in body=%s", response.Body.String())
+			}
+			if gjson.Get(finalUsage, "input_tokens").Int() != 3 ||
+				gjson.Get(finalUsage, "output_tokens").Int() != 33 ||
+				gjson.Get(finalUsage, "cache_creation_input_tokens").Int() != 7 ||
+				gjson.Get(finalUsage, "cache_read_input_tokens").Int() != 4 {
+				t.Fatalf("usage totals changed: %s", finalUsage)
+			}
+			for path, want := range map[string]int64{
+				"cache_creation.ephemeral_5m_input_tokens":              tt.want5m,
+				"cache_creation.ephemeral_1h_input_tokens":              tt.want1h,
+				"iterations.0.cache_creation.ephemeral_5m_input_tokens": tt.want5m,
+				"iterations.0.cache_creation.ephemeral_1h_input_tokens": tt.want1h,
+			} {
+				if got := gjson.Get(finalUsage, path).Int(); got != want {
+					t.Fatalf("usage.%s=%d want=%d usage=%s", path, got, want, finalUsage)
+				}
+			}
+			if gjson.Get(finalUsage, "iterations.0.cache_creation_input_tokens").Int() != 7 {
+				t.Fatalf("iteration cache total changed: %s", finalUsage)
+			}
+		})
+	}
+}
+
 func TestDistilledCompatibilityPreservesDottedToolCalls(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -911,6 +999,24 @@ func TestRateLimitPolicyCooldownSecondsNormalises(t *testing.T) {
 				t.Fatalf("cooldown seconds = %d, want %d", got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestRateLimitPolicySteppedCooldown(t *testing.T) {
+	policy := rateLimitPolicy{
+		CoolingThreshold:       3,
+		CooldownSeconds:        120,
+		SteppedCooldownEnabled: true,
+		CooldownStepSeconds:    15,
+	}
+	for strikes, want := range map[int]int{1: 60, 2: 75, 3: 90, 4: 105, 5: 120, 8: 120} {
+		if got := policy.cooldownForStrikes(strikes); got != want {
+			t.Fatalf("strikes %d cooldown = %d, want %d", strikes, got, want)
+		}
+	}
+	policy.CooldownStepSeconds = 0
+	if got := policy.cooldownForStrikes(2); got != 90 {
+		t.Fatalf("default cooldown step = %d, want 90", got)
 	}
 }
 

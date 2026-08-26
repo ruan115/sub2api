@@ -221,12 +221,14 @@ type strategyAccountObservation struct {
 
 type strategyObservation struct {
 	dispatchStrategy
-	AccountsAlive   int                          `json:"accounts_alive"`
-	AccountsPending int                          `json:"accounts_pending"`
-	CurrentRPM      int                          `json:"current_rpm"`
-	CurrentTPM      int64                        `json:"current_tpm"`
-	CurrentInflight int                          `json:"current_inflight"`
-	Accounts        []strategyAccountObservation `json:"accounts"`
+	AccountsAlive        int                          `json:"accounts_alive"`
+	AccountsPending      int                          `json:"accounts_pending"`
+	CurrentRPM           int                          `json:"current_rpm"`
+	RPMCapacity          int64                        `json:"rpm_capacity"`
+	RPMCapacityUnlimited bool                         `json:"rpm_capacity_unlimited"`
+	CurrentTPM           int64                        `json:"current_tpm"`
+	CurrentInflight      int                          `json:"current_inflight"`
+	Accounts             []strategyAccountObservation `json:"accounts"`
 }
 
 // handleStrategyObserve returns every strategy with its live per-account load
@@ -246,7 +248,8 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			a.strategy_id IS NOT NULL AS direct_binding,
 			COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_rpm,
 			COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_tpm,
-			COALESCE((SELECT f.requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight
+			COALESCE((SELECT f.requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight,
+			COALESCE((SELECT threshold.rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > `+nowSQL+`), 0) AS temporary_rpm
 			FROM accounts a
 			WHERE a.deleted_at IS NULL AND a.archived_at IS NULL
 			AND `+accountStatePredicate("a", "normal")+`
@@ -260,9 +263,9 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 		}
 		for rows.Next() {
 			var item strategyAccountObservation
-			var alive, direct int
+			var alive, direct, temporaryRPM int
 			var groupIDs string
-			if err := rows.Scan(&item.AccountID, &item.Name, &item.Status, &item.BaseRPM, &item.Concurrency, &groupIDs, &alive, &direct, &item.RPM, &item.TPM, &item.Inflight); err != nil {
+			if err := rows.Scan(&item.AccountID, &item.Name, &item.Status, &item.BaseRPM, &item.Concurrency, &groupIDs, &alive, &direct, &item.RPM, &item.TPM, &item.Inflight, &temporaryRPM); err != nil {
 				rows.Close()
 				writeDBError(w, err)
 				return
@@ -283,6 +286,18 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			}
 			if item.Alive {
 				observation.AccountsAlive++
+				effectiveRPM := item.BaseRPM
+				if strategy.RPMLimit > 0 {
+					effectiveRPM = strategy.RPMLimit
+				}
+				if temporaryRPM > 0 && (effectiveRPM <= 0 || temporaryRPM < effectiveRPM) {
+					effectiveRPM = temporaryRPM
+				}
+				if effectiveRPM > 0 {
+					observation.RPMCapacity += int64(effectiveRPM)
+				} else {
+					observation.RPMCapacityUnlimited = true
+				}
 			}
 			observation.CurrentRPM += item.RPM
 			observation.CurrentTPM += item.TPM
@@ -295,7 +310,6 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			return
 		}
 		rows.Close()
-		observation.BoundAccounts = len(observation.Accounts)
 		result = append(result, observation)
 	}
 	writeJSON(w, http.StatusOK, result)

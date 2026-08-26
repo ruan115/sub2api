@@ -301,6 +301,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	}
 	prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
 	prepared.MaskQuotaHeaders = key.QuotaHeaderMasking
+	prepared.CacheCreationDetail = key.CacheCreationDetail
 	upstreamURL, err := upstreamClaudeURL(account.ExtraJSON, "/v1/messages")
 	if err != nil {
 		return gatewayHedgeOutcome{err: err}

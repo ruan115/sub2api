@@ -84,6 +84,16 @@ func (a *app) migrateSharedData() error {
 		), '') WHERE event_type = 'invalidated' AND reason = ''`); err != nil {
 		return fmt.Errorf("backfill account invalidation reasons: %w", err)
 	}
+	if err := a.migrateReauthorizationStats(); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`INSERT OR IGNORE INTO account_usage_totals
+		(account_id, request_count, input_tokens, output_tokens, billed_cost, actual_cost, updated_at)
+		SELECT account_id, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(billed_cost), 0), COALESCE(SUM(actual_cost), 0), MAX(created_at)
+		FROM usage_logs GROUP BY account_id`); err != nil {
+		return fmt.Errorf("backfill account usage totals: %w", err)
+	}
 	if err := a.backfillAccountSubscriptions(); err != nil {
 		return err
 	}
@@ -106,6 +116,22 @@ func (a *app) migrateSharedData() error {
 	// them after a crash or restart, so never carry them into this process.
 	if _, err := a.db.Exec(`DELETE FROM account_inflight`); err != nil {
 		return fmt.Errorf("reset stale account in-flight leases: %w", err)
+	}
+	return nil
+}
+
+func (a *app) migrateReauthorizationStats() error {
+	if _, err := a.db.Exec(`UPDATE accounts SET
+		reauthorization_count = COALESCE((SELECT CASE WHEN COUNT(*) > 1 THEN COUNT(*) - 1 ELSE 0 END
+			FROM account_lifecycle_events e WHERE e.account_id = accounts.id AND e.event_type = 'onboarded'), 0),
+		reauthorized_at = (SELECT MAX(e.created_at) FROM account_lifecycle_events e
+			WHERE e.account_id = accounts.id AND e.event_type = 'onboarded'
+			AND e.created_at > (SELECT MIN(first_event.created_at) FROM account_lifecycle_events first_event
+				WHERE first_event.account_id = accounts.id AND first_event.event_type = 'onboarded'))
+		WHERE reauthorization_count = 0 AND reauthorized_at IS NULL
+		AND (SELECT COUNT(*) FROM account_lifecycle_events existing_events
+			WHERE existing_events.account_id = accounts.id AND existing_events.event_type = 'onboarded') > 1`); err != nil {
+		return fmt.Errorf("backfill reauthorization stats: %w", err)
 	}
 	return nil
 }

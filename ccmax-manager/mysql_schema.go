@@ -48,10 +48,13 @@ func (a *app) migrateMySQL() error {
 			reject_anthropic_downgrade_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				reject_distillation_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				quota_header_masking_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				cache_creation_detail_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
 				rate_limit_downweight_enabled TINYINT(1) NOT NULL DEFAULT 1,
 				rate_limit_cooling_threshold INT NOT NULL DEFAULT 3,
 				rate_limit_wait_seconds INT NOT NULL DEFAULT 120,
+				rate_limit_stepped_cooldown_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				rate_limit_cooldown_step_seconds INT NOT NULL DEFAULT 30,
 				capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INT NOT NULL DEFAULT 30,
 			strategy_required_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -98,12 +101,13 @@ func (a *app) migrateMySQL() error {
 			latency_ms INT NULL,
 			last_test_at DATETIME(3) NULL,
 			last_error TEXT NOT NULL DEFAULT (''),
+			reuse_approved_at DATETIME(3) NULL,
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			deleted_at DATETIME(3) NULL,
 			UNIQUE KEY idx_proxy_unique (pool_id, identity_hash),
 			KEY idx_proxy_pool_status (pool_id, status, deleted_at),
-			KEY idx_proxy_identity (protocol, host, port, username, password),
+			KEY idx_proxy_identity (protocol, host, port),
 			CONSTRAINT fk_proxies_pool FOREIGN KEY (pool_id) REFERENCES proxy_pools(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS users (
@@ -172,6 +176,8 @@ func (a *app) migrateMySQL() error {
 			rate_limit_tier VARCHAR(128) NOT NULL DEFAULT '',
 			account_price DECIMAL(24,12) NOT NULL DEFAULT 0,
 			onboarded_at DATETIME(3) NULL,
+			reauthorized_at DATETIME(3) NULL,
+			reauthorization_count INT NOT NULL DEFAULT 0,
 			invalidated_at DATETIME(3) NULL,
 			survival_seconds_total BIGINT NOT NULL DEFAULT 0,
 			archived_at DATETIME(3) NULL,
@@ -295,6 +301,16 @@ func (a *app) migrateMySQL() error {
 			CONSTRAINT fk_usage_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
 			CONSTRAINT fk_usage_api_key FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS account_usage_totals (
+			account_id BIGINT NOT NULL PRIMARY KEY,
+			request_count BIGINT NOT NULL DEFAULT 0,
+			input_tokens BIGINT NOT NULL DEFAULT 0,
+			output_tokens BIGINT NOT NULL DEFAULT 0,
+			billed_cost DECIMAL(24,12) NOT NULL DEFAULT 0,
+			actual_cost DECIMAL(24,12) NOT NULL DEFAULT 0,
+			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			CONSTRAINT fk_account_usage_totals_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS feature_migrations (
 			name VARCHAR(191) NOT NULL PRIMARY KEY,
 			applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
@@ -309,6 +325,7 @@ func (a *app) migrateMySQL() error {
 			account_id BIGINT NOT NULL,
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			KEY idx_account_rpm (account_id, created_at),
+			KEY idx_account_rpm_created (created_at, account_id),
 			CONSTRAINT fk_account_rpm_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS dispatch_sessions (
@@ -317,6 +334,7 @@ func (a *app) migrateMySQL() error {
 			account_id BIGINT NOT NULL,
 			expires_at DATETIME(3) NOT NULL,
 			PRIMARY KEY (session_hash, api_key_id),
+			KEY idx_dispatch_sessions_expiry (expires_at),
 			CONSTRAINT fk_dispatch_sessions_key FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE,
 			CONSTRAINT fk_dispatch_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -528,7 +546,19 @@ func (a *app) migrateMySQL() error {
 	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_wait_seconds = ? WHERE rate_limit_wait_seconds < ? OR rate_limit_wait_seconds > ?`, defaultRateLimitCooldownSeconds, minRateLimitCooldownSeconds, maxRateLimitCooldownSeconds); err != nil {
 		return fmt.Errorf("normalise MySQL group 429 cooldown seconds: %w", err)
 	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_stepped_cooldown_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_cooldown_step_seconds", "INT NOT NULL DEFAULT 30"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_cooldown_step_seconds = ? WHERE rate_limit_cooldown_step_seconds < 1 OR rate_limit_cooldown_step_seconds > ?`, defaultRateLimitCooldownStepSeconds, maxRateLimitCooldownStepSeconds); err != nil {
+		return fmt.Errorf("normalise MySQL group 429 cooldown step seconds: %w", err)
+	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "quota_header_masking_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "cache_creation_detail_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "rate_limit_reason", "VARCHAR(32) NOT NULL DEFAULT ''"); err != nil {
@@ -546,8 +576,28 @@ func (a *app) migrateMySQL() error {
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_refreshed_at", "DATETIME(3) NULL"); err != nil {
 		return err
 	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "reauthorized_at", "DATETIME(3) NULL"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "reauthorization_count", "INT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := ensureMySQLColumn(a.db.DB, "proxy_pools", "single_use_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
 		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "proxies", "reuse_approved_at", "DATETIME(3) NULL"); err != nil {
+		return err
+	}
+	for _, index := range []struct {
+		table, name, columns string
+	}{
+		{"account_rpm_events", "idx_account_rpm_created", "`created_at`, `account_id`"},
+		{"dispatch_sessions", "idx_dispatch_sessions_expiry", "`expires_at`"},
+		{"account_model_cooldowns", "idx_account_model_cooldowns_expiry", "`reset_at`, `account_id`, `model`"},
+	} {
+		if err := ensureMySQLIndex(a.db.DB, index.table, index.name, index.columns); err != nil {
+			return err
+		}
 	}
 
 	seeds := []string{
@@ -581,6 +631,20 @@ func ensureMySQLColumn(db *sql.DB, table, column, definition string) error {
 	}
 	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `%s` %s", table, column, definition)); err != nil {
 		return fmt.Errorf("add MySQL column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func ensureMySQLIndex(db *sql.DB, table, index, columns string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`, table, index).Scan(&count); err != nil {
+		return fmt.Errorf("inspect MySQL index %s.%s: %w", table, index, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD INDEX `%s` (%s)", table, index, columns)); err != nil {
+		return fmt.Errorf("add MySQL index %s.%s: %w", table, index, err)
 	}
 	return nil
 }

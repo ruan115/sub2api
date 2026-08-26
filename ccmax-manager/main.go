@@ -23,7 +23,6 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 //go:embed web/*
@@ -91,10 +90,13 @@ type group struct {
 	RejectAnthropicDowngrade   bool     `json:"reject_anthropic_downgrade_enabled"`
 	RejectDistillation         bool     `json:"reject_distillation_enabled"`
 	QuotaHeaderMasking         bool     `json:"quota_header_masking_enabled"`
+	CacheCreationDetail        bool     `json:"cache_creation_detail_enabled"`
 	OverloadCooldownSeconds    int      `json:"overload_cooldown_seconds"`
 	RateLimitDownweightEnabled bool     `json:"rate_limit_downweight_enabled"`
 	RateLimitCoolingThreshold  int      `json:"rate_limit_cooling_threshold"`
 	RateLimitWaitSeconds       int      `json:"rate_limit_wait_seconds"`
+	RateLimitSteppedCooldown   bool     `json:"rate_limit_stepped_cooldown_enabled"`
+	RateLimitCooldownStep      int      `json:"rate_limit_cooldown_step_seconds"`
 	CapacityQueueEnabled       bool     `json:"capacity_queue_enabled"`
 	CapacityQueueTimeout       int      `json:"capacity_queue_timeout_seconds"`
 	StrategyRequiredEnabled    bool     `json:"strategy_required_enabled"`
@@ -128,10 +130,13 @@ type groupInput struct {
 	RejectAnthropicDowngrade   *bool    `json:"reject_anthropic_downgrade_enabled"`
 	RejectDistillation         *bool    `json:"reject_distillation_enabled"`
 	QuotaHeaderMasking         *bool    `json:"quota_header_masking_enabled"`
+	CacheCreationDetail        *bool    `json:"cache_creation_detail_enabled"`
 	OverloadCooldownSeconds    *int     `json:"overload_cooldown_seconds"`
 	RateLimitDownweightEnabled *bool    `json:"rate_limit_downweight_enabled"`
 	RateLimitCoolingThreshold  *int     `json:"rate_limit_cooling_threshold"`
 	RateLimitWaitSeconds       *int     `json:"rate_limit_wait_seconds"`
+	RateLimitSteppedCooldown   *bool    `json:"rate_limit_stepped_cooldown_enabled"`
+	RateLimitCooldownStep      *int     `json:"rate_limit_cooldown_step_seconds"`
 	CapacityQueueEnabled       *bool    `json:"capacity_queue_enabled"`
 	CapacityQueueTimeout       *int     `json:"capacity_queue_timeout_seconds"`
 	StrategyRequiredEnabled    *bool    `json:"strategy_required_enabled"`
@@ -144,71 +149,73 @@ type groupInput struct {
 }
 
 type account struct {
-	ID               int64          `json:"id"`
-	Name             string         `json:"name"`
-	Platform         string         `json:"platform"`
-	AuthType         string         `json:"auth_type"`
-	CredentialHint   string         `json:"credential_hint"`
-	SourceSKHint     string         `json:"source_sk_hint"`
-	HasCredentials   bool           `json:"has_credentials"`
-	Credentials      map[string]any `json:"credentials,omitempty"`
-	Extra            map[string]any `json:"extra"`
-	Status           string         `json:"status"`
-	Schedulable      bool           `json:"schedulable"`
-	Concurrency      int            `json:"concurrency"`
-	Priority         int            `json:"priority"`
-	RateMultiplier   float64        `json:"rate_multiplier"`
-	Notes            string         `json:"notes"`
-	ErrorMessage     string         `json:"error_message"`
-	LastUsedAt       string         `json:"last_used_at"`
-	ExpiresAt        string         `json:"expires_at"`
-	RateLimitResetAt string         `json:"rate_limit_reset_at"`
-	RateLimitWindow  string         `json:"rate_limit_window"`
-	RateLimitReason  string         `json:"rate_limit_reason"`
-	Consecutive429   int            `json:"consecutive_429"`
-	Last429At        string         `json:"last_429_at"`
-	DownweightUntil  string         `json:"rate_limit_downweight_until"`
-	QuotaRefreshedAt string         `json:"quota_refreshed_at"`
-	LimitWindow      string         `json:"limit_window"`
-	GroupIDs         []string       `json:"group_ids"`
-	CreatedAt        string         `json:"created_at"`
-	UpdatedAt        string         `json:"updated_at"`
-	ProxyPoolID      *int64         `json:"proxy_pool_id"`
-	ProxyPoolName    string         `json:"proxy_pool_name"`
-	ProxyID          *int64         `json:"proxy_id"`
-	ProxyName        string         `json:"proxy_name"`
-	ProxyHint        string         `json:"proxy_hint"`
-	ProxyIP          string         `json:"proxy_ip"`
-	AutoProxy        bool           `json:"auto_proxy"`
-	BaseRPM          int            `json:"base_rpm"`
-	RPMStrategy      string         `json:"rpm_strategy"`
-	RPMStickyBuffer  int            `json:"rpm_sticky_buffer"`
-	UserMsgQueueMode string         `json:"user_msg_queue_mode"`
-	StrategyID       *int64         `json:"strategy_id"`
-	AuthStatus       string         `json:"auth_status"`
-	AuthError        string         `json:"auth_error"`
-	AuthCheckedAt    string         `json:"auth_checked_at"`
-	TokenExpiresAt   string         `json:"token_expires_at"`
-	Quota5H          float64        `json:"quota_5h_utilization"`
-	Quota5HResetAt   string         `json:"quota_5h_reset_at"`
-	Quota7D          float64        `json:"quota_7d_utilization"`
-	Quota7DResetAt   string         `json:"quota_7d_reset_at"`
-	QuotaSampledAt   string         `json:"quota_sampled_at"`
-	SubscriptionType string         `json:"subscription_type"`
-	RateLimitTier    string         `json:"rate_limit_tier"`
-	AccountPrice     float64        `json:"account_price"`
-	OnboardedAt      string         `json:"onboarded_at"`
-	InvalidatedAt    string         `json:"invalidated_at"`
-	ArchivedAt       string         `json:"archived_at"`
-	SurvivalTotal    int64          `json:"survival_seconds_total"`
-	SurvivalSeconds  int64          `json:"survival_seconds"`
-	RequestCount     int64          `json:"request_count"`
-	InputTokens      int64          `json:"input_tokens"`
-	OutputTokens     int64          `json:"output_tokens"`
-	TotalBilledCost  float64        `json:"total_billed_cost"`
-	TotalActualCost  float64        `json:"total_actual_cost"`
-	ProxyStatus      string         `json:"proxy_status"`
-	DispatchStatus   string         `json:"dispatch_status"`
+	ID                   int64          `json:"id"`
+	Name                 string         `json:"name"`
+	Platform             string         `json:"platform"`
+	AuthType             string         `json:"auth_type"`
+	CredentialHint       string         `json:"credential_hint"`
+	SourceSKHint         string         `json:"source_sk_hint"`
+	HasCredentials       bool           `json:"has_credentials"`
+	Credentials          map[string]any `json:"credentials,omitempty"`
+	Extra                map[string]any `json:"extra"`
+	Status               string         `json:"status"`
+	Schedulable          bool           `json:"schedulable"`
+	Concurrency          int            `json:"concurrency"`
+	Priority             int            `json:"priority"`
+	RateMultiplier       float64        `json:"rate_multiplier"`
+	Notes                string         `json:"notes"`
+	ErrorMessage         string         `json:"error_message"`
+	LastUsedAt           string         `json:"last_used_at"`
+	ExpiresAt            string         `json:"expires_at"`
+	RateLimitResetAt     string         `json:"rate_limit_reset_at"`
+	RateLimitWindow      string         `json:"rate_limit_window"`
+	RateLimitReason      string         `json:"rate_limit_reason"`
+	Consecutive429       int            `json:"consecutive_429"`
+	Last429At            string         `json:"last_429_at"`
+	DownweightUntil      string         `json:"rate_limit_downweight_until"`
+	QuotaRefreshedAt     string         `json:"quota_refreshed_at"`
+	LimitWindow          string         `json:"limit_window"`
+	GroupIDs             []string       `json:"group_ids"`
+	CreatedAt            string         `json:"created_at"`
+	UpdatedAt            string         `json:"updated_at"`
+	ProxyPoolID          *int64         `json:"proxy_pool_id"`
+	ProxyPoolName        string         `json:"proxy_pool_name"`
+	ProxyID              *int64         `json:"proxy_id"`
+	ProxyName            string         `json:"proxy_name"`
+	ProxyHint            string         `json:"proxy_hint"`
+	ProxyIP              string         `json:"proxy_ip"`
+	AutoProxy            bool           `json:"auto_proxy"`
+	BaseRPM              int            `json:"base_rpm"`
+	RPMStrategy          string         `json:"rpm_strategy"`
+	RPMStickyBuffer      int            `json:"rpm_sticky_buffer"`
+	UserMsgQueueMode     string         `json:"user_msg_queue_mode"`
+	StrategyID           *int64         `json:"strategy_id"`
+	AuthStatus           string         `json:"auth_status"`
+	AuthError            string         `json:"auth_error"`
+	AuthCheckedAt        string         `json:"auth_checked_at"`
+	TokenExpiresAt       string         `json:"token_expires_at"`
+	Quota5H              float64        `json:"quota_5h_utilization"`
+	Quota5HResetAt       string         `json:"quota_5h_reset_at"`
+	Quota7D              float64        `json:"quota_7d_utilization"`
+	Quota7DResetAt       string         `json:"quota_7d_reset_at"`
+	QuotaSampledAt       string         `json:"quota_sampled_at"`
+	SubscriptionType     string         `json:"subscription_type"`
+	RateLimitTier        string         `json:"rate_limit_tier"`
+	AccountPrice         float64        `json:"account_price"`
+	OnboardedAt          string         `json:"onboarded_at"`
+	ReauthorizedAt       string         `json:"reauthorized_at"`
+	ReauthorizationCount int            `json:"reauthorization_count"`
+	InvalidatedAt        string         `json:"invalidated_at"`
+	ArchivedAt           string         `json:"archived_at"`
+	SurvivalTotal        int64          `json:"survival_seconds_total"`
+	SurvivalSeconds      int64          `json:"survival_seconds"`
+	RequestCount         int64          `json:"request_count"`
+	InputTokens          int64          `json:"input_tokens"`
+	OutputTokens         int64          `json:"output_tokens"`
+	TotalBilledCost      float64        `json:"total_billed_cost"`
+	TotalActualCost      float64        `json:"total_actual_cost"`
+	ProxyStatus          string         `json:"proxy_status"`
+	DispatchStatus       string         `json:"dispatch_status"`
 }
 
 type accountInput struct {
@@ -395,32 +402,14 @@ type dashboard struct {
 	RecentUsage         []usageLog    `json:"recent_usage"`
 }
 
-func main() {
-	dataPath := envOr("CCMAX_DATA", "ccmax-manager.db")
+func runServer() {
 	addr := envOr("CCMAX_ADDR", "127.0.0.1:8088")
-	a, err := newApp(dataPath)
+	a, err := newApp("")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer a.db.Close()
 	defer a.redis.Close()
-	if source := strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_FROM_SQLITE")); source != "" {
-		if a.db.dialect != dialectMySQL {
-			log.Fatal("CCMAX_MIGRATE_FROM_SQLITE requires CCMAX_MYSQL_DSN")
-		}
-		report, err := migrateSQLiteToMySQL(
-			source,
-			a.db,
-			strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_RESET_TARGET")) == "1",
-			strings.TrimSpace(os.Getenv("CCMAX_MIGRATE_INCREMENTAL")) == "1",
-		)
-		if err != nil {
-			log.Fatal(err)
-		}
-		encoded, _ := json.Marshal(report)
-		log.Printf("SQLite to MySQL migration completed: %s", encoded)
-		return
-	}
 	stopPricing := a.startPriceSyncScheduler()
 	defer stopPricing()
 	stopTokenRefresh := a.startTokenRefreshScheduler()
@@ -579,10 +568,13 @@ func (a *app) migrate() error {
 			reject_anthropic_downgrade_enabled INTEGER NOT NULL DEFAULT 0,
 			reject_distillation_enabled INTEGER NOT NULL DEFAULT 0,
 			quota_header_masking_enabled INTEGER NOT NULL DEFAULT 0,
+			cache_creation_detail_enabled INTEGER NOT NULL DEFAULT 0,
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
 			rate_limit_downweight_enabled INTEGER NOT NULL DEFAULT 1,
 			rate_limit_cooling_threshold INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10),
 			rate_limit_wait_seconds INTEGER NOT NULL DEFAULT 120 CHECK (rate_limit_wait_seconds BETWEEN 60 AND 120),
+			rate_limit_stepped_cooldown_enabled INTEGER NOT NULL DEFAULT 0,
+			rate_limit_cooldown_step_seconds INTEGER NOT NULL DEFAULT 30 CHECK (rate_limit_cooldown_step_seconds BETWEEN 1 AND 60),
 			capacity_queue_enabled INTEGER NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INTEGER NOT NULL DEFAULT 30 CHECK (capacity_queue_timeout_seconds BETWEEN 1 AND 600),
 			strategy_required_enabled INTEGER NOT NULL DEFAULT 0,
@@ -687,6 +679,15 @@ func (a *app) migrate() error {
 			duration_ms INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		)`,
+		`CREATE TABLE IF NOT EXISTS account_usage_totals (
+			account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+			request_count INTEGER NOT NULL DEFAULT 0,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			billed_cost REAL NOT NULL DEFAULT 0,
+			actual_cost REAL NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_dispatch ON accounts(status, schedulable, priority, last_used_at) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_account_groups_group ON account_groups(group_id, priority, account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_model_cooldowns_reset ON account_model_cooldowns(model, reset_at, account_id)`,
@@ -741,6 +742,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/proxies/batch-test", a.handleProxyBatchTest)
 	mux.HandleFunc("PUT /api/proxies/{id}", a.handleProxyUpdate)
 	mux.HandleFunc("DELETE /api/proxies/{id}", a.handleProxyDelete)
+	mux.HandleFunc("POST /api/proxies/{id}/restore", a.handleProxyRestore)
 	mux.HandleFunc("POST /api/proxies/{id}/test", a.handleProxyTest)
 	mux.HandleFunc("GET /api/dashboard", a.handleDashboard)
 	mux.HandleFunc("GET /api/groups", a.handleGroups)
@@ -863,7 +865,15 @@ func (a *app) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "runtime store unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	runtimeStore := "mysql"
+	if a.redis != nil {
+		runtimeStore = "redis"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":        "ok",
+		"database":      string(a.db.dialect),
+		"runtime_store": runtimeStore,
+	})
 }
 
 func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -949,7 +959,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -959,7 +969,7 @@ func (a *app) listGroups() ([]group, error) {
 		var item group
 		var daily, monthly sql.NullFloat64
 		var strategyID sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.QuotaHeaderMasking, &item.OverloadCooldownSeconds, &item.RateLimitDownweightEnabled, &item.RateLimitCoolingThreshold, &item.RateLimitWaitSeconds, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.QuotaHeaderMasking, &item.CacheCreationDetail, &item.OverloadCooldownSeconds, &item.RateLimitDownweightEnabled, &item.RateLimitCoolingThreshold, &item.RateLimitWaitSeconds, &item.RateLimitSteppedCooldown, &item.RateLimitCooldownStep, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -1014,6 +1024,9 @@ func normalizeGroupInput(input *groupInput) error {
 	}
 	if input.RateLimitWaitSeconds != nil && (*input.RateLimitWaitSeconds < minRateLimitCooldownSeconds || *input.RateLimitWaitSeconds > maxRateLimitCooldownSeconds) {
 		return fmt.Errorf("429 cooldown must be between %d and %d seconds", minRateLimitCooldownSeconds, maxRateLimitCooldownSeconds)
+	}
+	if input.RateLimitCooldownStep != nil && (*input.RateLimitCooldownStep < 1 || *input.RateLimitCooldownStep > maxRateLimitCooldownStepSeconds) {
+		return fmt.Errorf("429 cooldown step must be between 1 and %d seconds", maxRateLimitCooldownStepSeconds)
 	}
 	if input.CapacityQueueTimeout != nil && (*input.CapacityQueueTimeout < 1 || *input.CapacityQueueTimeout > 600) {
 		return errors.New("capacity queue timeout must be between 1 and 600 seconds")
@@ -1139,7 +1152,7 @@ func (a *app) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	for attempt := 0; attempt < 5; attempt++ {
 		id = "g_" + randomSecret(6)
-		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitDownweightEnabled, true)), intPointerValue(input.RateLimitCoolingThreshold, defaultRateLimitCoolingThreshold), intPointerValue(input.RateLimitWaitSeconds, defaultRateLimitCooldownSeconds), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
+		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), boolInt(boolPointerValue(input.CacheCreationDetail, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitDownweightEnabled, true)), intPointerValue(input.RateLimitCoolingThreshold, defaultRateLimitCoolingThreshold), intPointerValue(input.RateLimitWaitSeconds, defaultRateLimitCooldownSeconds), boolInt(boolPointerValue(input.RateLimitSteppedCooldown, false)), intPointerValue(input.RateLimitCooldownStep, defaultRateLimitCooldownStepSeconds), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
 		if err == nil {
 			break
 		}
@@ -1246,6 +1259,10 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.QuotaHeaderMasking != nil {
 		quotaHeaderMasking = boolInt(*input.QuotaHeaderMasking)
 	}
+	var cacheCreationDetail any
+	if input.CacheCreationDetail != nil {
+		cacheCreationDetail = boolInt(*input.CacheCreationDetail)
+	}
 	var overloadCooldown any
 	if input.OverloadCooldownSeconds != nil {
 		overloadCooldown = *input.OverloadCooldownSeconds
@@ -1261,6 +1278,14 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	var rateLimitWaitSeconds any
 	if input.RateLimitWaitSeconds != nil {
 		rateLimitWaitSeconds = *input.RateLimitWaitSeconds
+	}
+	var rateLimitSteppedCooldown any
+	if input.RateLimitSteppedCooldown != nil {
+		rateLimitSteppedCooldown = boolInt(*input.RateLimitSteppedCooldown)
+	}
+	var rateLimitCooldownStep any
+	if input.RateLimitCooldownStep != nil {
+		rateLimitCooldownStep = *input.RateLimitCooldownStep
 	}
 	var capacityQueueEnabled any
 	if input.CapacityQueueEnabled != nil {
@@ -1284,7 +1309,7 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_downweight_enabled = COALESCE(?, rate_limit_downweight_enabled), rate_limit_cooling_threshold = COALESCE(?, rate_limit_cooling_threshold), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, overloadCooldown, rateLimitDownweight, rateLimitCoolingThreshold, rateLimitWaitSeconds, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), cache_creation_detail_enabled = COALESCE(?, cache_creation_detail_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_downweight_enabled = COALESCE(?, rate_limit_downweight_enabled), rate_limit_cooling_threshold = COALESCE(?, rate_limit_cooling_threshold), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), rate_limit_stepped_cooldown_enabled = COALESCE(?, rate_limit_stepped_cooldown_enabled), rate_limit_cooldown_step_seconds = COALESCE(?, rate_limit_cooldown_step_seconds), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, cacheCreationDetail, overloadCooldown, rateLimitDownweight, rateLimitCoolingThreshold, rateLimitWaitSeconds, rateLimitSteppedCooldown, rateLimitCooldownStep, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1482,28 +1507,25 @@ const accountSelectBase = `SELECT a.id, a.name, a.platform, a.auth_type, a.crede
 	a.auto_proxy, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.strategy_id,
 	a.auth_status, a.auth_error, a.auth_checked_at, a.token_expires_at,
 	a.quota_5h_utilization, a.quota_5h_reset_at, a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_sampled_at,
-	a.subscription_type, a.rate_limit_tier, a.account_price, a.onboarded_at, a.invalidated_at, a.archived_at, a.survival_seconds_total, COALESCE(px.status, archived_px.status, ''), `
+	a.subscription_type, a.rate_limit_tier, a.account_price, a.onboarded_at, a.reauthorized_at, a.reauthorization_count, a.invalidated_at, a.archived_at, a.survival_seconds_total, COALESCE(px.status, archived_px.status, ''), `
 
-const accountUsageCorrelatedFields = `
-	(SELECT COUNT(*) FROM usage_logs u WHERE u.account_id = a.id),
-	COALESCE((SELECT SUM(u.input_tokens) FROM usage_logs u WHERE u.account_id = a.id), 0),
-	COALESCE((SELECT SUM(u.output_tokens) FROM usage_logs u WHERE u.account_id = a.id), 0),
-	COALESCE((SELECT SUM(u.billed_cost) FROM usage_logs u WHERE u.account_id = a.id), 0),
-	COALESCE((SELECT SUM(u.actual_cost) FROM usage_logs u WHERE u.account_id = a.id), 0)`
+const accountUsageSummaryFields = `COALESCE(aut.request_count, 0), COALESCE(aut.input_tokens, 0),
+	COALESCE(aut.output_tokens, 0), COALESCE(aut.billed_cost, 0), COALESCE(aut.actual_cost, 0)`
 
 const accountSelectFrom = `
-	FROM accounts a LEFT JOIN proxy_pools pp ON pp.id = a.proxy_pool_id LEFT JOIN proxies px ON px.id = a.proxy_id LEFT JOIN proxies archived_px ON archived_px.id = a.archived_proxy_id`
+	FROM accounts a LEFT JOIN proxy_pools pp ON pp.id = a.proxy_pool_id LEFT JOIN proxies px ON px.id = a.proxy_id LEFT JOIN proxies archived_px ON archived_px.id = a.archived_proxy_id
+	LEFT JOIN account_usage_totals aut ON aut.account_id = a.id`
 
-const accountSelect = accountSelectBase + accountUsageCorrelatedFields + accountSelectFrom
-const accountListSelect = accountSelectBase + `0, 0, 0, 0, 0` + accountSelectFrom
+const accountSelect = accountSelectBase + accountUsageSummaryFields + accountSelectFrom
+const accountListSelect = accountSelect
 
 func scanAccount(row scanner, reveal bool) (account, error) {
 	var item account
 	var schedulable, autoProxy int
 	var proxyPoolID, proxyID, strategyID sql.NullInt64
-	var lastUsed, expires, rateLimit, last429, downweightUntil, quotaRefreshed, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, invalidated, archived sql.NullString
+	var lastUsed, expires, rateLimit, last429, downweightUntil, quotaRefreshed, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, reauthorized, invalidated, archived sql.NullString
 	var credentialsJSON, extraJSON string
-	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
+	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &reauthorized, &item.ReauthorizationCount, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
 	if err != nil {
 		return item, err
 	}
@@ -1524,6 +1546,7 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 	item.Quota7DResetAt = nullText(quota7DReset)
 	item.QuotaSampledAt = nullText(quotaSampled)
 	item.OnboardedAt = nullText(onboarded)
+	item.ReauthorizedAt = nullText(reauthorized)
 	item.InvalidatedAt = nullText(invalidated)
 	item.ArchivedAt = nullText(archived)
 	item.SurvivalSeconds = accountSurvivalSeconds(item.OnboardedAt, item.InvalidatedAt, item.SurvivalTotal)
@@ -1537,14 +1560,14 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 }
 
 func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	query := accountListSelect + ` WHERE a.deleted_at IS NULL`
+	where := ` WHERE a.deleted_at IS NULL`
 	args := []any{}
 	archived := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("archived")))
 	switch archived {
 	case "", "exclude":
-		query += ` AND a.archived_at IS NULL`
+		where += ` AND a.archived_at IS NULL`
 	case "only":
-		query += ` AND a.archived_at IS NOT NULL`
+		where += ` AND a.archived_at IS NOT NULL`
 	case "all":
 	default:
 		writeError(w, http.StatusBadRequest, "archived must be exclude, only, or all")
@@ -1553,28 +1576,58 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	if user.Role == "user" {
 		condition, scopeArgs := scopedAccountCondition(user, "a")
-		query += ` AND ` + condition
+		where += ` AND ` + condition
 		args = append(args, scopeArgs...)
 	}
 	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupIDPattern.MatchString(groupID) {
-		query += ` AND EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`
+		where += ` AND EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`
 		args = append(args, groupID)
 	}
-	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" {
-		query += ` AND ` + accountStatePredicate("a", status)
-	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
-		query += ` AND (a.name LIKE ? OR a.notes LIKE ? OR a.credential_hint LIKE ? OR a.source_sk_hint LIKE ?
+		where += ` AND (CAST(a.id AS CHAR) LIKE ? OR a.name LIKE ? OR a.notes LIKE ? OR a.credential_hint LIKE ? OR a.source_sk_hint LIKE ?
 			OR COALESCE(px.name, archived_px.name, '') LIKE ?
 			OR COALESCE(px.host, archived_px.host, '') LIKE ?
 			OR COALESCE(px.exit_ip, archived_px.exit_ip, '') LIKE ?)`
 		term := "%" + search + "%"
-		args = append(args, term, term, term, term, term, term, term)
+		args = append(args, term, term, term, term, term, term, term, term)
 	}
+	baseWhere := where
+	baseArgs := append([]any(nil), args...)
+	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" {
+		where += ` AND ` + accountStatePredicate("a", status)
+	}
+
+	orderBy := `a.priority ASC, a.id ASC`
 	if archived == "only" {
-		query += ` ORDER BY a.archived_at DESC, a.id DESC`
-	} else {
-		query += ` ORDER BY a.priority, a.id`
+		orderBy = `a.archived_at DESC, a.id DESC`
+	}
+	sortColumns := map[string]string{
+		"id":                    "a.id",
+		"account_price":         "a.account_price",
+		"total_billed_cost":     "COALESCE(aut.billed_cost, 0)",
+		"onboarded_at":          "a.onboarded_at",
+		"reauthorized_at":       "a.reauthorized_at",
+		"reauthorization_count": "a.reauthorization_count",
+		"request_count":         "COALESCE(aut.request_count, 0)",
+		"invalidated_at":        "a.invalidated_at",
+		"archived_at":           "a.archived_at",
+		"last_used_at":          "a.last_used_at",
+		"updated_at":            "a.updated_at",
+		"error_time":            "COALESCE(a.invalidated_at, a.updated_at)",
+	}
+	if column := sortColumns[strings.TrimSpace(r.URL.Query().Get("sort"))]; column != "" {
+		direction := "ASC"
+		if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("order")), "desc") {
+			direction = "DESC"
+		}
+		orderBy = column + " " + direction + `, a.id ` + direction
+	}
+	query := accountListSelect + where + ` ORDER BY ` + orderBy
+	paginated := r.URL.Query().Get("paginated") == "1" || r.URL.Query().Has("page")
+	page, pageSize, offset := paginationFromRequest(r, 20, 100)
+	if paginated {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, pageSize, offset)
 	}
 	rows, err := a.db.Query(query, args...)
 	if err != nil {
@@ -1599,10 +1652,6 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	if err := a.loadAccountUsageStats(items); err != nil {
-		writeDBError(w, err)
-		return
-	}
 	groupIDs, err := a.accountGroupIDsBulk(items)
 	if err != nil {
 		writeDBError(w, err)
@@ -1621,7 +1670,41 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			item.GroupIDs = visibleGroups
 		}
 	}
-	writeJSON(w, http.StatusOK, items)
+	if !paginated {
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	countArgs := args[:len(args)-2]
+	var total, summaryRequests, summarySurvival int64
+	var summaryBilled float64
+	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(aut.request_count), 0), COALESCE(SUM(aut.billed_cost), 0), COALESCE(SUM(a.survival_seconds_total), 0)`+accountSelectFrom+where, countArgs...).Scan(&total, &summaryRequests, &summaryBilled, &summarySurvival); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	statusCounts := map[string]int64{}
+	var allCount, normalCount, unavailableCount, fiveHourCount, sevenDayCount, coolingCount, errorCount int64
+	statusQuery := `SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + accountStatePredicate("a", "unavailable") + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + accountStatePredicate("a", "limited_5h") + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + accountStatePredicate("a", "limited_7d") + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + accountStatePredicate("a", "cooling_429") + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + accountStatePredicate("a", "error") + ` THEN 1 ELSE 0 END), 0)` + accountSelectFrom + baseWhere
+	if err := a.db.QueryRow(statusQuery, baseArgs...).Scan(&allCount, &normalCount, &unavailableCount, &fiveHourCount, &sevenDayCount, &coolingCount, &errorCount); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	statusCounts["all"] = allCount
+	statusCounts["normal"] = normalCount
+	statusCounts["unavailable"] = unavailableCount
+	statusCounts["limited_5h"] = fiveHourCount
+	statusCounts["limited_7d"] = sevenDayCount
+	statusCounts["cooling_429"] = coolingCount
+	statusCounts["error"] = errorCount
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages(total, pageSize), "status_counts": statusCounts,
+		"summary": map[string]any{"total": total, "requests": summaryRequests, "billed_cost": summaryBilled, "survival_seconds": summarySurvival},
+	})
 }
 
 func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
@@ -2197,7 +2280,7 @@ func (a *app) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := a.db.Exec(`UPDATE accounts SET status = 'disabled', schedulable = 0, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id)
+	result, err := a.db.Exec(`UPDATE accounts SET status = 'disabled', schedulable = 0, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2238,7 +2321,7 @@ func (a *app) handleAccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE accounts SET status = 'disabled', schedulable = 0, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`)`, args...)
+	result, err := tx.Exec(`UPDATE accounts SET status = 'disabled', schedulable = 0, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2778,6 +2861,9 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 	if _, err := tx.Exec(`UPDATE accounts SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, item.AccountID); err != nil {
 		return usageLog{}, false, err
 	}
+	if err := addAccountUsageTotals(tx, item); err != nil {
+		return usageLog{}, false, err
+	}
 	if input.APIKeyID > 0 {
 		if _, err := tx.Exec(`UPDATE api_keys SET quota_used = quota_used + ?, last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, item.BilledCost, input.APIKeyID); err != nil {
 			return usageLog{}, false, err
@@ -2792,6 +2878,31 @@ func (a *app) recordUsage(input usageInput) (usageLog, bool, error) {
 		return usageLog{}, false, err
 	}
 	return item, true, nil
+}
+
+func addAccountUsageTotals(tx *databaseTx, item usageLog) error {
+	query := `INSERT INTO account_usage_totals (account_id, request_count, input_tokens, output_tokens, billed_cost, actual_cost, updated_at)
+		VALUES (?, 1, ?, ?, ?, ?, ` + nowSQL + `)
+		ON CONFLICT(account_id) DO UPDATE SET
+			request_count = account_usage_totals.request_count + 1,
+			input_tokens = account_usage_totals.input_tokens + excluded.input_tokens,
+			output_tokens = account_usage_totals.output_tokens + excluded.output_tokens,
+			billed_cost = account_usage_totals.billed_cost + excluded.billed_cost,
+			actual_cost = account_usage_totals.actual_cost + excluded.actual_cost,
+			updated_at = excluded.updated_at`
+	if tx.dialect == dialectMySQL {
+		query = `INSERT INTO account_usage_totals (account_id, request_count, input_tokens, output_tokens, billed_cost, actual_cost, updated_at)
+			VALUES (?, 1, ?, ?, ?, ?, ` + nowSQL + `)
+			ON DUPLICATE KEY UPDATE
+				request_count = request_count + 1,
+				input_tokens = input_tokens + VALUES(input_tokens),
+				output_tokens = output_tokens + VALUES(output_tokens),
+				billed_cost = billed_cost + VALUES(billed_cost),
+				actual_cost = actual_cost + VALUES(actual_cost),
+				updated_at = VALUES(updated_at)`
+	}
+	_, err := tx.Exec(query, item.AccountID, item.InputTokens, item.OutputTokens, item.BilledCost, item.ActualCost)
+	return err
 }
 
 func (a *app) getUsageByRequestID(requestID string) (usageLog, error) {
@@ -2960,7 +3071,15 @@ func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 	if filters.From == "" {
 		filters.From = startOfMonthUTC()
 	}
-	summary, err := a.billingSummary(filters)
+	breakdown := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("breakdown")))
+	if breakdown == "" {
+		breakdown = "all"
+	}
+	if breakdown != "all" && breakdown != "group" && breakdown != "account" && breakdown != "purpose" && breakdown != "api_key" {
+		writeError(w, http.StatusBadRequest, "breakdown must be all, group, account, purpose, or api_key")
+		return
+	}
+	summary, err := a.billingSummary(filters, breakdown)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -3002,24 +3121,35 @@ func redactBillingBreakdowns(items []billingBreakdown) {
 	}
 }
 
-func (a *app) billingSummary(filters usageFilters) (billingSummary, error) {
+func (a *app) billingSummary(filters usageFilters, breakdown string) (billingSummary, error) {
 	where, args := buildUsageWhere(filters)
 	result := billingSummary{From: filters.From, To: filters.To, ByGroup: []billingBreakdown{}, ByAccount: []billingBreakdown{}, ByPurpose: []billingBreakdown{}, ByAPIKey: []billingBreakdown{}}
 	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cache_creation_tokens + u.cache_read_tokens), 0), COALESCE(SUM(u.base_cost), 0), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)`+usageFrom+` WHERE `+where, args...).Scan(&result.Totals.Requests, &result.Totals.InputTokens, &result.Totals.OutputTokens, &result.Totals.CacheTokens, &result.Totals.BaseCost, &result.Totals.BilledCost, &result.Totals.ActualCost, &result.Totals.Margin); err != nil {
 		return result, err
 	}
-	var err error
-	result.ByGroup, err = a.queryBreakdown(where, args, "u.group_id", "u.group_id")
-	if err == nil {
-		result.ByAccount, err = a.queryBreakdown(where, args, "CAST(u.account_id AS TEXT)", "u.account_name")
+	type breakdownQuery struct {
+		name     string
+		target   *[]billingBreakdown
+		keyExpr  string
+		nameExpr string
 	}
-	if err == nil {
-		result.ByPurpose, err = a.queryBreakdown(where, args, "u.purpose_key", "u.purpose_name")
+	queries := []breakdownQuery{
+		{name: "group", target: &result.ByGroup, keyExpr: "u.group_id", nameExpr: "u.group_id"},
+		{name: "account", target: &result.ByAccount, keyExpr: "CAST(u.account_id AS CHAR)", nameExpr: "u.account_name"},
+		{name: "purpose", target: &result.ByPurpose, keyExpr: "u.purpose_key", nameExpr: "u.purpose_name"},
+		{name: "api_key", target: &result.ByAPIKey, keyExpr: "COALESCE(CAST(u.api_key_id AS CHAR), '')", nameExpr: `COALESCE(k.name, '手动记录')`},
 	}
-	if err == nil {
-		result.ByAPIKey, err = a.queryBreakdown(where, args, "COALESCE(CAST(u.api_key_id AS TEXT), '')", `COALESCE(k.name, '手动记录')`)
+	for _, query := range queries {
+		if breakdown != "all" && breakdown != query.name {
+			continue
+		}
+		items, err := a.queryBreakdown(where, args, query.keyExpr, query.nameExpr)
+		if err != nil {
+			return result, err
+		}
+		*query.target = items
 	}
-	return result, err
+	return result, nil
 }
 
 func (a *app) queryBreakdown(where string, args []any, keyExpr, nameExpr string) ([]billingBreakdown, error) {

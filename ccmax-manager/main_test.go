@@ -185,6 +185,32 @@ func TestGroupQuotaHeaderMaskingPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	}
 }
 
+func TestGroupCacheCreationDetailPersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "真实缓存明细", "rate_multiplier": 1, "status": "active",
+		"cache_creation_detail_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.CacheCreationDetail {
+		t.Fatalf("group cache creation detail was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.CacheCreationDetail {
+		t.Fatalf("legacy update reset group cache creation detail: %+v", updated)
+	}
+}
+
 func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
@@ -198,7 +224,7 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	var current []group
 	putJSON(t, handler, http.MethodGet, "/api/groups", nil, http.StatusOK, &current)
 	for _, item := range current {
-		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold || item.RateLimitWaitSeconds != defaultRateLimitCooldownSeconds {
+		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold || item.RateLimitWaitSeconds != defaultRateLimitCooldownSeconds || item.RateLimitSteppedCooldown || item.RateLimitCooldownStep != defaultRateLimitCooldownStepSeconds {
 			t.Fatalf("group %s did not default to the previous always-on behaviour: %+v", item.ID, item)
 		}
 	}
@@ -207,9 +233,10 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "429 降权", "rate_multiplier": 1, "status": "active",
 		"rate_limit_downweight_enabled": false, "rate_limit_cooling_threshold": 7,
-		"rate_limit_wait_seconds": 90,
+		"rate_limit_wait_seconds": 90, "rate_limit_stepped_cooldown_enabled": true,
+		"rate_limit_cooldown_step_seconds": 15,
 	}, http.StatusOK, &updated)
-	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 {
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 || !updated.RateLimitSteppedCooldown || updated.RateLimitCooldownStep != 15 {
 		t.Fatalf("group 429 downweight settings were not persisted: %+v", updated)
 	}
 
@@ -217,7 +244,7 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
 	}, http.StatusOK, &updated)
-	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 {
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 || !updated.RateLimitSteppedCooldown || updated.RateLimitCooldownStep != 15 {
 		t.Fatalf("legacy update reset group 429 downweight settings: %+v", updated)
 	}
 
@@ -233,6 +260,12 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 		putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 			"name": "A 分组", "description": "无效冷却", "rate_multiplier": 1, "status": "active",
 			"rate_limit_wait_seconds": seconds,
+		}, http.StatusBadRequest, nil)
+	}
+	for _, seconds := range []int{0, maxRateLimitCooldownStepSeconds + 1} {
+		putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+			"name": "A 分组", "description": "无效阶梯", "rate_multiplier": 1, "status": "active",
+			"rate_limit_cooldown_step_seconds": seconds,
 		}, http.StatusBadRequest, nil)
 	}
 }

@@ -87,6 +87,12 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "quota_header_masking_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Off by default: enabling it stamps the real cache_creation 5m/1h bucket
+	// split (tracked from message_start) into distilled message_delta usage
+	// instead of backfilling zeros.
+	if err := addColumnIfMissing(a.db, "groups", "cache_creation_detail_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(a.db, "groups", "overload_cooldown_seconds", "INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600)"); err != nil {
 		return err
 	}
@@ -104,6 +110,15 @@ func (a *app) migrateAdvancedFeatures() error {
 	}
 	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_wait_seconds = ? WHERE rate_limit_wait_seconds < ? OR rate_limit_wait_seconds > ?`, defaultRateLimitCooldownSeconds, minRateLimitCooldownSeconds, maxRateLimitCooldownSeconds); err != nil {
 		return fmt.Errorf("normalise group 429 cooldown seconds: %w", err)
+	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_stepped_cooldown_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_cooldown_step_seconds", "INTEGER NOT NULL DEFAULT 30 CHECK (rate_limit_cooldown_step_seconds BETWEEN 1 AND 60)"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_cooldown_step_seconds = ? WHERE rate_limit_cooldown_step_seconds < 1 OR rate_limit_cooldown_step_seconds > ?`, defaultRateLimitCooldownStepSeconds, maxRateLimitCooldownStepSeconds); err != nil {
+		return fmt.Errorf("normalise group 429 cooldown step seconds: %w", err)
 	}
 	if err := addColumnIfMissing(a.db, "groups", "strategy_id", "INTEGER REFERENCES dispatch_strategies(id) ON DELETE SET NULL"); err != nil {
 		return err
@@ -294,6 +309,8 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"rate_limit_tier", "TEXT NOT NULL DEFAULT ''"},
 		{"account_price", "REAL NOT NULL DEFAULT 0"},
 		{"onboarded_at", "TEXT"},
+		{"reauthorized_at", "TEXT"},
+		{"reauthorization_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"invalidated_at", "TEXT"},
 		{"survival_seconds_total", "INTEGER NOT NULL DEFAULT 0"},
 		{"archived_at", "TEXT"},
@@ -581,9 +598,13 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 		where = append(where, accountStatePredicate("a", status))
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
-		where = append(where, "(a.name LIKE ? OR a.notes LIKE ? OR a.credential_hint LIKE ?)")
+		where = append(where, `(CAST(a.id AS CHAR) LIKE ? OR a.name LIKE ? OR a.notes LIKE ? OR a.credential_hint LIKE ? OR a.source_sk_hint LIKE ? OR EXISTS (
+			SELECT 1 FROM proxies p_search
+			WHERE p_search.id IN (a.proxy_id, a.archived_proxy_id)
+			AND (p_search.name LIKE ? OR p_search.host LIKE ? OR p_search.exit_ip LIKE ?)
+		))`)
 		term := "%" + search + "%"
-		whereArgs = append(whereArgs, term, term, term)
+		whereArgs = append(whereArgs, term, term, term, term, term, term, term, term)
 	}
 	join := "LEFT JOIN usage_logs u ON u.account_id = a.id"
 	joinArgs := []any{}

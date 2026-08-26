@@ -186,7 +186,7 @@ func accountStatePredicate(alias, state string) string {
 		} else {
 			windowState += " OR (" + alias + ".rate_limit_window NOT IN ('5h', '7d') AND " + fiveHourResetMatches + " AND NOT " + sevenDayResetMatches + ")"
 		}
-		return "(" + unavailableState + " AND (" + windowState + ")" +
+		return "(" + unavailableState + " AND COALESCE(" + alias + ".rate_limit_reason, '') != '429_cooling' AND (" + windowState + ")" +
 			" AND " + alias + ".rate_limit_reset_at IS NOT NULL AND " + alias + ".rate_limit_reset_at > " + nowSQL + ")"
 	}
 	switch state {
@@ -200,6 +200,8 @@ func accountStatePredicate(alias, state string) string {
 		return limitedState("5h")
 	case "limited_7d":
 		return limitedState("7d")
+	case "cooling_429":
+		return "(" + unavailableState + " AND " + alias + ".rate_limit_reason = '429_cooling')"
 	default:
 		return "1 = 1"
 	}
@@ -969,9 +971,9 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 		return err
 	}
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, reauthorized_at = CASE WHEN ? THEN `+nowSQL+` ELSE reauthorized_at END, reauthorization_count = reauthorization_count + CASE WHEN ? THEN 1 ELSE 0 END, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`,
-		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, accountID, leaseOwner)
+		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, previousOnboarded.Valid, previousOnboarded.Valid, accountID, leaseOwner)
 	if err != nil {
 		return err
 	}

@@ -159,7 +159,7 @@
         <div class="sidebar-status">
           <span class="status-dot"></span>
           <div>
-            <strong>SQLite</strong
+            <strong id="database-engine">DATABASE</strong
             ><small id="connection-status">正在连接</small>
           </div>
         </div>
@@ -262,7 +262,8 @@
         </section>
 
         <section class="view" id="view-accounts">
-          <section class="panel filter-bar account-filters">
+          <div class="account-sticky-region">
+            <section class="panel filter-bar account-filters">
             <label class="search-field"
               ><i data-lucide="search"></i
               ><input
@@ -287,22 +288,22 @@
             ><label class="date-filter"
               ><span>结束</span><input type="datetime-local" step="60" id="account-to"
             /></label>
-          </section>
-          <div
-            class="metrics compact-metrics"
-            id="account-summary-metrics"
-          ></div>
-          <div class="status-tabs" id="account-status-tabs">
-            <button class="active" data-account-status="">全部 <b id="status-all-count">0</b></button>
-            <button data-account-status="normal">正常 <b id="status-normal-count">0</b></button>
-            <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
-            <button data-account-status="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
-            <button data-account-status="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
-            <button data-account-status="cooling_429" title="普通瞬时 429 触发 60～120 秒短冷却">429 冷却 <b id="status-cooling-429-count">0</b></button>
-            <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
-          </div>
-          <section class="panel table-panel accounts-panel">
-            <div class="section-heading">
+            </section>
+            <div
+              class="metrics compact-metrics"
+              id="account-summary-metrics"
+            ></div>
+            <div class="status-tabs" id="account-status-tabs">
+              <button class="active" data-account-status="">全部 <b id="status-all-count">0</b></button>
+              <button data-account-status="normal">正常 <b id="status-normal-count">0</b></button>
+              <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
+              <button data-account-status="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
+              <button data-account-status="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
+              <button data-account-status="cooling_429" title="普通瞬时 429 触发 60～120 秒短冷却">429 冷却 <b id="status-cooling-429-count">0</b></button>
+              <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
+            </div>
+            <section class="panel account-sticky-inventory">
+              <div class="section-heading">
               <div>
                 <p class="kicker">ACCOUNT INVENTORY</p>
                 <h2>账号池</h2>
@@ -330,6 +331,14 @@
                   aria-label="检测当前页账号存活状态并刷新列表"
                 >
                   <i data-lucide="refresh-cw"></i>
+                </button>
+                <button
+                  class="button secondary small"
+                  id="copy-selected-accounts"
+                  type="button"
+                  disabled
+                >
+                  <i data-lucide="copy"></i><span>复制已选</span>
                 </button>
                 <button
                   class="button secondary small write-action"
@@ -370,15 +379,15 @@
                   ><b id="selected-account-count">0</b>
                 </button>
               </div>
-            </div>
-            <div class="realtime-load-strip" id="realtime-load-strip" aria-label="60 秒实时负载">
+              </div>
+              <div class="realtime-load-strip" id="realtime-load-strip" aria-label="60 秒实时负载">
               <div class="realtime-load-heading">
                 <span class="realtime-pulse" aria-hidden="true"></span>
                 <strong>实时负载</strong>
                 <small id="realtime-updated-at" title="每 5 秒更新">等待数据</small>
               </div>
-              <div class="realtime-load-item" title="最近 60 秒上游请求数">
-                <span>RPM</span><strong id="realtime-rpm">0</strong><small id="realtime-rpm-capacity">60 秒滚动</small>
+              <div class="realtime-load-item" id="realtime-rpm-item" title="最近 60 秒上游请求数">
+                <span>RPM</span><strong id="realtime-rpm">0 / 0</strong><small id="realtime-rpm-capacity">当前 / 最大承接 RPM</small>
               </div>
               <div class="realtime-load-item" title="上游真实限流口径：未缓存输入（input + cache_creation），缓存读不计入">
                 <span>ITPM</span><strong id="realtime-itpm">0</strong><small>60 秒滚动 · 上游限流口径</small>
@@ -398,23 +407,29 @@
               <div class="realtime-load-item" id="realtime-queue-item" title="正在等待账号并发或 RPM 容量释放的请求">
                 <span>等待队列</span><strong id="realtime-waiting">0</strong><small>容量等待请求</small>
               </div>
-            </div>
+              </div>
+            </section>
+          </div>
+          <section class="panel table-panel accounts-panel">
             <div class="table-wrap">
               <table class="accounts-table resizable-table">
                 <thead>
                   <tr>
-                    <th class="select-column admin-only-column" data-column="select"><input type="checkbox" id="select-all-accounts" aria-label="选择全部账号" /></th>
+                    <th class="select-column" data-column="select"><input type="checkbox" id="select-all-accounts" aria-label="选择当前页账号" /></th>
+                    <th data-column="id"><button class="table-sort" data-account-sort="id">ID<i data-lucide="arrow-up-down"></i></button></th>
                     <th data-column="account" title="账号">账号</th>
                     <th data-column="status" title="状态">状态</th>
                     <th data-column="subscription" title="订阅类型">订阅类型</th>
-                    <th class="num" data-column="price" title="账号价格">账号价格</th>
-                    <th class="num" data-column="billing" title="账号总计费">账号总计费</th>
+                    <th class="num" data-column="price" title="账号价格"><button class="table-sort" data-account-sort="account_price">账号价格<i data-lucide="arrow-up-down"></i></button></th>
+                    <th class="num" data-column="billing" title="账号总计费"><button class="table-sort" data-account-sort="total_billed_cost">账号总计费<i data-lucide="arrow-up-down"></i></button></th>
                     <th data-column="quota" title="5h / 7d 配额窗口与最近 60 秒实时负载">用量窗口</th>
-                    <th class="num" data-column="requests" title="请求数">请求数</th>
-                    <th data-column="onboarded" title="上号时间">上号时间</th>
+                    <th class="num" data-column="requests" title="请求数"><button class="table-sort" data-account-sort="request_count">请求数<i data-lucide="arrow-up-down"></i></button></th>
+                    <th data-column="onboarded" title="上号时间"><button class="table-sort" data-account-sort="onboarded_at">上号时间<i data-lucide="arrow-up-down"></i></button></th>
+                    <th data-column="reauthorized" title="最近成功二次授权"><button class="table-sort" data-account-sort="reauthorized_at">二次授权<i data-lucide="arrow-up-down"></i></button></th>
+                    <th class="num" data-column="reauth-count" title="成功二次授权次数"><button class="table-sort" data-account-sort="reauthorization_count">授权次数<i data-lucide="arrow-up-down"></i></button></th>
                     <th data-column="survival" title="存活时间">存活时间</th>
                     <th data-column="last-used" title="最近使用">最近使用</th>
-                    <th class="actions admin-only-column" data-column="actions" title="操作">操作</th>
+                    <th class="actions" data-column="actions" title="操作">操作</th>
                   </tr>
                 </thead>
                 <tbody id="accounts-body"></tbody>
@@ -448,14 +463,20 @@
               <div><p class="kicker">ACCOUNT LIFECYCLE</p><h2 id="dead-table-title">死亡账户</h2></div>
               <div class="heading-actions">
                 <span class="section-count" id="dead-list-count">0 个账号</span>
+                <button class="button secondary small" id="copy-selected-dead" type="button" disabled>
+                  <i data-lucide="copy"></i><span>复制已选</span>
+                </button>
                 <button class="button danger small write-action admin-only-column" id="archive-selected-accounts" type="button" disabled>
                   <i data-lucide="archive"></i><span>归档已选</span><b id="selected-dead-count">0</b>
+                </button>
+                <button class="button danger small write-action admin-only-column" id="delete-archived-accounts" type="button" hidden disabled>
+                  <i data-lucide="trash-2"></i><span>删除已选</span>
                 </button>
               </div>
             </div>
             <div class="table-wrap">
               <table class="dead-table">
-                <thead><tr><th class="select-column admin-only-column"><input type="checkbox" id="select-all-dead" aria-label="选择全部待归档账号" /></th><th>账号</th><th>订阅</th><th>代理 / IP</th><th>上号时间</th><th>失效时间</th><th>归档时间</th><th>存活时间</th><th class="num">请求数</th><th class="num">总计费</th><th>失效原因</th><th class="actions">操作</th></tr></thead>
+                <thead><tr><th class="select-column"><input type="checkbox" id="select-all-dead" aria-label="选择当前页账户" /></th><th><button class="table-sort" data-dead-sort="id">ID<i data-lucide="arrow-up-down"></i></button></th><th>账号</th><th>订阅</th><th>代理 / IP</th><th><button class="table-sort" data-dead-sort="onboarded_at">上号时间<i data-lucide="arrow-up-down"></i></button></th><th><button class="table-sort" data-dead-sort="reauthorized_at">二次授权<i data-lucide="arrow-up-down"></i></button></th><th class="num"><button class="table-sort" data-dead-sort="reauthorization_count">授权次数<i data-lucide="arrow-up-down"></i></button></th><th><button class="table-sort" data-dead-sort="error_time">失效时间<i data-lucide="arrow-up-down"></i></button></th><th><button class="table-sort" data-dead-sort="archived_at">归档时间<i data-lucide="arrow-up-down"></i></button></th><th>存活时间</th><th class="num"><button class="table-sort" data-dead-sort="request_count">请求数<i data-lucide="arrow-up-down"></i></button></th><th class="num"><button class="table-sort" data-dead-sort="total_billed_cost">总计费<i data-lucide="arrow-up-down"></i></button></th><th>失效原因</th><th class="actions">操作</th></tr></thead>
                 <tbody id="dead-accounts-body"></tbody>
               </table>
             </div>
@@ -1648,6 +1669,19 @@
               <i></i>
             </label>
           </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>真实缓存明细桶</strong>
+              <small title="仅蒸馏兼容模式生效。上游只在 message_start 报告 cache_creation 的 5m/1h 明细，开启后网关把追踪到的真实明细回填进 message_delta 与 iterations；关闭时保持旧行为（缺失补 0，可能与 cache_creation_input_tokens 总量不一致）">开启后 usage.cache_creation 的 5m/1h 明细回填真实值；关闭时缺失补 0</small>
+            </div>
+            <label class="compact-toggle" title="真实缓存明细桶">
+              <input
+                id="group-cache-creation-detail"
+                type="checkbox"
+                aria-label="真实缓存明细桶" />
+              <i></i>
+            </label>
+          </div>
           <section class="group-passthrough-panel" aria-labelledby="group-passthrough-title">
             <div class="group-passthrough-head">
               <span class="group-passthrough-icon" aria-hidden="true">
@@ -1808,7 +1842,7 @@
           <div class="group-mode-setting">
             <div>
               <strong>最长冷却时间</strong>
-              <small>首次冷却 60 秒，重复触发时逐步延长，达到次数阈值后使用此上限</small>
+              <small>首次冷却 60 秒，重复触发时逐步延长，最终不超过此上限</small>
             </div>
             <label class="compact-number" title="429 最长冷却时间">
               <input
@@ -1825,8 +1859,39 @@
           </div>
           <div class="group-mode-setting">
             <div>
+              <strong>429 峰值阶梯冷却</strong>
+              <small>开启后，每次独立 429 峰值按配置秒数递增冷却；同一分钟内的并发 429 仍只计算一次</small>
+            </div>
+            <label class="compact-toggle" title="429 峰值阶梯冷却">
+              <input
+                id="group-rate-limit-stepped-cooldown"
+                type="checkbox"
+                aria-label="429 峰值阶梯冷却" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>阶梯递增时间</strong>
+              <small>第 N 次独立峰值冷却：60 + (N - 1) × 递增秒数，达到最长冷却时间后封顶</small>
+            </div>
+            <label class="compact-number" title="429 阶梯递增时间">
+              <input
+                id="group-rate-limit-cooldown-step"
+                type="number"
+                min="1"
+                max="60"
+                step="1"
+                value="30"
+                required
+                aria-label="429 阶梯递增秒数" />
+              <span>秒</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
               <strong>最长冷却阈值</strong>
-              <small>同一账号达到该次数后，本轮使用配置的最长冷却时间</small>
+              <small>阶梯冷却关闭时生效；同一账号达到该次数后使用最长冷却时间</small>
             </div>
             <label class="compact-number" title="冷却阈值">
               <input
@@ -2006,6 +2071,15 @@
               aria-label="搜索策略账号"
             />
           </label>
+          <label class="strategy-account-group-field">
+            <span class="sr-only">按分组筛选</span>
+            <select id="strategy-account-group" aria-label="按分组筛选策略账号">
+              <option value="">全部分组</option>
+            </select>
+          </label>
+          <button type="button" class="button ghost compact" id="strategy-account-select-visible">
+            选择当前结果
+          </button>
           <span class="section-count" id="strategy-account-count">0 个账号</span>
         </div>
         <div class="strategy-account-list" id="strategy-account-list"></div>
@@ -2082,6 +2156,35 @@
           <button class="button ghost" type="button" data-close-dialog>
             取消</button
           ><button class="button primary" type="submit">保存代理池</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="proxy-restore-dialog" class="modal">
+      <form method="dialog" id="proxy-restore-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">PROXY RESTORE</p>
+            <h2>恢复归档 IP</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <input type="hidden" id="proxy-restore-id" />
+        <div class="form-stack">
+          <label>
+            <span>归档代理</span>
+            <input id="proxy-restore-name" readonly />
+          </label>
+          <label>
+            <span>恢复到代理池</span>
+            <select id="proxy-restore-pool" required></select>
+            <small>一次性 IP 恢复后仅获得一次重新分配机会，完成绑定后恢复许可自动失效。</small>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>取消</button>
+          <button class="button primary" type="submit">确认恢复</button>
         </div>
       </form>
     </dialog>
@@ -2483,6 +2586,29 @@
         <button class="icon-button" type="button" data-close-dialog>×</button>
       </div>
       <div class="audit-detail-grid" id="audit-detail-content"></div>
+    </dialog>
+
+    <dialog id="table-freeze-dialog" class="modal compact-modal">
+      <form method="dialog" id="table-freeze-form">
+        <div class="modal-head">
+          <div>
+            <p class="kicker">TABLE VIEW</p>
+            <h2 id="table-freeze-title">固定表格行</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog>
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <input type="hidden" id="table-freeze-key" />
+        <div class="form-grid two">
+          <label><span>固定前 N 行</span><input id="table-freeze-top" type="number" min="0" max="20" value="0" /></label>
+          <label><span>固定后 N 行</span><input id="table-freeze-bottom" type="number" min="0" max="20" value="0" /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" data-close-dialog>取消</button>
+          <button class="button primary" type="submit">应用</button>
+        </div>
+      </form>
     </dialog>
 
     <dialog id="confirm-dialog" class="modal confirm-modal">

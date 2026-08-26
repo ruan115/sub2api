@@ -217,6 +217,51 @@ func TestAccountArchiveKeepsProxyReusableWhenPoolAllowsReuse(t *testing.T) {
 	createAccount("reusable-archive-second@example.com")
 }
 
+func TestArchivedSingleUseProxyRequiresExplicitRestoreForOneReuse(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	proxyID := createTestForwardProxy(t, a)
+
+	create := func(name string, wantStatus int) account {
+		var item account
+		putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+			"name": name, "platform": "anthropic", "auth_type": "oauth",
+			"credentials": map[string]any{"access_token": name + "-token"}, "extra": map[string]any{},
+			"status": "active", "schedulable": true, "concurrency": 1, "priority": 10,
+			"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+			"rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+		}, wantStatus, &item)
+		return item
+	}
+
+	first := create("single-use-first@example.com", http.StatusCreated)
+	a.markAccountReauth(first.ID, "expired")
+	putJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/accounts/%d/archive", first.ID), map[string]any{}, http.StatusOK, nil)
+
+	var restored proxyRecord
+	putJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/proxies/%d/restore", proxyID), map[string]any{"pool_id": 1}, http.StatusOK, &restored)
+	if restored.PoolID != 1 || restored.Status != "active" || restored.ReuseApprovedAt == "" {
+		t.Fatalf("restored proxy = %+v", restored)
+	}
+
+	second := create("single-use-second@example.com", http.StatusCreated)
+	var approval sql.NullString
+	if err := a.db.QueryRow(`SELECT reuse_approved_at FROM proxies WHERE id = ?`, proxyID).Scan(&approval); err != nil {
+		t.Fatal(err)
+	}
+	if approval.Valid {
+		t.Fatalf("reuse approval remained after account %d bound the proxy", second.ID)
+	}
+	a.markAccountReauth(second.ID, "expired")
+	putJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/accounts/%d/archive", second.ID), map[string]any{}, http.StatusOK, nil)
+	create("single-use-third@example.com", http.StatusConflict)
+}
+
 func TestDeadProxyMigrationQuarantinesLegacyReleasedProxy(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	databasePath := filepath.Join(t.TempDir(), "test.db")

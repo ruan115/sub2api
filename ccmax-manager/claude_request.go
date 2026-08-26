@@ -28,6 +28,7 @@ type claudePreparedRequest struct {
 	CountTokens              bool
 	RejectAnthropicDowngrade bool
 	MaskQuotaHeaders         bool
+	CacheCreationDetail      bool
 	Compat                   *sub2service.CCMaxCompatibilityPrepared
 	Credentials              map[string]any
 }

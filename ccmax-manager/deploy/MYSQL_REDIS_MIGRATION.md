@@ -31,7 +31,7 @@ Run the importer against the backup with:
 ```bash
 CCMAX_MIGRATE_FROM_SQLITE=/path/to/ccmax-snapshot.db \
 CCMAX_MIGRATE_RESET_TARGET=1 \
-/opt/ccmax-manager/ccmax-manager
+go run -tags sqlite_migrate .
 ```
 
 The reset flag is only valid for a disposable shadow target. The importer
@@ -45,7 +45,7 @@ After the baseline import, create another consistent SQLite backup and run:
 ```bash
 CCMAX_MIGRATE_FROM_SQLITE=/path/to/ccmax-final.db \
 CCMAX_MIGRATE_INCREMENTAL=1 \
-/opt/ccmax-manager/ccmax-manager
+go run -tags sqlite_migrate .
 ```
 
 Append-only log tables copy IDs above the MySQL watermark. Mutable tables are
@@ -69,12 +69,14 @@ watermark.
 
 ## Rollback
 
-Keep the final SQLite database and its WAL files until MySQL has passed a full
-backup cycle. To roll back, remove the MySQL/Redis environment file from the
-service, restore the previous binary, and point Nginx back to the SQLite
-instance. Never merge billing by replacing MySQL with an older SQLite snapshot.
+Keep the final SQLite database and its WAL files only as an immutable migration
+source until MySQL has passed a full backup cycle. It must never be restarted as
+a production writer. To roll back the application, start the previous binary
+against the same MySQL database and switch Nginx to it. A database rollback must
+restore a verified MySQL backup while every CCMAX writer is stopped; preserve a
+copy of the failed database first.
 
 Install `ccmax-mysql-backup.sh` and the provided systemd service/timer after
 cutover. A backup is accepted only after `gzip -t` succeeds. Keep the final
-SQLite snapshot until at least one MySQL backup has also been restored into a
-temporary database and its core row counts have been checked.
+SQLite migration snapshot until at least one MySQL backup has also been restored
+into a temporary database and its core row counts have been checked.

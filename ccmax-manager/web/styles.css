@@ -1005,6 +1005,30 @@ svg {
   width: 100%;
   overflow-x: auto;
 }
+.table-wrap.has-frozen-rows {
+  max-height: min(70dvh, 720px);
+  overflow: auto;
+}
+.table-wrap.has-frozen-rows thead th {
+  position: sticky;
+  z-index: 6;
+  top: 0;
+  background: var(--panel-muted);
+}
+.table-wrap tr.frozen-top-row > td,
+.table-wrap tr.frozen-bottom-row > td {
+  position: sticky;
+  z-index: 4;
+  background: var(--panel);
+  box-shadow: 0 1px 0 var(--line);
+}
+.table-wrap tr.frozen-top-row > td {
+  top: var(--frozen-row-offset);
+}
+.table-wrap tr.frozen-bottom-row > td {
+  bottom: var(--frozen-row-offset);
+  box-shadow: 0 -1px 0 var(--line);
+}
 .table-pagination {
   display: flex;
   align-items: center;
@@ -1024,6 +1048,26 @@ svg {
 .pagination-summary b {
   color: var(--ink);
   font-weight: 700;
+}
+.pagination-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pagination-freeze {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+}
+.pagination-freeze svg {
+  width: 13px;
+  height: 13px;
 }
 .pagination-controls,
 .pagination-size {
@@ -1355,10 +1399,12 @@ textarea:focus {
 }
 .accounts-panel {
   margin-top: 0;
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
 }
 .accounts-table {
   width: 100%;
-  min-width: 1020px;
+  min-width: 1310px;
   table-layout: fixed;
 }
 .accounts-table th,
@@ -1370,36 +1416,43 @@ textarea:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.accounts-table th:nth-child(1) {
+.accounts-table th[data-column="select"] {
   width: 36px;
 }
-.accounts-table th:nth-child(2) {
-  width: 140px;
-}
-.accounts-table th:nth-child(3) {
-  width: 88px;
-}
-.accounts-table th:nth-child(4) {
-  width: 64px;
-}
-.accounts-table th:nth-child(5),
-.accounts-table th:nth-child(6) {
-  width: 57px;
-}
-.accounts-table th:nth-child(7) {
-  width: 145px;
-}
-.accounts-table th:nth-child(8) {
+.accounts-table th[data-column="id"] {
   width: 48px;
 }
-.accounts-table th:nth-child(9),
-.accounts-table th:nth-child(11) {
+.accounts-table th[data-column="account"] {
+  width: 140px;
+}
+.accounts-table th[data-column="status"] {
+  width: 88px;
+}
+.accounts-table th[data-column="subscription"] {
+  width: 64px;
+}
+.accounts-table th[data-column="price"],
+.accounts-table th[data-column="billing"] {
+  width: 57px;
+}
+.accounts-table th[data-column="quota"] {
+  width: 145px;
+}
+.accounts-table th[data-column="requests"] {
+  width: 48px;
+}
+.accounts-table th[data-column="onboarded"],
+.accounts-table th[data-column="reauthorized"],
+.accounts-table th[data-column="last-used"] {
   width: 72px;
 }
-.accounts-table th:nth-child(10) {
+.accounts-table th[data-column="reauth-count"] {
+  width: 58px;
+}
+.accounts-table th[data-column="survival"] {
   width: 70px;
 }
-.accounts-table th:nth-child(12) {
+.accounts-table th[data-column="actions"] {
   width: 84px;
 }
 .accounts-table .row-title,
@@ -1464,6 +1517,17 @@ textarea:focus {
   height: 16px;
   min-height: 0;
   accent-color: var(--a);
+}
+.account-sticky-region {
+  position: sticky;
+  top: 88px;
+  z-index: 14;
+  background: var(--canvas);
+  box-shadow: 0 14px 20px -20px rgba(29, 29, 31, 0.42);
+}
+.account-sticky-inventory {
+  overflow: hidden;
+  border-radius: 8px 8px 0 0;
 }
 .account-filters {
   flex-wrap: wrap;
@@ -1689,6 +1753,9 @@ textarea:focus {
   display: grid;
   align-content: center;
   gap: 2px;
+}
+#realtime-rpm-item {
+  flex-basis: 150px;
 }
 .realtime-load-item span {
   color: var(--muted);
@@ -2123,7 +2190,7 @@ textarea:focus {
 }
 
 .dead-table {
-  min-width: 1360px;
+  min-width: 1540px;
   table-layout: fixed;
 }
 .dead-table th,
@@ -2134,12 +2201,14 @@ textarea:focus {
 }
 .dead-table th:nth-child(2),
 .dead-table td:nth-child(2) {
-  width: 180px;
+  width: 54px;
 }
-.dead-table th:nth-child(4),
-.dead-table td:nth-child(4),
-.dead-table th:nth-child(11),
-.dead-table td:nth-child(11) {
+.dead-table th:nth-child(3),
+.dead-table td:nth-child(3),
+.dead-table th:nth-child(5),
+.dead-table td:nth-child(5),
+.dead-table th:nth-child(14),
+.dead-table td:nth-child(14) {
   width: 190px;
 }
 .dead-table th.actions,
@@ -2162,6 +2231,39 @@ textarea:focus {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.table-sort {
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: inherit;
+  gap: 4px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  white-space: nowrap;
+}
+.table-sort svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  opacity: 0.45;
+}
+.table-sort.active {
+  color: var(--ink);
+}
+.table-sort.active svg {
+  opacity: 1;
+  transform: rotate(0deg);
+}
+.table-sort.active[data-order="desc"] svg {
+  transform: rotate(180deg);
 }
 .pool-list {
   display: grid;
@@ -3310,6 +3412,49 @@ label small {
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  #account-summary-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .account-sticky-region .metric {
+    min-height: 88px;
+    padding: 12px;
+  }
+  .account-sticky-region .metric strong {
+    margin-top: 8px;
+    font-size: 19px;
+    white-space: nowrap;
+  }
+  .account-sticky-region .metric small {
+    margin-top: 6px;
+    overflow: hidden;
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .account-sticky-region .account-filters {
+    gap: 8px;
+    margin-bottom: 10px;
+    padding: 10px;
+  }
+  .account-sticky-region .account-filters .search-field {
+    min-width: 180px;
+    flex: 1 1 180px;
+  }
+  .account-sticky-region .date-filter {
+    width: 145px;
+    flex: 0 1 145px;
+  }
+  .account-sticky-region .date-filter input {
+    padding-right: 7px;
+    padding-left: 7px;
+    font-size: 10px;
+  }
+  .account-sticky-region .status-tabs {
+    gap: 6px;
+    margin-bottom: 10px;
+  }
   #error-metrics {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -3474,6 +3619,11 @@ label small {
     grid-template-columns: 1fr 1fr;
     gap: 9px;
   }
+  #account-summary-metrics {
+    grid-template-columns: 1fr 1fr;
+    gap: 9px;
+    margin-bottom: 18px;
+  }
   .metric {
     min-height: 104px;
     padding: 15px;
@@ -3515,6 +3665,10 @@ label small {
   .filter-bar {
     flex-wrap: wrap;
     padding: 10px;
+  }
+  .account-sticky-region {
+    position: static;
+    box-shadow: none;
   }
   .error-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3912,7 +4066,8 @@ label small {
   width: min(760px, calc(100vw - 28px));
 }
 .strategy-account-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 210px) auto auto;
   align-items: center;
   gap: 12px;
   padding: 14px 20px;
@@ -3920,7 +4075,33 @@ label small {
   background: var(--panel);
 }
 .strategy-account-toolbar .search-field {
-  min-width: 220px;
+  min-width: 0;
+}
+.strategy-account-group-field,
+.strategy-account-group-field select {
+  min-width: 0;
+  width: 100%;
+}
+.strategy-account-group-field select {
+  min-height: 38px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  white-space: nowrap;
+}
+.strategy-account-toolbar .section-count {
+  justify-self: end;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .strategy-account-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .strategy-account-toolbar .search-field {
+    grid-column: 1 / -1;
+  }
 }
 .strategy-account-list {
   display: grid;

@@ -1,3 +1,5 @@
+//go:build sqlite_migrate
+
 package main
 
 import (
