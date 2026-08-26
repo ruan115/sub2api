@@ -342,7 +342,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	queueRelease()
 	queueRelease = func() {}
 	if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
-		a.captureGatewayUpstreamState(account.ID, model, key.OverloadCooldownSeconds, response)
+		a.captureGatewayUpstreamState(account.ID, model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), response)
 	}
 	if retryableGatewayStatus(response.StatusCode) {
 		failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
@@ -364,7 +364,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(bootstrapErr, &preOutputErr) {
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
-				a.captureGatewayUpstreamState(account.ID, model, key.OverloadCooldownSeconds, &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
+				a.captureGatewayUpstreamState(account.ID, model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
 				a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
 			}
 			return gatewayHedgeOutcome{failure: &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account}, err: bootstrapErr}

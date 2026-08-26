@@ -61,8 +61,8 @@ type gatewayKey struct {
 	RejectDistillation        bool
 	QuotaHeaderMasking        bool
 	OverloadCooldownSeconds   int
-	RateLimitWaitEnabled      bool
-	RateLimitWaitSeconds      int
+	RateLimitDownweightEnabled bool
+	RateLimitCoolingThreshold  int
 	CapacityQueueEnabled      bool
 	CapacityQueueTimeout      int
 	StrategyRequiredEnabled   bool
@@ -428,7 +428,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			if response.StatusCode == http.StatusTooManyRequests {
 				_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
 			}
-			a.captureGatewayUpstreamState(account.ID, envelope.Model, key.OverloadCooldownSeconds, response)
+			a.captureGatewayUpstreamState(account.ID, envelope.Model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), response)
 		}
 		if retryableGatewayStatus(response.StatusCode) {
 			queueRelease()
@@ -443,12 +443,6 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				forbiddenFailures++
 				if forbiddenFailures >= gatewayForbiddenFailoverAttempts {
 					break
-				}
-			}
-			if response.StatusCode == http.StatusTooManyRequests && attempt+1 < maxAccountAttempts {
-				if waitErr := waitForGatewayRateLimit(r.Context(), key.RateLimitWaitEnabled, key.RateLimitWaitSeconds); waitErr != nil {
-					recordGatewayContextFailure(w, r, waitErr)
-					return
 				}
 			}
 			continue
@@ -478,7 +472,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				if preOutputErr.status == http.StatusTooManyRequests {
 					_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
 				}
-				a.captureGatewayUpstreamState(account.ID, envelope.Model, key.OverloadCooldownSeconds, &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
+				a.captureGatewayUpstreamState(account.ID, envelope.Model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
 				a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
 			}
 			lastFailure = &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account, preOutput: true}
@@ -486,12 +480,6 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				forbiddenFailures++
 				if forbiddenFailures >= gatewayForbiddenFailoverAttempts {
 					break
-				}
-			}
-			if preOutputErr.status == http.StatusTooManyRequests && attempt+1 < maxAccountAttempts {
-				if waitErr := waitForGatewayRateLimit(r.Context(), key.RateLimitWaitEnabled, key.RateLimitWaitSeconds); waitErr != nil {
-					recordGatewayContextFailure(w, r, waitErr)
-					return
 				}
 			}
 			continue
@@ -607,23 +595,8 @@ func recordGatewayContextFailure(w http.ResponseWriter, r *http.Request, err err
 	return false
 }
 
-func waitForGatewayRateLimit(ctx context.Context, enabled bool, seconds int) error {
-	if !enabled {
-		return nil
-	}
-	if seconds < 1 {
-		seconds = 5
-	} else if seconds > 600 {
-		seconds = 600
-	}
-	timer := time.NewTimer(time.Duration(seconds) * time.Second)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+func (k gatewayKey) rateLimitPolicy() rateLimitPolicy {
+	return rateLimitPolicy{DownweightEnabled: k.RateLimitDownweightEnabled, CoolingThreshold: k.RateLimitCoolingThreshold}
 }
 
 func (a *app) classifyGatewayNoAccount(groupID, model string, cause error) (int, string, string) {
@@ -1520,11 +1493,11 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, rateLimitWaitEnabled, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.quota_header_masking_enabled, g.overload_cooldown_seconds, g.rate_limit_wait_enabled, g.rate_limit_wait_seconds, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, rateLimitDownweight, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.quota_header_masking_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &quotaHeaderMasking, &key.OverloadCooldownSeconds, &rateLimitWaitEnabled, &key.RateLimitWaitSeconds, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &quotaHeaderMasking, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
@@ -1537,7 +1510,7 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	key.RejectAnthropicDowngrade = rejectAnthropicDowngrade == 1
 	key.RejectDistillation = rejectDistillation == 1
 	key.QuotaHeaderMasking = quotaHeaderMasking == 1
-	key.RateLimitWaitEnabled = rateLimitWaitEnabled == 1
+	key.RateLimitDownweightEnabled = rateLimitDownweight == 1
 	key.CapacityQueueEnabled = capacityQueueEnabled == 1
 	key.StrategyRequiredEnabled = strategyRequired == 1
 	return key, err
@@ -1804,13 +1777,30 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 	// Rate-limit history splits equal-priority accounts into three tiers: an
 	// account whose quota window just rolled over has a full allowance and goes
 	// first, an account still carrying this window's 429 penalty goes last.
+	//
+	// The tier is applied at read time, not baked into the stored state, because
+	// an account can serve several groups: one group may run the feature while
+	// another ignores it. A group with the switch off flattens every candidate
+	// to the neutral tier, so a penalty earned elsewhere never reorders its
+	// dispatch — and turning the switch off takes effect immediately instead of
+	// lingering until the quota window rolls.
 	freshCutoff := time.Now().UTC().Add(-accountQuotaFreshPriorityWindow).Format(time.RFC3339Nano)
 	weightTier := `CASE
 		WHEN a.quota_refreshed_at IS NOT NULL AND a.quota_refreshed_at > ? THEN 0
 		WHEN a.rate_limit_downweight_until IS NOT NULL OR a.rate_limit_reason != '' THEN 2
 		ELSE 1
 	END`
-	orderClause := `ORDER BY CASE WHEN a.id = ? THEN 0 ELSE 1 END, ag.priority, a.priority, weight_tier, a.consecutive_429`
+	if !key.RateLimitDownweightEnabled {
+		// Still consumes the freshCutoff placeholder so the argument list stays
+		// aligned with the branch above.
+		weightTier = `CASE WHEN ? IS NULL THEN 1 ELSE 1 END`
+	}
+	orderClause := `ORDER BY CASE WHEN a.id = ? THEN 0 ELSE 1 END, ag.priority, a.priority, weight_tier`
+	if key.RateLimitDownweightEnabled {
+		// Strike count is the finer grain of the same penalty, so it drops out
+		// with the switch too.
+		orderClause += `, a.consecutive_429`
+	}
 	if key.RPMDispatchEnabled && !loadAware {
 		orderClause += `, CASE WHEN current_rpm > 0 OR current_inflight > 0 THEN 0 ELSE 1 END, current_rpm DESC, current_inflight DESC, COALESCE(a.last_used_at, '') DESC, a.id`
 	} else {
@@ -1952,7 +1942,7 @@ func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, re
 			}
 			continue
 		}
-		if candidate.consecutive429 != selected.consecutive429 {
+		if key.RateLimitDownweightEnabled && candidate.consecutive429 != selected.consecutive429 {
 			if candidate.consecutive429 < selected.consecutive429 {
 				selectedIndex = index
 			}

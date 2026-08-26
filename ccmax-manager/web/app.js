@@ -1435,7 +1435,7 @@ function renderDashboard() {
         item.speed_passthrough_enabled,
         item.anthropic_beta_passthrough_enabled,
       ].filter(Boolean).length;
-      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 重试</span><strong>${item.rate_limit_wait_enabled ? `${Number(item.rate_limit_wait_seconds || 5)}s` : "立即切换"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 降权</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_cooling_threshold || 3)} 次冷却` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -2800,9 +2800,9 @@ async function switchPurposeGroup(purposeID, groupID) {
   toast(`${item.name} 已切换到 ${group?.name || groupID}`);
   await loadCore();
 }
-function syncGroupRateLimitWaitFields() {
-  $("#group-rate-limit-wait-seconds").disabled = !$(
-    "#group-rate-limit-wait-enabled",
+function syncGroupRateLimitDownweightFields() {
+  $("#group-rate-limit-cooling-threshold").disabled = !$(
+    "#group-rate-limit-downweight-enabled",
   ).checked;
 }
 
@@ -2909,13 +2909,14 @@ function openGroup(item = null) {
   $("#group-overload-cooldown").value = Number(
     item?.overload_cooldown_seconds || 10,
   );
-  $("#group-rate-limit-wait-enabled").checked = Boolean(
-    item?.rate_limit_wait_enabled,
+  // Existing groups default the switch on, so a missing field on a new group
+  // must not read as "off".
+  $("#group-rate-limit-downweight-enabled").checked =
+    item?.rate_limit_downweight_enabled ?? true;
+  $("#group-rate-limit-cooling-threshold").value = Number(
+    item?.rate_limit_cooling_threshold || 3,
   );
-  $("#group-rate-limit-wait-seconds").value = Number(
-    item?.rate_limit_wait_seconds || 5,
-  );
-  syncGroupRateLimitWaitFields();
+  syncGroupRateLimitDownweightFields();
   $("#group-strategy-required").checked = Boolean(item?.strategy_required_enabled);
   $("#group-capacity-queue-enabled").checked = Boolean(
     item?.capacity_queue_enabled,
@@ -4202,9 +4203,9 @@ $("#group-rpm-dispatch-enabled").addEventListener("change", (event) => {
     $("#group-adaptive-hedge-enabled").checked = false;
   }
 });
-$("#group-rate-limit-wait-enabled").addEventListener(
+$("#group-rate-limit-downweight-enabled").addEventListener(
   "change",
-  syncGroupRateLimitWaitFields,
+  syncGroupRateLimitDownweightFields,
 );
 $("#group-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -4244,9 +4245,11 @@ $("#group-form").addEventListener("submit", async (event) => {
           "#group-passthrough-anthropic-beta",
         ).checked,
         overload_cooldown_seconds: Number($("#group-overload-cooldown").value),
-        rate_limit_wait_enabled: $("#group-rate-limit-wait-enabled").checked,
-        rate_limit_wait_seconds: Number(
-          $("#group-rate-limit-wait-seconds").value,
+        rate_limit_downweight_enabled: $(
+          "#group-rate-limit-downweight-enabled",
+        ).checked,
+        rate_limit_cooling_threshold: Number(
+          $("#group-rate-limit-cooling-threshold").value,
         ),
         strategy_required_enabled: $("#group-strategy-required").checked,
         capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,

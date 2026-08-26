@@ -324,13 +324,31 @@ func (a *app) captureAccountModelOverload(accountID int64, model string, seconds
 // the account's current quota window, and later successes inside that same
 // window do not make it untrue. Only the window rolling over — or an
 // administrator — lifts the penalty.
-func (a *app) captureGatewayUpstreamState(accountID int64, model string, overloadCooldownSeconds int, response *http.Response) {
+// rateLimitPolicy is the group's 429 handling configuration. Accounts can sit
+// in several groups, so the policy of the group that served the request decides
+// how that request's 429 is recorded — the same shape as the 529 cooldown.
+type rateLimitPolicy struct {
+	DownweightEnabled bool
+	CoolingThreshold  int
+}
+
+func (p rateLimitPolicy) threshold() int {
+	if p.CoolingThreshold < 1 {
+		return defaultRateLimitCoolingThreshold
+	}
+	if p.CoolingThreshold > maxRateLimitCoolingThreshold {
+		return maxRateLimitCoolingThreshold
+	}
+	return p.CoolingThreshold
+}
+
+func (a *app) captureGatewayUpstreamState(accountID int64, model string, overloadCooldownSeconds int, policy rateLimitPolicy, response *http.Response) {
 	a.captureAccountUpstreamState(accountID, response)
 	if response == nil {
 		return
 	}
-	if response.StatusCode == http.StatusTooManyRequests {
-		a.captureAccount429State(accountID, response)
+	if response.StatusCode == http.StatusTooManyRequests && policy.DownweightEnabled {
+		a.captureAccount429State(accountID, policy, response)
 	}
 	if response.StatusCode == 529 {
 		a.captureAccountModelOverload(accountID, model, overloadCooldownSeconds)
@@ -338,7 +356,10 @@ func (a *app) captureGatewayUpstreamState(accountID int64, model string, overloa
 }
 
 const (
-	account429CoolingThreshold = 3
+	// How many strikes escalate an account from deprioritised to parked. The
+	// group can override it; 1 means the first 429 parks the account outright.
+	defaultRateLimitCoolingThreshold = 3
+	maxRateLimitCoolingThreshold     = 10
 	// Upstream rate limiting hits every in-flight request on an account at
 	// once. Without a debounce a concurrency-3 account would collect three
 	// strikes from a single burst, so strikes within this window count once.
@@ -355,10 +376,11 @@ const (
 // quota window — later successes do not lift it, because the account has
 // demonstrably hit its ceiling in this window. The third strike escalates from
 // deprioritised to parked.
-func (a *app) captureAccount429State(accountID int64, response *http.Response) {
+func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, response *http.Response) {
 	if accountID <= 0 {
 		return
 	}
+	threshold := policy.threshold()
 	now := time.Now().UTC()
 	_, explicitWindow, _ := sub2service.ResolveCCMaxCompatibilityCooldownWindow(http.StatusTooManyRequests, response.Header)
 	reason := "429_backoff"
@@ -411,11 +433,11 @@ func (a *app) captureAccount429State(accountID int64, response *http.Response) {
 	// read a count that a sibling has already advanced. RowsAffected reports
 	// whether this call did the parking; MySQL has no RETURNING.
 	resetAt := a.nextAccount5HReset(accountID, response.Header, now)
-	message = fmt.Sprintf("连续 %d 次以上上游 429，已冷却至下一个 5h 窗口刷新", account429CoolingThreshold)
+	message = fmt.Sprintf("连续 %d 次以上上游 429，已冷却至下一个 5h 窗口刷新", threshold)
 	_, err = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?,
 		rate_limit_reason = '429_cooling', error_message = ?, updated_at = `+nowSQL+`
 		WHERE id = ? AND deleted_at IS NULL AND consecutive_429 >= ? AND rate_limit_reason = '429_backoff'`,
-		resetAt.Format(time.RFC3339Nano), message, accountID, account429CoolingThreshold)
+		resetAt.Format(time.RFC3339Nano), message, accountID, threshold)
 	logDatabaseWriteError("park account after consecutive 429", err)
 }
 

@@ -84,10 +84,10 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "overload_cooldown_seconds", "INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600)"); err != nil {
 		return err
 	}
-	if err := addColumnIfMissing(a.db, "groups", "rate_limit_wait_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_downweight_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
-	if err := addColumnIfMissing(a.db, "groups", "rate_limit_wait_seconds", "INTEGER NOT NULL DEFAULT 5 CHECK (rate_limit_wait_seconds BETWEEN 1 AND 600)"); err != nil {
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_cooling_threshold", "INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10)"); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(a.db, "groups", "strategy_id", "INTEGER REFERENCES dispatch_strategies(id) ON DELETE SET NULL"); err != nil {

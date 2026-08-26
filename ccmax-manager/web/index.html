@@ -1693,33 +1693,34 @@
           </div>
           <div class="group-mode-setting">
             <div>
-              <strong>429 重试等待</strong>
-              <small>收到上游 429 后释放当前账号，等待指定时间再切换其他账号重试；关闭时立即切换</small>
+              <strong>429 降权与冷却</strong>
+              <small>账号首次收到上游 429 即降低调度权重，直到其配额窗口刷新或管理员手动恢复；关闭后 429 不影响该账号的调度顺序</small>
             </div>
-            <label class="compact-toggle" title="429 重试等待">
+            <label class="compact-toggle" title="429 降权与冷却">
               <input
-                id="group-rate-limit-wait-enabled"
+                id="group-rate-limit-downweight-enabled"
                 type="checkbox"
-                aria-label="429 重试等待" />
+                checked
+                aria-label="429 降权与冷却" />
               <i></i>
             </label>
           </div>
           <div class="group-mode-setting">
             <div>
-              <strong>429 等待时间</strong>
-              <small>仅在开启 429 重试等待且仍有切号重试机会时生效</small>
+              <strong>冷却阈值</strong>
+              <small>降权累计到该次数后升级为冷却（暂不可调度）；填 1 表示首次 429 即冷却。仅在开启 429 降权与冷却时生效</small>
             </div>
-            <label class="compact-number" title="429 等待时间">
+            <label class="compact-number" title="冷却阈值">
               <input
-                id="group-rate-limit-wait-seconds"
+                id="group-rate-limit-cooling-threshold"
                 type="number"
                 min="1"
-                max="600"
+                max="10"
                 step="1"
-                value="5"
+                value="3"
                 required
-                aria-label="429 等待秒数" />
-              <span>秒</span>
+                aria-label="429 冷却阈值" />
+              <span>次</span>
             </label>
           </div>
           <div class="group-mode-setting">

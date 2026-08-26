@@ -48,8 +48,8 @@ func (a *app) migrateMySQL() error {
 				reject_distillation_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				quota_header_masking_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
-				rate_limit_wait_enabled TINYINT(1) NOT NULL DEFAULT 0,
-				rate_limit_wait_seconds INT NOT NULL DEFAULT 5,
+				rate_limit_downweight_enabled TINYINT(1) NOT NULL DEFAULT 1,
+				rate_limit_cooling_threshold INT NOT NULL DEFAULT 3,
 				capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INT NOT NULL DEFAULT 30,
 			strategy_required_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -483,10 +483,10 @@ func (a *app) migrateMySQL() error {
 			return fmt.Errorf("migrate MySQL schema statement %d: %w", index+1, err)
 		}
 	}
-	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_wait_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_downweight_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
-	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_wait_seconds", "INT NOT NULL DEFAULT 5"); err != nil {
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_cooling_threshold", "INT NOT NULL DEFAULT 3"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "quota_header_masking_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {

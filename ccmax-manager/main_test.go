@@ -185,7 +185,7 @@ func TestGroupQuotaHeaderMaskingPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	}
 }
 
-func TestGroupRateLimitWaitSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
+func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -194,25 +194,39 @@ func TestGroupRateLimitWaitSettingsPersistAndSurviveLegacyUpdate(t *testing.T) {
 	defer a.db.Close()
 	handler := a.routes()
 
-	var updated group
-	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
-		"name": "A 分组", "description": "429 等待", "rate_multiplier": 1, "status": "active",
-		"rate_limit_wait_enabled": true, "rate_limit_wait_seconds": 7,
-	}, http.StatusOK, &updated)
-	if !updated.RateLimitWaitEnabled || updated.RateLimitWaitSeconds != 7 {
-		t.Fatalf("group 429 wait settings were not persisted: %+v", updated)
+	// Existing groups keep the behaviour they had before the switch existed.
+	var current []group
+	putJSON(t, handler, http.MethodGet, "/api/groups", nil, http.StatusOK, &current)
+	for _, item := range current {
+		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold {
+			t.Fatalf("group %s did not default to the previous always-on behaviour: %+v", item.ID, item)
+		}
 	}
 
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "429 降权", "rate_multiplier": 1, "status": "active",
+		"rate_limit_downweight_enabled": false, "rate_limit_cooling_threshold": 7,
+	}, http.StatusOK, &updated)
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 {
+		t.Fatalf("group 429 downweight settings were not persisted: %+v", updated)
+	}
+
+	// A page that predates the fields must not silently reset them.
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
 	}, http.StatusOK, &updated)
-	if !updated.RateLimitWaitEnabled || updated.RateLimitWaitSeconds != 7 {
-		t.Fatalf("legacy update reset group 429 wait settings: %+v", updated)
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 {
+		t.Fatalf("legacy update reset group 429 downweight settings: %+v", updated)
 	}
 
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
-		"name": "A 分组", "description": "无效等待", "rate_multiplier": 1, "status": "active",
-		"rate_limit_wait_seconds": 0,
+		"name": "A 分组", "description": "无效阈值", "rate_multiplier": 1, "status": "active",
+		"rate_limit_cooling_threshold": 0,
+	}, http.StatusBadRequest, nil)
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "无效阈值", "rate_multiplier": 1, "status": "active",
+		"rate_limit_cooling_threshold": 99,
 	}, http.StatusBadRequest, nil)
 }
 

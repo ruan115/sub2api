@@ -296,21 +296,16 @@ func TestDistilledCompatibilityAccountFailoverKeepsRequestedModel(t *testing.T) 
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "蒸馏兼容", "rate_multiplier": 1,
 		"status": "active", "normal_request_mode": true,
-		"rate_limit_wait_enabled": true, "rate_limit_wait_seconds": 1,
 	}, http.StatusOK, nil)
 	key := createGatewayTestKey(t, handler)
 	limitedAccount := createGatewayTestAccount(t, a, handler, "limited-fable", limited.URL, 0, nil, map[string]any{"access_token": "first-token"})
 	availableAccount := createGatewayTestAccount(t, a, handler, "available-fable", available.URL, 1, nil, map[string]any{"access_token": "second-token"})
 
 	var response map[string]any
-	started := time.Now()
 	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
 		"model": "claude-fable-5", "max_tokens": 64,
 		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 	}, nil, key.Key, http.StatusOK, &response)
-	if elapsed := time.Since(started); elapsed < 900*time.Millisecond {
-		t.Fatalf("429 failover elapsed=%s, want configured wait", elapsed)
-	}
 	if response["model"] != "claude-fable-5" {
 		t.Fatalf("response model=%#v", response["model"])
 	}
@@ -772,19 +767,197 @@ func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
 	}
 }
 
-func TestGatewayRateLimitWaitCanBeDisabledAndCanceled(t *testing.T) {
-	started := time.Now()
-	if err := waitForGatewayRateLimit(context.Background(), false, 600); err != nil {
+func TestRateLimitPolicyThresholdClamps(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		configured int
+		want      int
+	}{
+		{"unset falls back to the default", 0, defaultRateLimitCoolingThreshold},
+		{"negative falls back to the default", -1, defaultRateLimitCoolingThreshold},
+		{"one parks on the first strike", 1, 1},
+		{"in range is honoured", 5, 5},
+		{"above range is clamped", 99, maxRateLimitCoolingThreshold},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := (rateLimitPolicy{CoolingThreshold: testCase.configured}).threshold(); got != testCase.want {
+				t.Fatalf("threshold = %d, want %d", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The switch has to gate the whole feature: with it off a 429 must leave the
+// account's dispatch weight untouched.
+func TestGatewayDisabledDownweightLeavesAccountUntouched(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "no-downweight", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+
+	a.captureGatewayUpstreamState(created.ID, "claude-fable-5", 10,
+		rateLimitPolicy{DownweightEnabled: false, CoolingThreshold: 3},
+		&http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+
+	var consecutive int
+	var reason string
+	var downweight sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &downweight); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
-		t.Fatalf("disabled 429 wait took %s", elapsed)
+	if consecutive != 0 || reason != "" || downweight.Valid {
+		t.Fatalf("disabled downweight still recorded state: consecutive %d, reason %q, downweight %v", consecutive, reason, downweight)
+	}
+}
+
+// Covers the whole chain rather than just the gate: group column →
+// authenticateGatewayKey → gatewayKey → rateLimitPolicy → capture.
+func TestGatewayGroupSwitchGovernsDownweightEndToEnd(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`)
+	}))
+	defer limited.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "关闭降权", "rate_multiplier": 1, "status": "active",
+		"rate_limit_downweight_enabled": false,
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "switch-off", limited.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+key.Key)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	var consecutive int
+	var reason string
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason FROM accounts WHERE id = ?`, created.ID).Scan(&consecutive, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 0 || reason != "" {
+		t.Fatalf("group switch was off but the 429 still downweighted: consecutive %d, reason %q", consecutive, reason)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := waitForGatewayRateLimit(ctx, true, 600); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled 429 wait error=%v", err)
+	// Turning it back on must take effect without a restart. Clear the standard
+	// 429 fallout first (short cooldown plus learned RPM cap), which would
+	// otherwise keep the account out of the next dispatch.
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "开启降权", "rate_multiplier": 1, "status": "active",
+		"rate_limit_downweight_enabled": true,
+	}, http.StatusOK, nil)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = NULL WHERE id = ?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`DELETE FROM account_rpm_thresholds`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`DELETE FROM account_rpm_events`); err != nil {
+		t.Fatal(err)
+	}
+	retry := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	retry.Header.Set("Authorization", "Bearer "+key.Key)
+	handler.ServeHTTP(httptest.NewRecorder(), retry)
+
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason FROM accounts WHERE id = ?`, created.ID).Scan(&consecutive, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if consecutive != 1 || reason != "429_backoff" {
+		t.Fatalf("group switch was on but the 429 was not recorded: consecutive %d, reason %q", consecutive, reason)
+	}
+}
+
+// Turning the switch off must take effect immediately, including for accounts
+// already carrying a penalty — otherwise they stay deprioritised for up to the
+// rest of the quota window despite the feature being off.
+func TestGatewayDisabledDownweightIgnoresExistingPenalty(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	penalised := createGatewayTestAccount(t, a, handler, "penalised", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	plain := createGatewayTestAccount(t, a, handler, "plain", "https://second.example.test", 0, nil, map[string]any{"access_token": "token-b"})
+	// Earned while the switch was on, or by another group that still runs it.
+	// Give it the more recent use as well, so the default RPM-dispatch ordering
+	// would prefer it: the only thing that can push it last is the penalty.
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 2, rate_limit_reason = '429_backoff', rate_limit_downweight_until = ?, last_used_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(2*time.Hour).Format(time.RFC3339Nano),
+		time.Now().UTC().Format(time.RFC3339Nano), penalised.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET last_used_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), plain.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	if selected.ID != plain.ID {
+		t.Fatalf("switch on: selected %d, want the unpenalised account %d", selected.ID, plain.ID)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "关闭降权", "rate_multiplier": 1, "status": "active",
+		"rate_limit_downweight_enabled": false,
+	}, http.StatusOK, nil)
+	// Phase one left traffic on the winner, and RPM dispatch deliberately
+	// concentrates on an already-active account. Clear it so the only thing
+	// separating the two candidates is the penalty.
+	if _, err := a.db.Exec(`DELETE FROM account_rpm_events`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET last_used_at = ? WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano), penalised.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET last_used_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), plain.ID); err != nil {
+		t.Fatal(err)
+	}
+	offKey, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With the feature off the stored penalty must not reorder anything, so the
+	// usual least-recently-used ordering picks the account it skipped before.
+	offSelected, err := a.tryAcquireGatewayAccountWithPolicy(offKey, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.releaseGatewayAccount(offSelected.ID)
+	if offSelected.ID != penalised.ID {
+		t.Fatalf("switch off: selected %d, want %d — the stored penalty still reordered dispatch", offSelected.ID, penalised.ID)
+	}
+}
+
+// A threshold of 1 means the first 429 parks the account outright.
+func TestGatewayCoolingThresholdOfOneParksImmediately(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "instant-park", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+
+	a.captureAccount429State(created.ID, rateLimitPolicy{DownweightEnabled: true, CoolingThreshold: 1},
+		&http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+
+	var reason string
+	var resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reason, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&reason, &resetAt); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "429_cooling" || !resetAt.Valid {
+		t.Fatalf("threshold 1 did not park on the first strike: reason %q, reset %v", reason, resetAt)
 	}
 }
 
@@ -1245,8 +1418,7 @@ func TestGatewayPassthroughStreamRateLimitLearnsRPMAndFailsOver(t *testing.T) {
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
-		"name": "A 分组", "description": "流式 429 等待", "rate_multiplier": 1, "status": "active",
-		"rate_limit_wait_enabled": true, "rate_limit_wait_seconds": 1,
+		"name": "A 分组", "description": "流式 429 failover", "rate_multiplier": 1, "status": "active",
 	}, http.StatusOK, nil)
 	key := createGatewayTestKey(t, handler)
 	first := createGatewayTestAccount(t, a, handler, "passthrough-limited", limited.URL, 0, map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token-a"})
@@ -1255,11 +1427,7 @@ func TestGatewayPassthroughStreamRateLimitLearnsRPMAndFailsOver(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer "+key.Key)
 	response := httptest.NewRecorder()
 
-	started := time.Now()
 	handler.ServeHTTP(response, request)
-	if elapsed := time.Since(started); elapsed < 900*time.Millisecond {
-		t.Fatalf("stream 429 failover elapsed=%s, want configured wait", elapsed)
-	}
 
 	if response.Code != http.StatusOK || response.Header().Get("X-CCMAX-Account") != second.Name {
 		t.Fatalf("response=%d account=%q body=%s", response.Code, response.Header().Get("X-CCMAX-Account"), response.Body.String())
@@ -2239,7 +2407,7 @@ func TestGateway529CooldownIsModelScopedAndConfigurable(t *testing.T) {
 	}
 	before := time.Now().UTC()
 
-	a.captureGatewayUpstreamState(created.ID, "Claude-Opus-5", key.OverloadCooldownSeconds, &http.Response{StatusCode: 529, Header: make(http.Header)})
+	a.captureGatewayUpstreamState(created.ID, "Claude-Opus-5", key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: 529, Header: make(http.Header)})
 
 	var accountResetAt sql.NullString
 	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&accountResetAt); err != nil {
@@ -2369,8 +2537,8 @@ func TestGatewayConsecutive429ParksAccountUntilFiveHourReset(t *testing.T) {
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.91")
 	response := &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers}
 
-	for attempt := 1; attempt <= account429CoolingThreshold; attempt++ {
-		a.captureGatewayUpstreamState(created.ID, "claude-fable-5", 10, response)
+	for attempt := 1; attempt <= defaultRateLimitCoolingThreshold; attempt++ {
+		a.captureGatewayUpstreamState(created.ID, "claude-fable-5", 10, defaultTestRateLimitPolicy(), response)
 		var consecutive, schedulable int
 		var reason, window string
 		var resetAt sql.NullString
@@ -2381,7 +2549,7 @@ func TestGatewayConsecutive429ParksAccountUntilFiveHourReset(t *testing.T) {
 		if consecutive != attempt || schedulable != 1 {
 			t.Fatalf("attempt %d state = consecutive %d, schedulable %d", attempt, consecutive, schedulable)
 		}
-		if attempt < account429CoolingThreshold {
+		if attempt < defaultRateLimitCoolingThreshold {
 			if reason != "429_backoff" || window != "" {
 				t.Fatalf("attempt %d reason/window = %q/%q", attempt, reason, window)
 			}
@@ -2416,11 +2584,11 @@ func TestGatewayConcurrent429BurstCountsOnce(t *testing.T) {
 	// Upstream rate limiting rejects every in-flight request at once; that is
 	// one event, not enough strikes to park the account.
 	var wait sync.WaitGroup
-	for range account429CoolingThreshold + 2 {
+	for range defaultRateLimitCoolingThreshold + 2 {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			a.captureAccount429State(created.ID, response)
+			a.captureAccount429State(created.ID, defaultTestRateLimitPolicy(), response)
 		}()
 	}
 	wait.Wait()
@@ -2449,7 +2617,7 @@ func TestGatewayFirst429DownweightsUntilQuotaWindowResets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a.captureAccount429State(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+	a.captureAccount429State(created.ID, defaultTestRateLimitPolicy(), &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
 
 	var consecutive int
 	var reason string
@@ -2518,7 +2686,7 @@ func TestGatewayLate429DoesNotDowngradeLivePark(t *testing.T) {
 
 	// A request that was already in flight when the park landed must not
 	// rewrite the reason, or the sweeper would never release the row.
-	a.captureAccount429State(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+	a.captureAccount429State(created.ID, defaultTestRateLimitPolicy(), &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
 
 	var reason, message string
 	var resetAt sql.NullString
@@ -3081,6 +3249,12 @@ func TestSerialUserMessageQueueAndToolResultBypass(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("serial queue did not admit the next user message after release")
 	}
+}
+
+// Mirrors the shipped group defaults so a test that is not about the switch
+// exercises the same policy production runs with.
+func defaultTestRateLimitPolicy() rateLimitPolicy {
+	return rateLimitPolicy{DownweightEnabled: true, CoolingThreshold: defaultRateLimitCoolingThreshold}
 }
 
 func newGatewayTestApp(t *testing.T) (*app, http.Handler) {
