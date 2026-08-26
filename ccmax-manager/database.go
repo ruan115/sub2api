@@ -213,6 +213,9 @@ func rewriteQuery(dialect databaseDialect, query string) string {
 		new string
 	}{
 		{"INSERT OR IGNORE", "INSERT IGNORE"},
+		// SQLite integer-divides; MySQL's `/` yields DECIMAL, which would turn the
+		// cold-start budget bucket back into raw ordering on rounded header values.
+		{fmt.Sprintf("-CAST(a.itpm_remaining / %d AS INTEGER)", coldStartBudgetBucketSize), fmt.Sprintf("-(a.itpm_remaining DIV %d)", coldStartBudgetBucketSize)},
 		{"MAX(0, CAST(strftime('%s', invalidated_at) AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER))", "GREATEST(0, TIMESTAMPDIFF(SECOND, onboarded_at, invalidated_at))"},
 		{"MAX(0, CAST(strftime('%s','now') AS INTEGER) - CAST(strftime('%s', onboarded_at) AS INTEGER))", "GREATEST(0, TIMESTAMPDIFF(SECOND, onboarded_at, UTC_TIMESTAMP(3)))"},
 		{"strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')", "(UTC_TIMESTAMP(3) - INTERVAL 60 SECOND)"},

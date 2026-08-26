@@ -1,7 +1,12 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -165,6 +170,60 @@ func TestConcentratedStrategyQueuesWithoutGroupCapacityToggle(t *testing.T) {
 	createGatewayTestAccount(t, a, handler, "cc-queue", "https://first.example.test", 0, nil, map[string]any{"access_token": "token-a"})
 	if !a.gatewayShouldQueue(key) {
 		t.Fatal("concentrated strategy did not opt the group into capacity queueing")
+	}
+}
+
+func TestGatewayAccountFailoverBudgetStopsAfterTwoAccounts(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		mode      string
+		maxTokens int
+	}{
+		{name: "round robin", mode: "round_robin", maxTokens: 32},
+		{name: "concentrated", mode: "concentrated", maxTokens: 32},
+		{name: "large compatibility request", maxTokens: gatewayLargeRequestMaxTokens},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("CCMAX_AUTH_DISABLED", "1")
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				http.Error(w, `{"type":"error","error":{"type":"api_error","message":"failed"}}`, http.StatusInternalServerError)
+			}))
+			defer upstream.Close()
+
+			a, handler := newGatewayTestApp(t)
+			defer a.db.Close()
+			key := createGatewayTestKey(t, handler)
+			groupUpdate := map[string]any{
+				"name": "A 分组", "description": "failover budget", "rate_multiplier": 1,
+				"status": "active", "rpm_dispatch_enabled": false,
+			}
+			if testCase.mode != "" {
+				strategyID := createTestStrategy(t, handler, map[string]any{
+					"name": testCase.name, "rpm_limit": 100, "rpm_strategy": "fixed", "dispatch_mode": testCase.mode,
+				})
+				groupUpdate["strategy_id"] = strategyID
+			}
+			putJSON(t, handler, http.MethodPut, "/api/groups/a", groupUpdate, http.StatusOK, nil)
+			for index := range 3 {
+				createGatewayTestAccount(t, a, handler, testCase.name+string(rune('a'+index)), upstream.URL, index,
+					map[string]any{"request_passthrough": true}, map[string]any{"access_token": "token"})
+			}
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","max_tokens":`+fmt.Sprint(testCase.maxTokens)+`,"messages":[{"role":"user","content":"hello"}]}`))
+			request.Header.Set("Authorization", "Bearer "+key.Key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			_, _ = io.Copy(io.Discard, response.Result().Body)
+			gotCalls := calls.Load()
+			if gotCalls < 1 || gotCalls > 2 {
+				t.Fatalf("upstream calls=%d, want between 1 and 2", gotCalls)
+			}
+			if testCase.mode != "" && gotCalls != 2 {
+				t.Fatalf("%s upstream calls=%d, want exactly 2-account failover budget", testCase.mode, gotCalls)
+			}
+		})
 	}
 }
 

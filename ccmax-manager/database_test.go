@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,26 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 			error_message = CASE WHEN auth_error = '' THEN '' ELSE error_message END, updated_at = ` + nowSQL + `
 			WHERE rate_limit_downweight_until IS NOT NULL AND rate_limit_downweight_until <= ` + nowSQL + `
 			AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at <= ` + nowSQL + `)`,
+		// Cache-aware ITPM: upstream excludes cache reads, so enforcement and the
+		// realtime split must too.
+		`SELECT SUM(u.input_tokens + u.cache_creation_tokens) FROM usage_logs u WHERE u.account_id = ? AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`,
+		`SELECT account_id,
+			COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS tpm,
+			COALESCE(SUM(input_tokens + cache_creation_tokens), 0) AS itpm,
+			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tpm,
+			COALESCE(SUM(output_tokens), 0) AS otpm
+			FROM usage_logs
+			WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')
+			GROUP BY account_id`,
+		`UPDATE accounts SET itpm_remaining = ?, itpm_reset_at = NULLIF(?, ''), itpm_sampled_at = ` + nowSQL + `, updated_at = ` + nowSQL + `
+			WHERE id = ? AND deleted_at IS NULL`,
+		`UPDATE accounts SET rate_limit_reset_at = ?, updated_at = ` + nowSQL + `
+			WHERE id = ? AND deleted_at IS NULL AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at < ?)`,
+		// Cache prefix audit and cold-start budget placement.
+		fmt.Sprintf(`SELECT id FROM accounts ORDER BY CASE WHEN a.itpm_remaining IS NULL THEN 0 ELSE -CAST(a.itpm_remaining / %d AS INTEGER) END`, coldStartBudgetBucketSize),
+		`SELECT prefix_hash, tools_hash, system_hash FROM cache_prefix_events
+			WHERE session_hash = ? ORDER BY id DESC LIMIT 1`,
+		`DELETE FROM cache_prefix_events WHERE created_at < ?`,
 		// Group strategy traffic shares.
 		`SELECT ds.id, ds.name,
 			COALESCE((SELECT s.weight FROM group_strategy_shares s WHERE s.group_id = ? AND s.strategy_id = ds.id), 0),
@@ -74,7 +95,7 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 	}
 	for _, query := range queries {
 		rewritten := rewriteQuery(dialectMySQL, query)
-		for _, forbidden := range []string{"strftime(", "date(created_at,", "ON CONFLICT", "INSERT OR", " || ", "json_extract", "p.key", "WHERE key ="} {
+		for _, forbidden := range []string{"strftime(", "date(created_at,", "ON CONFLICT", "INSERT OR", " || ", "json_extract", "p.key", "WHERE key =", "AS INTEGER)"} {
 			if strings.Contains(rewritten, forbidden) {
 				t.Fatalf("MySQL query still contains %q:\n%s", forbidden, rewritten)
 			}

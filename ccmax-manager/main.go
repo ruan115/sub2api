@@ -57,77 +57,84 @@ type app struct {
 	// capacityWaiters counts requests parked in the per-group capacity queue
 	// (group id -> *int64) so a saturated group cannot pile up unbounded waiters.
 	capacityWaiters sync.Map
-	streamHedges    *gatewayHedgeController
-	redis           *redisRuntime
-	batchAuthMu     sync.Mutex
-	reserveMu       sync.Mutex
-	errorPruneMu    sync.Mutex
-	lastErrorPrune  time.Time
-	errorRetention  int
+	// coldCacheFlights serialises large requests per (account, session). A cache
+	// entry only becomes readable once the first response starts streaming, so
+	// concurrent requests sharing a prefix each pay the full cache-creation
+	// price and none of them can read what the others are still writing.
+	coldCacheFlights coldCacheFlightTable
+	streamHedges     *gatewayHedgeController
+	redis            *redisRuntime
+	batchAuthMu      sync.Mutex
+	reserveMu        sync.Mutex
+	errorPruneMu     sync.Mutex
+	lastErrorPrune   time.Time
+	errorRetention   int
 }
 
 type group struct {
-	ID                        string   `json:"id"`
-	Name                      string   `json:"name"`
-	Description               string   `json:"description"`
-	RateMultiplier            float64  `json:"rate_multiplier"`
-	DailyLimitUSD             *float64 `json:"daily_limit_usd"`
-	MonthlyLimitUSD           *float64 `json:"monthly_limit_usd"`
-	NormalRequestMode         bool     `json:"normal_request_mode"`
-	ClaudeCodeIdentityEnabled bool     `json:"claude_code_identity_enabled"`
-	StreamHedgeEnabled        bool     `json:"stream_hedge_enabled"`
-	AdaptiveHedgeEnabled      bool     `json:"adaptive_hedge_enabled"`
-	RPMDispatchEnabled        bool     `json:"rpm_dispatch_enabled"`
-	MCPToolNamesEnabled       bool     `json:"mcp_tool_names_enabled"`
-	ServiceTierPassthrough    bool     `json:"service_tier_passthrough_enabled"`
-	InferenceGeoPassthrough   bool     `json:"inference_geo_passthrough_enabled"`
-	SpeedPassthrough          bool     `json:"speed_passthrough_enabled"`
-	AnthropicBetaPassthrough  bool     `json:"anthropic_beta_passthrough_enabled"`
-	RejectAnthropicDowngrade  bool     `json:"reject_anthropic_downgrade_enabled"`
-	RejectDistillation        bool     `json:"reject_distillation_enabled"`
-	QuotaHeaderMasking        bool     `json:"quota_header_masking_enabled"`
-	OverloadCooldownSeconds   int      `json:"overload_cooldown_seconds"`
-	RateLimitDownweightEnabled bool    `json:"rate_limit_downweight_enabled"`
-	RateLimitCoolingThreshold  int     `json:"rate_limit_cooling_threshold"`
-	CapacityQueueEnabled      bool     `json:"capacity_queue_enabled"`
-	CapacityQueueTimeout      int      `json:"capacity_queue_timeout_seconds"`
-	StrategyRequiredEnabled   bool     `json:"strategy_required_enabled"`
-	StrategyID                *int64   `json:"strategy_id"`
-	ReservePoolEnabled        bool     `json:"reserve_pool_enabled"`
-	Status                    string   `json:"status"`
-	ActiveAccounts            int      `json:"active_accounts"`
-	TotalAccounts             int      `json:"total_accounts"`
-	MonthBilledCost           float64  `json:"month_billed_cost"`
-	MonthActualCost           float64  `json:"month_actual_cost"`
-	TodayBilledCost           float64  `json:"today_billed_cost"`
-	UpdatedAt                 string   `json:"updated_at"`
+	ID                         string   `json:"id"`
+	Name                       string   `json:"name"`
+	Description                string   `json:"description"`
+	RateMultiplier             float64  `json:"rate_multiplier"`
+	DailyLimitUSD              *float64 `json:"daily_limit_usd"`
+	MonthlyLimitUSD            *float64 `json:"monthly_limit_usd"`
+	NormalRequestMode          bool     `json:"normal_request_mode"`
+	ClaudeCodeIdentityEnabled  bool     `json:"claude_code_identity_enabled"`
+	StreamHedgeEnabled         bool     `json:"stream_hedge_enabled"`
+	AdaptiveHedgeEnabled       bool     `json:"adaptive_hedge_enabled"`
+	RPMDispatchEnabled         bool     `json:"rpm_dispatch_enabled"`
+	MCPToolNamesEnabled        bool     `json:"mcp_tool_names_enabled"`
+	ServiceTierPassthrough     bool     `json:"service_tier_passthrough_enabled"`
+	InferenceGeoPassthrough    bool     `json:"inference_geo_passthrough_enabled"`
+	SpeedPassthrough           bool     `json:"speed_passthrough_enabled"`
+	AnthropicBetaPassthrough   bool     `json:"anthropic_beta_passthrough_enabled"`
+	RejectAnthropicDowngrade   bool     `json:"reject_anthropic_downgrade_enabled"`
+	RejectDistillation         bool     `json:"reject_distillation_enabled"`
+	QuotaHeaderMasking         bool     `json:"quota_header_masking_enabled"`
+	OverloadCooldownSeconds    int      `json:"overload_cooldown_seconds"`
+	RateLimitDownweightEnabled bool     `json:"rate_limit_downweight_enabled"`
+	RateLimitCoolingThreshold  int      `json:"rate_limit_cooling_threshold"`
+	RateLimitWaitSeconds       int      `json:"rate_limit_wait_seconds"`
+	CapacityQueueEnabled       bool     `json:"capacity_queue_enabled"`
+	CapacityQueueTimeout       int      `json:"capacity_queue_timeout_seconds"`
+	StrategyRequiredEnabled    bool     `json:"strategy_required_enabled"`
+	StrategyID                 *int64   `json:"strategy_id"`
+	ReservePoolEnabled         bool     `json:"reserve_pool_enabled"`
+	Status                     string   `json:"status"`
+	ActiveAccounts             int      `json:"active_accounts"`
+	TotalAccounts              int      `json:"total_accounts"`
+	MonthBilledCost            float64  `json:"month_billed_cost"`
+	MonthActualCost            float64  `json:"month_actual_cost"`
+	TodayBilledCost            float64  `json:"today_billed_cost"`
+	UpdatedAt                  string   `json:"updated_at"`
 }
 
 type groupInput struct {
-	Name                      string   `json:"name"`
-	Description               string   `json:"description"`
-	RateMultiplier            float64  `json:"rate_multiplier"`
-	DailyLimitUSD             *float64 `json:"daily_limit_usd"`
-	MonthlyLimitUSD           *float64 `json:"monthly_limit_usd"`
-	NormalRequestMode         bool     `json:"normal_request_mode"`
-	ClaudeCodeIdentityEnabled *bool    `json:"claude_code_identity_enabled"`
-	StreamHedgeEnabled        bool     `json:"stream_hedge_enabled"`
-	AdaptiveHedgeEnabled      bool     `json:"adaptive_hedge_enabled"`
-	RPMDispatchEnabled        *bool    `json:"rpm_dispatch_enabled"`
-	MCPToolNamesEnabled       *bool    `json:"mcp_tool_names_enabled"`
-	ServiceTierPassthrough    *bool    `json:"service_tier_passthrough_enabled"`
-	InferenceGeoPassthrough   *bool    `json:"inference_geo_passthrough_enabled"`
-	SpeedPassthrough          *bool    `json:"speed_passthrough_enabled"`
-	AnthropicBetaPassthrough  *bool    `json:"anthropic_beta_passthrough_enabled"`
-	RejectAnthropicDowngrade  *bool    `json:"reject_anthropic_downgrade_enabled"`
-	RejectDistillation        *bool    `json:"reject_distillation_enabled"`
-	QuotaHeaderMasking        *bool    `json:"quota_header_masking_enabled"`
-	OverloadCooldownSeconds   *int     `json:"overload_cooldown_seconds"`
-	RateLimitDownweightEnabled *bool   `json:"rate_limit_downweight_enabled"`
-	RateLimitCoolingThreshold  *int    `json:"rate_limit_cooling_threshold"`
-	CapacityQueueEnabled      *bool    `json:"capacity_queue_enabled"`
-	CapacityQueueTimeout      *int     `json:"capacity_queue_timeout_seconds"`
-	StrategyRequiredEnabled   *bool    `json:"strategy_required_enabled"`
+	Name                       string   `json:"name"`
+	Description                string   `json:"description"`
+	RateMultiplier             float64  `json:"rate_multiplier"`
+	DailyLimitUSD              *float64 `json:"daily_limit_usd"`
+	MonthlyLimitUSD            *float64 `json:"monthly_limit_usd"`
+	NormalRequestMode          bool     `json:"normal_request_mode"`
+	ClaudeCodeIdentityEnabled  *bool    `json:"claude_code_identity_enabled"`
+	StreamHedgeEnabled         bool     `json:"stream_hedge_enabled"`
+	AdaptiveHedgeEnabled       bool     `json:"adaptive_hedge_enabled"`
+	RPMDispatchEnabled         *bool    `json:"rpm_dispatch_enabled"`
+	MCPToolNamesEnabled        *bool    `json:"mcp_tool_names_enabled"`
+	ServiceTierPassthrough     *bool    `json:"service_tier_passthrough_enabled"`
+	InferenceGeoPassthrough    *bool    `json:"inference_geo_passthrough_enabled"`
+	SpeedPassthrough           *bool    `json:"speed_passthrough_enabled"`
+	AnthropicBetaPassthrough   *bool    `json:"anthropic_beta_passthrough_enabled"`
+	RejectAnthropicDowngrade   *bool    `json:"reject_anthropic_downgrade_enabled"`
+	RejectDistillation         *bool    `json:"reject_distillation_enabled"`
+	QuotaHeaderMasking         *bool    `json:"quota_header_masking_enabled"`
+	OverloadCooldownSeconds    *int     `json:"overload_cooldown_seconds"`
+	RateLimitDownweightEnabled *bool    `json:"rate_limit_downweight_enabled"`
+	RateLimitCoolingThreshold  *int     `json:"rate_limit_cooling_threshold"`
+	RateLimitWaitSeconds       *int     `json:"rate_limit_wait_seconds"`
+	CapacityQueueEnabled       *bool    `json:"capacity_queue_enabled"`
+	CapacityQueueTimeout       *int     `json:"capacity_queue_timeout_seconds"`
+	StrategyRequiredEnabled    *bool    `json:"strategy_required_enabled"`
 	// StrategyID: nil keeps the current binding, 0 clears it, >0 sets it.
 	StrategyID         *int64 `json:"strategy_id"`
 	ReservePoolEnabled *bool  `json:"reserve_pool_enabled"`
@@ -575,6 +582,7 @@ func (a *app) migrate() error {
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
 			rate_limit_downweight_enabled INTEGER NOT NULL DEFAULT 1,
 			rate_limit_cooling_threshold INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10),
+			rate_limit_wait_seconds INTEGER NOT NULL DEFAULT 120 CHECK (rate_limit_wait_seconds BETWEEN 60 AND 120),
 			capacity_queue_enabled INTEGER NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INTEGER NOT NULL DEFAULT 30 CHECK (capacity_queue_timeout_seconds BETWEEN 1 AND 600),
 			strategy_required_enabled INTEGER NOT NULL DEFAULT 0,
@@ -727,6 +735,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/proxy-pools/{id}", a.handleProxyPoolDelete)
 	mux.HandleFunc("POST /api/proxy-pools/{id}/sync", a.handleProxyPoolSync)
 	mux.HandleFunc("GET /api/proxies", a.handleProxies)
+	mux.HandleFunc("GET /api/proxies/archived", a.handleArchivedProxies)
 	mux.HandleFunc("POST /api/proxies/batch", a.handleProxyBatch)
 	mux.HandleFunc("POST /api/proxies/batch-delete", a.handleProxyBatchDelete)
 	mux.HandleFunc("POST /api/proxies/batch-test", a.handleProxyBatchTest)
@@ -766,6 +775,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/prices/sync", a.handlePriceSync)
 	mux.HandleFunc("DELETE /api/prices/{id}", a.handlePriceDelete)
 	mux.HandleFunc("GET /api/audit-logs", a.handleAuditLogs)
+	mux.HandleFunc("GET /api/audit-logs/cache-prefixes", a.handleCachePrefixAuditLogs)
 	mux.HandleFunc("GET /api/usage", a.handleUsageList)
 	mux.HandleFunc("POST /api/usage", a.handleUsageCreate)
 	mux.HandleFunc("GET /api/billing", a.handleBilling)
@@ -939,7 +949,7 @@ func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
 }
 
 func (a *app) listGroups() ([]group, error) {
-	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
+	rows, err := a.db.Query(`SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, updated_at FROM groups ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -949,7 +959,7 @@ func (a *app) listGroups() ([]group, error) {
 		var item group
 		var daily, monthly sql.NullFloat64
 		var strategyID sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.QuotaHeaderMasking, &item.OverloadCooldownSeconds, &item.RateLimitDownweightEnabled, &item.RateLimitCoolingThreshold, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RateMultiplier, &daily, &monthly, &item.NormalRequestMode, &item.ClaudeCodeIdentityEnabled, &item.StreamHedgeEnabled, &item.AdaptiveHedgeEnabled, &item.RPMDispatchEnabled, &item.MCPToolNamesEnabled, &item.ServiceTierPassthrough, &item.InferenceGeoPassthrough, &item.SpeedPassthrough, &item.AnthropicBetaPassthrough, &item.RejectAnthropicDowngrade, &item.RejectDistillation, &item.QuotaHeaderMasking, &item.OverloadCooldownSeconds, &item.RateLimitDownweightEnabled, &item.RateLimitCoolingThreshold, &item.RateLimitWaitSeconds, &item.CapacityQueueEnabled, &item.CapacityQueueTimeout, &item.StrategyRequiredEnabled, &strategyID, &item.ReservePoolEnabled, &item.Status, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.DailyLimitUSD = floatPointer(daily)
@@ -1001,6 +1011,9 @@ func normalizeGroupInput(input *groupInput) error {
 	}
 	if input.RateLimitCoolingThreshold != nil && (*input.RateLimitCoolingThreshold < 1 || *input.RateLimitCoolingThreshold > maxRateLimitCoolingThreshold) {
 		return fmt.Errorf("429 cooling threshold must be between 1 and %d", maxRateLimitCoolingThreshold)
+	}
+	if input.RateLimitWaitSeconds != nil && (*input.RateLimitWaitSeconds < minRateLimitCooldownSeconds || *input.RateLimitWaitSeconds > maxRateLimitCooldownSeconds) {
+		return fmt.Errorf("429 cooldown must be between %d and %d seconds", minRateLimitCooldownSeconds, maxRateLimitCooldownSeconds)
 	}
 	if input.CapacityQueueTimeout != nil && (*input.CapacityQueueTimeout < 1 || *input.CapacityQueueTimeout > 600) {
 		return errors.New("capacity queue timeout must be between 1 and 600 seconds")
@@ -1126,7 +1139,7 @@ func (a *app) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	for attempt := 0; attempt < 5; attempt++ {
 		id = "g_" + randomSecret(6)
-		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitDownweightEnabled, true)), intPointerValue(input.RateLimitCoolingThreshold, defaultRateLimitCoolingThreshold), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
+		_, err = a.db.Exec(`INSERT INTO groups (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, quota_header_masking_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), boolInt(boolPointerValue(input.ClaudeCodeIdentityEnabled, false)), boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), boolInt(rpmDispatch), boolInt(boolPointerValue(input.MCPToolNamesEnabled, false)), boolInt(boolPointerValue(input.ServiceTierPassthrough, false)), boolInt(boolPointerValue(input.InferenceGeoPassthrough, false)), boolInt(boolPointerValue(input.SpeedPassthrough, false)), boolInt(boolPointerValue(input.AnthropicBetaPassthrough, false)), boolInt(boolPointerValue(input.RejectAnthropicDowngrade, false)), boolInt(boolPointerValue(input.RejectDistillation, false)), boolInt(boolPointerValue(input.QuotaHeaderMasking, false)), intPointerValue(input.OverloadCooldownSeconds, 10), boolInt(boolPointerValue(input.RateLimitDownweightEnabled, true)), intPointerValue(input.RateLimitCoolingThreshold, defaultRateLimitCoolingThreshold), intPointerValue(input.RateLimitWaitSeconds, defaultRateLimitCooldownSeconds), boolInt(boolPointerValue(input.CapacityQueueEnabled, false)), intPointerValue(input.CapacityQueueTimeout, 30), boolInt(boolPointerValue(input.StrategyRequiredEnabled, false)), strategyValue, boolInt(reservePool), input.Status)
 		if err == nil {
 			break
 		}
@@ -1245,6 +1258,10 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.RateLimitCoolingThreshold != nil {
 		rateLimitCoolingThreshold = *input.RateLimitCoolingThreshold
 	}
+	var rateLimitWaitSeconds any
+	if input.RateLimitWaitSeconds != nil {
+		rateLimitWaitSeconds = *input.RateLimitWaitSeconds
+	}
 	var capacityQueueEnabled any
 	if input.CapacityQueueEnabled != nil {
 		capacityQueueEnabled = boolInt(*input.CapacityQueueEnabled)
@@ -1267,7 +1284,7 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_downweight_enabled = COALESCE(?, rate_limit_downweight_enabled), rate_limit_cooling_threshold = COALESCE(?, rate_limit_cooling_threshold), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, overloadCooldown, rateLimitDownweight, rateLimitCoolingThreshold, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
+	result, err := a.db.Exec(`UPDATE groups SET name = ?, description = ?, rate_multiplier = ?, daily_limit_usd = ?, monthly_limit_usd = ?, normal_request_mode = ?, claude_code_identity_enabled = COALESCE(?, claude_code_identity_enabled), stream_hedge_enabled = ?, adaptive_hedge_enabled = ?, rpm_dispatch_enabled = COALESCE(?, rpm_dispatch_enabled), mcp_tool_names_enabled = COALESCE(?, mcp_tool_names_enabled), service_tier_passthrough_enabled = COALESCE(?, service_tier_passthrough_enabled), inference_geo_passthrough_enabled = COALESCE(?, inference_geo_passthrough_enabled), speed_passthrough_enabled = COALESCE(?, speed_passthrough_enabled), anthropic_beta_passthrough_enabled = COALESCE(?, anthropic_beta_passthrough_enabled), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), quota_header_masking_enabled = COALESCE(?, quota_header_masking_enabled), overload_cooldown_seconds = COALESCE(?, overload_cooldown_seconds), rate_limit_downweight_enabled = COALESCE(?, rate_limit_downweight_enabled), rate_limit_cooling_threshold = COALESCE(?, rate_limit_cooling_threshold), rate_limit_wait_seconds = COALESCE(?, rate_limit_wait_seconds), capacity_queue_enabled = COALESCE(?, capacity_queue_enabled), capacity_queue_timeout_seconds = COALESCE(?, capacity_queue_timeout_seconds), strategy_required_enabled = COALESCE(?, strategy_required_enabled), strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, reserve_pool_enabled = COALESCE(?, reserve_pool_enabled), status = ?, updated_at = `+nowSQL+` WHERE id = ?`, input.Name, input.Description, input.RateMultiplier, input.DailyLimitUSD, input.MonthlyLimitUSD, boolInt(input.NormalRequestMode), claudeCodeIdentity, boolInt(input.StreamHedgeEnabled), boolInt(input.AdaptiveHedgeEnabled), rpmDispatch, mcpToolNames, serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, quotaHeaderMasking, overloadCooldown, rateLimitDownweight, rateLimitCoolingThreshold, rateLimitWaitSeconds, capacityQueueEnabled, capacityQueueTimeout, strategyRequired, boolInt(strategyClear), strategyValue, reservePool, input.Status, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

@@ -52,25 +52,27 @@ type proxyPoolInput struct {
 }
 
 type proxyRecord struct {
-	ID               int64  `json:"id"`
-	PoolID           int64  `json:"pool_id"`
-	PoolName         string `json:"pool_name"`
-	Name             string `json:"name"`
-	Protocol         string `json:"protocol"`
-	Host             string `json:"host"`
-	Port             int    `json:"port"`
-	Username         string `json:"username"`
-	PasswordSet      bool   `json:"password_set"`
-	Status           string `json:"status"`
-	ExitIP           string `json:"exit_ip"`
-	LatencyMS        *int64 `json:"latency_ms"`
-	LastTestAt       string `json:"last_test_at"`
-	LastError        string `json:"last_error"`
-	AssignedTo       string `json:"assigned_to"`
-	UsedAccountCount int    `json:"used_account_count"`
-	SingleUseEnabled bool   `json:"single_use_enabled"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	ID                 int64  `json:"id"`
+	PoolID             int64  `json:"pool_id"`
+	PoolName           string `json:"pool_name"`
+	Name               string `json:"name"`
+	Protocol           string `json:"protocol"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	PasswordSet        bool   `json:"password_set"`
+	Status             string `json:"status"`
+	ExitIP             string `json:"exit_ip"`
+	LatencyMS          *int64 `json:"latency_ms"`
+	LastTestAt         string `json:"last_test_at"`
+	LastError          string `json:"last_error"`
+	AssignedTo         string `json:"assigned_to"`
+	HistoricalAccounts string `json:"historical_accounts"`
+	UsedAccountCount   int    `json:"used_account_count"`
+	SingleUseEnabled   bool   `json:"single_use_enabled"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
+	ArchivedAt         string `json:"archived_at,omitempty"`
 }
 
 type parsedProxy struct {
@@ -104,6 +106,7 @@ type proxyBatchDeleteInput struct {
 type proxyBatchDeleteResponse struct {
 	Matched            int64 `json:"matched"`
 	Deleted            int64 `json:"deleted"`
+	Archived           int64 `json:"archived"`
 	ReassignedAccounts int   `json:"reassigned_accounts"`
 	PausedAccounts     int   `json:"paused_accounts"`
 }
@@ -675,29 +678,34 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"deleted":         true,
-		"name":            name,
-		"deleted_proxies": deletedProxies,
+		"deleted":          true,
+		"name":             name,
+		"deleted_proxies":  deletedProxies,
+		"archived_proxies": deletedProxies,
 	})
 }
 
 const proxySelect = `SELECT x.id, x.pool_id, p.name, x.name, x.protocol, x.host, x.port, x.username, x.password != '', x.status, x.exit_ip, x.latency_ms, x.last_test_at, x.last_error,
 	COALESCE((SELECT GROUP_CONCAT(a.name, ', ') FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL AND a.archived_at IS NULL), ''),
+	COALESCE((SELECT GROUP_CONCAT(history_account.name, ', ') FROM proxy_account_history history JOIN accounts history_account ON history_account.id = history.account_id WHERE history.proxy_id = x.id), ''),
 	(SELECT COUNT(DISTINCT used_history.account_id) FROM proxy_account_history used_history
 		JOIN proxies used_proxy ON used_proxy.id = used_history.proxy_id
 		WHERE used_proxy.protocol = x.protocol AND used_proxy.host = x.host AND used_proxy.port = x.port
 		AND used_proxy.username = x.username AND used_proxy.password = x.password),
-	p.single_use_enabled, x.created_at, x.updated_at
+	p.single_use_enabled, x.created_at, x.updated_at,
+	CASE WHEN p.system_kind = 'dead' THEN x.updated_at ELSE x.deleted_at END
 	FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id`
 
 func scanProxy(row scanner) (proxyRecord, error) {
 	var item proxyRecord
 	var latency sql.NullInt64
 	var lastTest sql.NullString
+	var archivedAt sql.NullString
 	var singleUseEnabled int
-	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.UsedAccountCount, &singleUseEnabled, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.PoolID, &item.PoolName, &item.Name, &item.Protocol, &item.Host, &item.Port, &item.Username, &item.PasswordSet, &item.Status, &item.ExitIP, &latency, &lastTest, &item.LastError, &item.AssignedTo, &item.HistoricalAccounts, &item.UsedAccountCount, &singleUseEnabled, &item.CreatedAt, &item.UpdatedAt, &archivedAt)
 	item.LatencyMS = nullIntPointer(latency)
 	item.LastTestAt = nullText(lastTest)
+	item.ArchivedAt = nullText(archivedAt)
 	item.SingleUseEnabled = singleUseEnabled == 1
 	return item, err
 }
@@ -730,6 +738,40 @@ func (a *app) handleProxies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (a *app) handleArchivedProxies(w http.ResponseWriter, r *http.Request) {
+	query := proxySelect + ` WHERE ((x.deleted_at IS NOT NULL AND p.system_kind = '')
+		OR (p.system_kind = 'dead' AND x.deleted_at IS NULL))`
+	args := []any{}
+	if user := currentUser(r); user.Role == "user" {
+		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
+		query += ` AND EXISTS (SELECT 1 FROM proxy_account_history scope_history
+			JOIN accounts scope_account ON scope_account.id = scope_history.account_id
+			WHERE scope_history.proxy_id = x.id AND ` + condition + `)`
+		args = append(args, scopeArgs...)
+	}
+	query += ` ORDER BY x.deleted_at DESC, x.id DESC`
+	rows, err := a.db.Query(query, args...)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer rows.Close()
+	items := []proxyRecord{}
+	for rows.Next() {
+		item, err := scanProxy(rows)
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -1223,6 +1265,7 @@ func (a *app) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"archived":            true,
 		"deleted":             true,
 		"reassigned_accounts": result.ReassignedAccounts,
 		"paused_accounts":     result.PausedAccounts,
@@ -1290,6 +1333,7 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 	if err != nil {
 		return result, err
 	}
+	result.Archived = result.Deleted
 
 	for _, account := range assigned {
 		if account.AutoProxy {

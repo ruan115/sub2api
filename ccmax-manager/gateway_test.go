@@ -349,6 +349,112 @@ func TestDistilledCompatibilityAccountFailoverKeepsRequestedModel(t *testing.T) 
 	}
 }
 
+func TestReduced429RPMThreshold(t *testing.T) {
+	tests := []struct {
+		observed int
+		strikes  int
+		want     int
+	}{
+		{observed: 20, strikes: 1, want: 15},
+		{observed: 20, strikes: 2, want: 10},
+		{observed: 20, strikes: 3, want: 5},
+		{observed: 20, strikes: 9, want: 5},
+		{observed: 2, strikes: 1, want: 1},
+		{observed: 1, strikes: 1, want: 1},
+	}
+	for _, test := range tests {
+		if got := reduced429RPMThreshold(test.observed, test.strikes); got != test.want {
+			t.Fatalf("reduced429RPMThreshold(%d, %d)=%d, want %d", test.observed, test.strikes, got, test.want)
+		}
+	}
+}
+
+func TestLearned429RPMThresholdLowersPeakAndOverridesSticky(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited := createGatewayTestAccount(t, a, handler, "learned-peak", "https://limited.example.test", 0, nil, map[string]any{"access_token": "token-a"})
+	healthy := createGatewayTestAccount(t, a, handler, "healthy-peak", "https://healthy.example.test", 1, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 1 WHERE id = ?`, limited.ID); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		a.recordGatewayAccountRPM(limited.ID)
+	}
+	resetAt := time.Now().UTC().Add(4 * time.Hour)
+	a.captureAccountRPMThreshold("a", limited.ID, resetAt)
+
+	var learned int
+	var storedReset string
+	if err := a.db.QueryRow(`SELECT rpm_limit, reset_at FROM account_rpm_thresholds WHERE account_id = ?`, limited.ID).Scan(&learned, &storedReset); err != nil {
+		t.Fatal(err)
+	}
+	if learned != 15 {
+		t.Fatalf("learned RPM=%d, want a 25%% reduction from 20 to 15", learned)
+	}
+	parsedReset, err := time.Parse(time.RFC3339Nano, storedReset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedReset.Before(time.Now().UTC().Add(3 * time.Hour)) {
+		t.Fatalf("learned RPM reset=%s, want the threshold to survive until the quota window", parsedReset)
+	}
+
+	const session = "sticky-over-learned-peak"
+	a.bindGatewayStickySession(key.ID, session, limited.ID)
+
+	// A learned cap comes from a 429, so it is rate limiting rather than account
+	// failure and must not move a pinned large request: switching accounts turns
+	// a nearly free cache read into a full-price cache creation, which is what
+	// pushed the account into the limit to begin with. The block is `rpm >= cap`
+	// against a rolling 60s count, so it clears as traffic ages out even though
+	// the cap itself survives until the quota window — the capacity queue holds
+	// the request until then.
+	if _, err := a.acquireGatewayAccountPinned(key, session, "claude-fable-5", map[int64]bool{}, false, true); !errors.Is(err, errNoGatewayAccountCapacity) {
+		t.Fatalf("pinned acquire error=%v, want a capacity error so the request waits on its own account", err)
+	}
+
+	// Without the pin the learned cap still hands the request to another account.
+	selected, err := a.acquireGatewayAccountPinned(key, session, "claude-fable-5", map[int64]bool{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	if selected.ID != healthy.ID {
+		t.Fatalf("selected account=%d, want healthy fallback %d after sticky account reached learned cap", selected.ID, healthy.ID)
+	}
+}
+
+func TestRateLimitSweeperRestoresMissingLearnedRPMThreshold(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	created := createGatewayTestAccount(t, a, handler, "restore-learned-peak", "https://limited.example.test", 0, nil, map[string]any{"access_token": "token"})
+	resetAt := time.Now().UTC().Add(3 * time.Hour)
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 1, rate_limit_reason = '429_backoff', rate_limit_downweight_until = ? WHERE id = ?`,
+		resetAt.Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		a.recordGatewayAccountRPM(created.ID)
+	}
+
+	a.sweepAccountRateLimitState()
+
+	var learned int
+	if err := a.db.QueryRow(`SELECT rpm_limit FROM account_rpm_thresholds WHERE account_id = ?`, created.ID).Scan(&learned); err != nil {
+		t.Fatal(err)
+	}
+	if learned != 15 {
+		t.Fatalf("restored learned RPM=%d, want 15", learned)
+	}
+}
+
 func TestGatewayRejectsAnthropicSilentModelDowngradeByGroup(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -769,9 +875,9 @@ func TestAccountRequestPassthroughPreservesRawBody(t *testing.T) {
 
 func TestRateLimitPolicyThresholdClamps(t *testing.T) {
 	for _, testCase := range []struct {
-		name      string
+		name       string
 		configured int
-		want      int
+		want       int
 	}{
 		{"unset falls back to the default", 0, defaultRateLimitCoolingThreshold},
 		{"negative falls back to the default", -1, defaultRateLimitCoolingThreshold},
@@ -787,27 +893,53 @@ func TestRateLimitPolicyThresholdClamps(t *testing.T) {
 	}
 }
 
-// The switch has to gate the whole feature: with it off a 429 must leave the
-// account's dispatch weight untouched.
-func TestGatewayDisabledDownweightLeavesAccountUntouched(t *testing.T) {
+func TestRateLimitPolicyCooldownSecondsNormalises(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		configured int
+		want       int
+	}{
+		{"unset falls back to the default", 0, defaultRateLimitCooldownSeconds},
+		{"below range falls back to the default", 59, defaultRateLimitCooldownSeconds},
+		{"minimum is honoured", 60, 60},
+		{"in range is honoured", 90, 90},
+		{"maximum is honoured", 120, 120},
+		{"above range falls back to the default", 121, defaultRateLimitCooldownSeconds},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := (rateLimitPolicy{CooldownSeconds: testCase.configured}).cooldownSeconds(); got != testCase.want {
+				t.Fatalf("cooldown seconds = %d, want %d", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The switch gates the complete transient-429 path: strike tracking, learned
+// RPM threshold, downweighting and the short cooldown.
+func TestGatewayDisabledDownweightSkipsTransientCooldown(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	created := createGatewayTestAccount(t, a, handler, "no-downweight", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	a.recordGatewayAccountRPM(created.ID)
 
-	a.captureGatewayUpstreamState(created.ID, "claude-fable-5", 10,
-		rateLimitPolicy{DownweightEnabled: false, CoolingThreshold: 3},
+	a.captureGatewayUpstreamState(created.ID, "a", "claude-fable-5", 10,
+		rateLimitPolicy{DownweightEnabled: false, CoolingThreshold: 3, CooldownSeconds: 120},
 		&http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
 
 	var consecutive int
 	var reason string
-	var downweight sql.NullString
-	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until FROM accounts WHERE id = ?`, created.ID).
-		Scan(&consecutive, &reason, &downweight); err != nil {
+	var downweight, resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &downweight, &resetAt); err != nil {
 		t.Fatal(err)
 	}
-	if consecutive != 0 || reason != "" || downweight.Valid {
-		t.Fatalf("disabled downweight still recorded state: consecutive %d, reason %q, downweight %v", consecutive, reason, downweight)
+	if consecutive != 0 || reason != "" || downweight.Valid || resetAt.Valid {
+		t.Fatalf("disabled adaptive cooling state: consecutive %d, reason %q, downweight %v, reset %v", consecutive, reason, downweight, resetAt)
+	}
+	var learned int
+	if err := a.db.QueryRow(`SELECT rpm_limit FROM account_rpm_thresholds WHERE account_id = ?`, created.ID).Scan(&learned); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("disabled switch unexpectedly learned RPM threshold = %d, err=%v", learned, err)
 	}
 }
 
@@ -840,7 +972,7 @@ func TestGatewayGroupSwitchGovernsDownweightEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if consecutive != 0 || reason != "" {
-		t.Fatalf("group switch was off but the 429 still downweighted: consecutive %d, reason %q", consecutive, reason)
+		t.Fatalf("group switch off state: consecutive %d, reason %q", consecutive, reason)
 	}
 
 	// Turning it back on must take effect without a restart. Clear the standard
@@ -866,7 +998,7 @@ func TestGatewayGroupSwitchGovernsDownweightEndToEnd(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason FROM accounts WHERE id = ?`, created.ID).Scan(&consecutive, &reason); err != nil {
 		t.Fatal(err)
 	}
-	if consecutive != 1 || reason != "429_backoff" {
+	if consecutive != 1 || reason != "429_cooling" {
 		t.Fatalf("group switch was on but the 429 was not recorded: consecutive %d, reason %q", consecutive, reason)
 	}
 }
@@ -2362,14 +2494,14 @@ func TestGatewayRetryRecordsRateLimitReset(t *testing.T) {
 	}
 }
 
-func TestGatewayUsesSub2RateLimitFallback(t *testing.T) {
+func TestGatewayUsesTransient429Cooldown(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
 	created := createGatewayTestAccount(t, a, handler, "429 fallback", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
 	before := time.Now()
 
-	a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
+	a.captureGatewayUpstreamState(created.ID, "a", "claude-fable-5", 10, defaultTestRateLimitPolicy(), &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)})
 
 	var raw sql.NullString
 	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&raw); err != nil {
@@ -2383,8 +2515,8 @@ func TestGatewayUsesSub2RateLimitFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	delay := resetAt.Sub(before)
-	if delay < 4*time.Second || delay > 6*time.Second {
-		t.Fatalf("cooldown %s outside the 5s fallback window", delay)
+	if delay < 59*time.Second || delay > 61*time.Second {
+		t.Fatalf("cooldown %s outside the 60s transient window", delay)
 	}
 }
 
@@ -2407,7 +2539,7 @@ func TestGateway529CooldownIsModelScopedAndConfigurable(t *testing.T) {
 	}
 	before := time.Now().UTC()
 
-	a.captureGatewayUpstreamState(created.ID, "Claude-Opus-5", key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: 529, Header: make(http.Header)})
+	a.captureGatewayUpstreamState(created.ID, "a", "Claude-Opus-5", key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: 529, Header: make(http.Header)})
 
 	var accountResetAt sql.NullString
 	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&accountResetAt); err != nil {
@@ -2450,7 +2582,7 @@ func TestGatewayDoesNotTrustAmbiguousAnthropicAggregateReset(t *testing.T) {
 	headers := make(http.Header)
 	headers.Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(before.Add(7*24*time.Hour).Unix(), 10))
 
-	a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers})
+	a.captureGatewayUpstreamState(created.ID, "a", "claude-fable-5", 10, defaultTestRateLimitPolicy(), &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers})
 
 	var raw sql.NullString
 	if err := a.db.QueryRow(`SELECT rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).Scan(&raw); err != nil {
@@ -2464,8 +2596,8 @@ func TestGatewayDoesNotTrustAmbiguousAnthropicAggregateReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	delay := resetAt.Sub(before)
-	if delay < 4*time.Second || delay > 6*time.Second {
-		t.Fatalf("ambiguous aggregate reset produced cooldown %s, want about 5s", delay)
+	if delay < 59*time.Second || delay > 61*time.Second {
+		t.Fatalf("ambiguous aggregate reset produced cooldown %s, want about 60s", delay)
 	}
 }
 
@@ -2517,16 +2649,95 @@ func TestGatewayRecordsSelectedFiveHourWindow(t *testing.T) {
 
 	a.captureAccountUpstreamState(created.ID, &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers})
 
-	var resetAt, window string
-	if err := a.db.QueryRow(`SELECT rate_limit_reset_at, rate_limit_window FROM accounts WHERE id = ?`, created.ID).Scan(&resetAt, &window); err != nil {
+	var resetAt, quotaResetAt, window string
+	if err := a.db.QueryRow(`SELECT rate_limit_reset_at, quota_5h_reset_at, rate_limit_window FROM accounts WHERE id = ?`, created.ID).Scan(&resetAt, &quotaResetAt, &window); err != nil {
 		t.Fatal(err)
 	}
-	if resetAt != fiveHourReset.Format(time.RFC3339Nano) || window != "5h" {
-		t.Fatalf("stored cooldown = %s/%s, want %s/5h", resetAt, window, fiveHourReset.Format(time.RFC3339Nano))
+	if quotaResetAt != fiveHourReset.Format(time.RFC3339Nano) || window != "5h" {
+		t.Fatalf("stored quota window = %s/%s, want %s/5h", quotaResetAt, window, fiveHourReset.Format(time.RFC3339Nano))
+	}
+	eligibleAt, err := time.Parse(time.RFC3339Nano, resetAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEligibleAt := staggeredAccountQuotaRelease(created.ID, fiveHourReset)
+	if !eligibleAt.Equal(wantEligibleAt) {
+		t.Fatalf("staggered release = %s, want %s", eligibleAt, wantEligibleAt)
+	}
+	if delay := eligibleAt.Sub(fiveHourReset); delay < accountQuotaReleaseDelayMin || delay > accountQuotaReleaseDelayMax {
+		t.Fatalf("stagger delay = %s, want 15-30m", delay)
 	}
 }
 
-func TestGatewayConsecutive429ParksAccountUntilFiveHourReset(t *testing.T) {
+func TestStaggeredAccountQuotaReleaseSpreadsCohort(t *testing.T) {
+	resetAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	seen := map[time.Time]bool{}
+	for accountID := int64(1); accountID <= 128; accountID++ {
+		first := staggeredAccountQuotaRelease(accountID, resetAt)
+		second := staggeredAccountQuotaRelease(accountID, resetAt)
+		if !first.Equal(second) {
+			t.Fatalf("account %d release is unstable: %s != %s", accountID, first, second)
+		}
+		if delay := first.Sub(resetAt); delay < accountQuotaReleaseDelayMin || delay > accountQuotaReleaseDelayMax {
+			t.Fatalf("account %d delay = %s", accountID, delay)
+		}
+		seen[first] = true
+	}
+	if len(seen) < 64 {
+		t.Fatalf("only %d distinct release instants for 128 accounts", len(seen))
+	}
+}
+
+func TestFiveHourQuotaRefreshWaitsForStaggeredRelease(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	created := createGatewayTestAccount(t, a, handler, "staggered-release", "https://example.test", 0, nil, map[string]any{"access_token": "token"})
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	quotaReset := now.Add(-time.Minute).Truncate(time.Second)
+	eligibleAt := now.Add(20 * time.Minute).Truncate(time.Second)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reason = 'quota_exhausted', rate_limit_window = '5h', quota_5h_reset_at = ?, rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`,
+		quotaReset.Format(time.RFC3339Nano), eligibleAt.Format(time.RFC3339Nano), eligibleAt.Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a.sweepAccountRateLimitState()
+	var reason string
+	if err := a.db.QueryRow(`SELECT rate_limit_reason FROM accounts WHERE id = ?`, created.ID).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "quota_exhausted" {
+		t.Fatalf("account released at quota reset instead of staggered instant: reason=%q", reason)
+	}
+	if _, err := a.acquireGatewayAccount(key, "", "claude-fable-5", map[int64]bool{}); err == nil {
+		t.Fatal("account was dispatchable during its post-refresh stagger window")
+	}
+
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`,
+		now.Add(-time.Second).Format(time.RFC3339Nano), now.Add(-time.Second).Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.sweepAccountRateLimitState()
+	selected, err := a.acquireGatewayAccount(key, "", "claude-fable-5", map[int64]bool{})
+	if err != nil {
+		t.Fatalf("account was not dispatchable after staggered release: %v", err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	var refreshedAt string
+	if err := a.db.QueryRow(`SELECT quota_refreshed_at FROM accounts WHERE id = ?`, created.ID).Scan(&refreshedAt); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedAt != quotaReset.Format(time.RFC3339Nano) {
+		t.Fatalf("quota refresh timestamp = %s, want actual reset %s", refreshedAt, quotaReset)
+	}
+}
+
+func TestGatewayConsecutiveTransient429UsesConfiguredShortCooling(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
@@ -2538,7 +2749,7 @@ func TestGatewayConsecutive429ParksAccountUntilFiveHourReset(t *testing.T) {
 	response := &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers}
 
 	for attempt := 1; attempt <= defaultRateLimitCoolingThreshold; attempt++ {
-		a.captureGatewayUpstreamState(created.ID, "claude-fable-5", 10, defaultTestRateLimitPolicy(), response)
+		a.captureGatewayUpstreamState(created.ID, "a", "claude-fable-5", 10, defaultTestRateLimitPolicy(), response)
 		var consecutive, schedulable int
 		var reason, window string
 		var resetAt sql.NullString
@@ -2549,27 +2760,30 @@ func TestGatewayConsecutive429ParksAccountUntilFiveHourReset(t *testing.T) {
 		if consecutive != attempt || schedulable != 1 {
 			t.Fatalf("attempt %d state = consecutive %d, schedulable %d", attempt, consecutive, schedulable)
 		}
-		if attempt < defaultRateLimitCoolingThreshold {
-			if reason != "429_backoff" || window != "" {
-				t.Fatalf("attempt %d reason/window = %q/%q", attempt, reason, window)
-			}
-			// Strikes debounce, so age this one out to model attempts spread
-			// across separate dispatches rather than one upstream burst.
-			if _, err := a.db.Exec(`UPDATE accounts SET last_429_at = ? WHERE id = ?`,
-				time.Now().UTC().Add(-2*account429DebounceWindow).Format(time.RFC3339Nano), created.ID); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		if reason != "429_cooling" || !resetAt.Valid {
-			t.Fatalf("third 429 state = reason %q, reset %v", reason, resetAt)
+		if reason != "429_cooling" || window != "" || !resetAt.Valid {
+			t.Fatalf("attempt %d reason/window = %q/%q", attempt, reason, window)
 		}
 		parsed, err := time.Parse(time.RFC3339Nano, resetAt.String)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !parsed.Equal(fiveHourReset) {
-			t.Fatalf("cooldown reset = %s, want %s", parsed, fiveHourReset)
+		wantCooldown := 60 + (attempt-1)*30
+		if remaining := time.Until(parsed); remaining < time.Duration(wantCooldown-1)*time.Second || remaining > time.Duration(wantCooldown+1)*time.Second {
+			t.Fatalf("attempt %d short cooldown remaining=%s, want about %ds", attempt, remaining, wantCooldown)
+		}
+		if delta := parsed.Sub(fiveHourReset); delta > -30*time.Minute && delta < 30*time.Minute {
+			t.Fatalf("ambiguous 429 inherited the 5h quota reset: %s", parsed)
+		}
+		if attempt < defaultRateLimitCoolingThreshold {
+			// Model a later request after the short cooldown. It returns to
+			// downweighted scheduling, then the debounce window ages out before the
+			// next independent strike.
+			if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, last_429_at = ? WHERE id = ?`,
+				time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano),
+				time.Now().UTC().Add(-2*account429DebounceWindow).Format(time.RFC3339Nano), created.ID); err != nil {
+				t.Fatal(err)
+			}
+			a.sweepAccountRateLimitState()
 		}
 	}
 }
@@ -2600,14 +2814,13 @@ func TestGatewayConcurrent429BurstCountsOnce(t *testing.T) {
 		Scan(&consecutive, &reason, &resetAt); err != nil {
 		t.Fatal(err)
 	}
-	if consecutive != 1 || reason != "429_backoff" || resetAt.Valid {
-		t.Fatalf("burst state = consecutive %d, reason %q, reset %v; want a single backoff strike", consecutive, reason, resetAt)
+	if consecutive != 1 || reason != "429_cooling" || !resetAt.Valid {
+		t.Fatalf("burst state = consecutive %d, reason %q, reset %v; want one short cooldown", consecutive, reason, resetAt)
 	}
 }
 
-// The very first 429 must lower the account's dispatch weight, and the penalty
-// must be pinned to the quota window rather than a rolling timer.
-func TestGatewayFirst429DownweightsUntilQuotaWindowResets(t *testing.T) {
+// An ambiguous 429 must not inherit the account's stored 5h reset.
+func TestGatewayFirst429UsesShortCooldownInsteadOfQuotaWindow(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
@@ -2621,20 +2834,27 @@ func TestGatewayFirst429DownweightsUntilQuotaWindowResets(t *testing.T) {
 
 	var consecutive int
 	var reason string
-	var downweightUntil sql.NullString
-	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until FROM accounts WHERE id = ?`, created.ID).
-		Scan(&consecutive, &reason, &downweightUntil); err != nil {
+	var downweightUntil, resetAt sql.NullString
+	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason, rate_limit_downweight_until, rate_limit_reset_at FROM accounts WHERE id = ?`, created.ID).
+		Scan(&consecutive, &reason, &downweightUntil, &resetAt); err != nil {
 		t.Fatal(err)
 	}
-	if consecutive != 1 || reason != "429_backoff" || !downweightUntil.Valid {
+	if consecutive != 1 || reason != "429_cooling" || !downweightUntil.Valid {
 		t.Fatalf("first 429 state = consecutive %d, reason %q, downweight %v", consecutive, reason, downweightUntil)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, downweightUntil.String)
+	parsed, err := time.Parse(time.RFC3339Nano, resetAt.String)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !parsed.Equal(windowReset) {
-		t.Fatalf("downweight until = %s, want the account's 5h window reset %s", parsed, windowReset)
+	if remaining := time.Until(parsed); remaining < 59*time.Second || remaining > 61*time.Second {
+		t.Fatalf("short cooldown remaining = %s, want about 60s", remaining)
+	}
+	parsedDownweight, err := time.Parse(time.RFC3339Nano, downweightUntil.String)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta := parsedDownweight.Sub(windowReset); delta < -time.Second || delta > time.Second {
+		t.Fatalf("downweight reset = %s, want stored 5h reset %s", parsedDownweight, windowReset)
 	}
 }
 
@@ -2673,7 +2893,7 @@ func TestGatewaySuccessDoesNotLiftDownweight(t *testing.T) {
 	}
 }
 
-func TestGatewayLate429DoesNotDowngradeLivePark(t *testing.T) {
+func TestGatewayLateTransient429CannotExtendExistingCooling(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
@@ -2695,7 +2915,18 @@ func TestGatewayLate429DoesNotDowngradeLivePark(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reason != "429_cooling" || message != "已冷却" || !resetAt.Valid {
-		t.Fatalf("late strike changed park: reason %q, message %q, reset %v", reason, message, resetAt)
+		t.Fatalf("late strike state: reason %q, message %q, reset %v", reason, message, resetAt)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, resetAt.String)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := time.Parse(time.RFC3339Nano, parkedUntil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta := parsed.Sub(expected); delta < -time.Millisecond || delta > time.Millisecond {
+		t.Fatalf("late strike moved cooldown from %s to %s", expected, parsed)
 	}
 }
 
@@ -2710,6 +2941,10 @@ func TestManualClearReleasesDownweightAndBoosts(t *testing.T) {
 		time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
 		time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
 		time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, 7, ?)`,
+		created.ID, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2727,6 +2962,13 @@ func TestManualClearReleasesDownweightAndBoosts(t *testing.T) {
 	}
 	if !refreshed.Valid {
 		t.Fatal("manual clear did not grant the fresh-window priority boost")
+	}
+	var thresholdCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_thresholds WHERE account_id = ?`, created.ID).Scan(&thresholdCount); err != nil {
+		t.Fatal(err)
+	}
+	if thresholdCount != 0 {
+		t.Fatalf("manual clear kept %d learned RPM thresholds", thresholdCount)
 	}
 }
 
@@ -2764,7 +3006,7 @@ func TestAccountRateLimitSweeperReleasesOnQuotaWindowReset(t *testing.T) {
 	past := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
 	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
 	// Park expired but the window has not rolled: schedulable again, still last.
-	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, rate_limit_reason = '429_cooling', rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`, past, future, expired.ID); err != nil {
+	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 2, rate_limit_reason = '429_cooling', rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`, past, future, expired.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.db.Exec(`UPDATE accounts SET consecutive_429 = 3, rate_limit_reason = '429_cooling', rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`, future, future, live.ID); err != nil {
@@ -2783,8 +3025,8 @@ func TestAccountRateLimitSweeperReleasesOnQuotaWindowReset(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT quota_refreshed_at FROM accounts WHERE id = ?`, rolled.ID).Scan(&refreshed); err != nil {
 		t.Fatal(err)
 	}
-	if !refreshed.Valid {
-		t.Fatal("a rolled quota window did not grant the fresh priority boost")
+	if refreshed.Valid {
+		t.Fatal("a legacy transient penalty incorrectly granted a quota refresh boost")
 	}
 	for _, expectation := range []struct {
 		name            string
@@ -2792,7 +3034,7 @@ func TestAccountRateLimitSweeperReleasesOnQuotaWindowReset(t *testing.T) {
 		wantConsecutive int
 		wantReason      string
 	}{
-		{"expired park inside window", expired.ID, 3, "429_backoff"},
+		{"expired transient cooldown", expired.ID, 2, "429_backoff"},
 		{"live park", live.ID, 3, "429_cooling"},
 		{"rolled window", rolled.ID, 0, ""},
 		{"still penalised", penalised.ID, 2, "429_backoff"},
@@ -2868,8 +3110,8 @@ func TestGatewayStreamRateLimitErrorAccumulatesStrikes(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT consecutive_429, rate_limit_reason FROM accounts WHERE id = ?`, created.ID).Scan(&consecutive, &reason); err != nil {
 		t.Fatal(err)
 	}
-	if consecutive != 2 || reason != "429_backoff" {
-		t.Fatalf("in-stream rate limit state = consecutive %d, reason %q; want the earlier strike kept and this one added", consecutive, reason)
+	if consecutive != 2 || reason != "429_cooling" {
+		t.Fatalf("in-stream rate limit state = consecutive %d, reason %q; want the earlier strike kept and a short cooldown", consecutive, reason)
 	}
 }
 
@@ -3254,7 +3496,11 @@ func TestSerialUserMessageQueueAndToolResultBypass(t *testing.T) {
 // Mirrors the shipped group defaults so a test that is not about the switch
 // exercises the same policy production runs with.
 func defaultTestRateLimitPolicy() rateLimitPolicy {
-	return rateLimitPolicy{DownweightEnabled: true, CoolingThreshold: defaultRateLimitCoolingThreshold}
+	return rateLimitPolicy{
+		DownweightEnabled: true,
+		CoolingThreshold:  defaultRateLimitCoolingThreshold,
+		CooldownSeconds:   defaultRateLimitCooldownSeconds,
+	}
 }
 
 func newGatewayTestApp(t *testing.T) (*app, http.Handler) {

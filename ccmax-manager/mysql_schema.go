@@ -19,6 +19,7 @@ func (a *app) migrateMySQL() error {
 			description TEXT NOT NULL,
 			rpm_limit INT NOT NULL DEFAULT 0,
 			tpm_limit BIGINT NOT NULL DEFAULT 0,
+			itpm_limit BIGINT NOT NULL DEFAULT 0,
 			concurrency_limit INT NOT NULL DEFAULT 0,
 			rpm_strategy VARCHAR(32) NOT NULL DEFAULT 'fixed',
 			rpm_sticky_buffer INT NOT NULL DEFAULT 0,
@@ -50,6 +51,7 @@ func (a *app) migrateMySQL() error {
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
 				rate_limit_downweight_enabled TINYINT(1) NOT NULL DEFAULT 1,
 				rate_limit_cooling_threshold INT NOT NULL DEFAULT 3,
+				rate_limit_wait_seconds INT NOT NULL DEFAULT 120,
 				capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INT NOT NULL DEFAULT 30,
 			strategy_required_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -145,6 +147,9 @@ func (a *app) migrateMySQL() error {
 			last_429_at DATETIME(3) NULL,
 			rate_limit_downweight_until DATETIME(3) NULL,
 			quota_refreshed_at DATETIME(3) NULL,
+			itpm_remaining BIGINT NULL,
+			itpm_reset_at DATETIME(3) NULL,
+			itpm_sampled_at DATETIME(3) NULL,
 			proxy_pool_id BIGINT NULL,
 			proxy_id BIGINT NULL,
 			active_proxy_id BIGINT GENERATED ALWAYS AS (CASE WHEN deleted_at IS NULL AND archived_at IS NULL THEN proxy_id ELSE NULL END) STORED,
@@ -355,6 +360,20 @@ func (a *app) migrateMySQL() error {
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			CONSTRAINT fk_fingerprints_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS cache_prefix_events (
+			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			session_hash VARCHAR(191) NOT NULL,
+			account_id BIGINT NULL,
+			model VARCHAR(191) NOT NULL DEFAULT '',
+			prefix_hash VARCHAR(64) NOT NULL,
+			tools_hash VARCHAR(64) NOT NULL,
+			system_hash VARCHAR(64) NOT NULL,
+			changed_segment VARCHAR(32) NOT NULL DEFAULT '',
+			previous_prefix_hash VARCHAR(64) NOT NULL DEFAULT '',
+			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			KEY idx_cache_prefix_session (session_hash, created_at DESC),
+			KEY idx_cache_prefix_created (created_at DESC)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS group_strategy_shares (
 			group_id VARCHAR(40) NOT NULL,
 			strategy_id BIGINT NOT NULL,
@@ -483,11 +502,31 @@ func (a *app) migrateMySQL() error {
 			return fmt.Errorf("migrate MySQL schema statement %d: %w", index+1, err)
 		}
 	}
+	for _, column := range []struct{ name, definition string }{
+		{"itpm_remaining", "BIGINT NULL"},
+		{"itpm_reset_at", "DATETIME(3) NULL"},
+		{"itpm_sampled_at", "DATETIME(3) NULL"},
+	} {
+		if err := ensureMySQLColumn(a.db.DB, "accounts", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "itpm_limit", "BIGINT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_downweight_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_cooling_threshold", "INT NOT NULL DEFAULT 3"); err != nil {
 		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_wait_seconds", "INT NOT NULL DEFAULT 120"); err != nil {
+		return err
+	}
+	// Through the wrapper, not the raw handle: GROUPS is reserved in MySQL 8.0.2+
+	// and only rewriteQuery adds the backticks.
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_wait_seconds = ? WHERE rate_limit_wait_seconds < ? OR rate_limit_wait_seconds > ?`, defaultRateLimitCooldownSeconds, minRateLimitCooldownSeconds, maxRateLimitCooldownSeconds); err != nil {
+		return fmt.Errorf("normalise MySQL group 429 cooldown seconds: %w", err)
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "quota_header_masking_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
 		return err

@@ -16,14 +16,18 @@ const state = {
   billing: null,
   usage: [],
   audits: [],
+  cacheAudits: [],
+  cacheAuditSummary: null,
+  auditMode: "operations",
   errors: null,
   daily: [],
   authorization: null,
   deauth: null,
   deauthWindow: 60,
   purposes: [],
-  proxyPools: [],
-  proxies: [],
+	proxyPools: [],
+	proxies: [],
+	archivedProxies: [],
   users: [],
   keys: [],
   accountGroup: "",
@@ -35,8 +39,9 @@ const state = {
   accountsLoading: null,
   accountAutoRefresh: true,
   breakdown: "group",
-  proxyPoolFilter: "",
-  proxySearch: "",
+	proxyPoolFilter: "",
+	proxySearch: "",
+	proxyInventory: "active",
   oauthSessionID: "",
   batchResults: [],
   paginationPages: {},
@@ -57,7 +62,7 @@ const viewMeta = {
   access: ["ACCESS / USERS & KEYS", "用户与 SK", "生成 SK"],
   pricing: ["BILLING / MODEL PRICES", "模型价格", "手动价格"],
   billing: ["LEDGER / BILLING", "计费中心", "记录用量"],
-  audit: ["SECURITY / AUDIT TRAIL", "操作日志", ""],
+  audit: ["SECURITY / AUDIT TRAIL", "审计查询", ""],
   dead: ["LIFECYCLE / DEAD ACCOUNTS", "死亡账户", ""],
   onboarding: ["POOL / BATCH ONBOARDING", "批量上号", ""],
   daily: ["ANALYTICS / DAILY", "每日统计", ""],
@@ -127,6 +132,11 @@ const paginationTables = {
   prices: { body: "prices-body", size: 20, render: renderPriceTable },
   usage: { body: "usage-body", size: 20, render: renderBilling },
   audit: { body: "audit-body", size: 20, render: renderAudit },
+  cacheAudit: {
+    body: "cache-audit-body",
+    size: 20,
+    render: renderCacheAudit,
+  },
   errors: { body: "error-body", size: 20, render: renderErrors },
 };
 
@@ -211,6 +221,7 @@ function paginationParams(key) {
 async function loadServerPage(key) {
   if (key === "usage") return loadBilling();
   if (key === "audit") return loadAudit();
+  if (key === "cacheAudit") return loadCacheAudit();
   if (key === "authorization") return loadAuthorization();
   if (key === "errors") return loadErrors();
 }
@@ -326,7 +337,7 @@ function initializeResizableTable() {
 }
 function resetDialogViewport(dialog) {
   dialog.scrollTop = 0;
-  $$("form, .form-grid, .form-stack, .secret-body, .strategy-account-list", dialog).forEach((node) => {
+  $$("form, .form-grid, .form-stack, .secret-body, .strategy-account-list, .audit-detail-grid", dialog).forEach((node) => {
     node.scrollTop = 0;
   });
 }
@@ -708,10 +719,11 @@ async function loadAccounts() {
 }
 
 async function loadProxyInventory() {
-  [state.proxyPools, state.proxies] = await Promise.all([
-    api("/api/proxy-pools"),
-    api("/api/proxies"),
-  ]);
+	[state.proxyPools, state.proxies, state.archivedProxies] = await Promise.all([
+		api("/api/proxy-pools"),
+		api("/api/proxies"),
+		canView("proxies") ? api("/api/proxies/archived") : Promise.resolve([]),
+	]);
   if (canView("proxies")) renderProxies();
 }
 
@@ -841,8 +853,9 @@ async function loadAccountSummary() {
 async function loadAudit() {
   if (!canView("audit")) return;
   const params = new URLSearchParams(paginationParams("audit"));
-  if ($("#audit-actor").value) params.set("actor", $("#audit-actor").value);
+  if ($("#audit-search").value) params.set("search", $("#audit-search").value);
   if ($("#audit-action").value) params.set("action", $("#audit-action").value);
+  if ($("#audit-result").value) params.set("result", $("#audit-result").value);
   if ($("#audit-from").value) params.set("from", $("#audit-from").value);
   if ($("#audit-to").value) params.set("to", $("#audit-to").value);
   try {
@@ -853,6 +866,42 @@ async function loadAudit() {
   } catch (error) {
     toast(error.message, "error");
   }
+}
+
+async function loadCacheAudit() {
+  if (!canView("audit") || !isManager()) return;
+  const params = new URLSearchParams(paginationParams("cacheAudit"));
+  if ($("#cache-audit-search").value)
+    params.set("search", $("#cache-audit-search").value);
+  if ($("#cache-audit-segment").value)
+    params.set("segment", $("#cache-audit-segment").value);
+  if ($("#cache-audit-from").value)
+    params.set("from", $("#cache-audit-from").value);
+  if ($("#cache-audit-to").value)
+    params.set("to", $("#cache-audit-to").value);
+  try {
+    const data = await api(`/api/audit-logs/cache-prefixes?${params}`);
+    state.cacheAudits = data.items;
+    state.cacheAuditSummary = data.summary;
+    setServerPagination("cacheAudit", data);
+    renderCacheAudit();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function loadActiveAudit() {
+  return state.auditMode === "cache" ? loadCacheAudit() : loadAudit();
+}
+
+function setAuditMode(mode) {
+  state.auditMode = mode === "cache" && isManager() ? "cache" : "operations";
+  $$("#audit-mode-tabs button").forEach((node) =>
+    node.classList.toggle("active", node.dataset.auditMode === state.auditMode),
+  );
+  $$('[data-audit-pane]').forEach((node) => {
+    node.hidden = node.dataset.auditPane !== state.auditMode;
+  });
 }
 
 async function loadDaily() {
@@ -1263,7 +1312,7 @@ function strategyAccountRows(item, open) {
       return `<tr class="strategy-account-detail-row" ${open ? "" : "hidden"}>
         <td><span class="strategy-account-indent" aria-hidden="true"></span><strong class="strategy-account-name" title="${escapeHTML(account.name)}">${escapeHTML(account.name)}</strong></td>
         <td class="num" title="当前 RPM ${Number(account.rpm || 0).toLocaleString("zh-CN")}">${Number(account.rpm || 0).toLocaleString("zh-CN")}</td>
-        <td class="num" title="当前 TPM ${Number(account.tpm || 0).toLocaleString("zh-CN")}">${Number(account.tpm || 0).toLocaleString("zh-CN")}</td>
+        <td class="num" title="ITPM ${Number(account.itpm || 0).toLocaleString("zh-CN")}（上游限流口径）· 缓存读 ${Number(account.cache_read_tpm || 0).toLocaleString("zh-CN")}（不占限流）· 总吞吐 ${Number(account.tpm || 0).toLocaleString("zh-CN")}">${Number(account.itpm || 0).toLocaleString("zh-CN")}</td>
         <td><span class="pill ${dispatchClass}" title="${escapeHTML(account.status || dispatchLabel)}">${dispatchLabel}</span></td>
         <td><span class="strategy-account-groups" title="${escapeHTML(groups)}">${escapeHTML(groups)}</span></td>
       </tr>`;
@@ -1346,6 +1395,7 @@ function openStrategy(item = null) {
   $("#strategy-description").value = item?.description || "";
   $("#strategy-rpm").value = item?.rpm_limit ?? 0;
   $("#strategy-tpm").value = item?.tpm_limit ?? 0;
+  $("#strategy-itpm").value = item?.itpm_limit ?? 0;
   $("#strategy-concurrency").value = item?.concurrency_limit ?? 0;
   $("#strategy-rpm-mode").value = item?.rpm_strategy || "fixed";
   $("#strategy-buffer").value = item?.rpm_sticky_buffer ?? 0;
@@ -1435,7 +1485,7 @@ function renderDashboard() {
         item.speed_passthrough_enabled,
         item.anthropic_beta_passthrough_enabled,
       ].filter(Boolean).length;
-      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 降权</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_cooling_threshold || 3)} 次冷却` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -1482,10 +1532,28 @@ function accountStatus(account) {
     }
     if (account.rate_limit_reason === "429_cooling")
       reasons.push(
-        `连续 429 冷却${account.rate_limit_reset_at ? `至 ${dateTime(account.rate_limit_reset_at)}` : ""}`,
+        `瞬时 429 短冷却${account.rate_limit_reset_at ? `至 ${dateTime(account.rate_limit_reset_at)}` : ""}`,
       );
-    const label = limitWindowLabels[account.limit_window];
-    if (label) reasons.push(`${label}，等待配额窗口刷新`);
+		const label = limitWindowLabels[account.limit_window];
+		if (label) {
+			const quotaReset = Date.parse(
+				account.limit_window === "5h"
+					? account.quota_5h_reset_at
+					: account.quota_7d_reset_at,
+			);
+			const eligibleAt = Date.parse(account.rate_limit_reset_at);
+			if (
+				account.limit_window === "5h" &&
+				Number.isFinite(quotaReset) &&
+				quotaReset <= Date.now() &&
+				Number.isFinite(eligibleAt) &&
+				eligibleAt > Date.now()
+			) {
+				reasons.push(`5h 额度已刷新，错峰等待至 ${dateTime(account.rate_limit_reset_at)}`);
+			} else {
+				reasons.push(`${label}，预计 ${dateTime(account.rate_limit_reset_at)} 恢复`);
+			}
+		}
     const detail = reasons.join(" · ") || account.error_message || "当前不满足调度条件";
     if (account.status !== "active") return ["已停用", "off", detail];
     if (!account.schedulable) return ["已暂停", "off", detail];
@@ -1496,7 +1564,7 @@ function accountStatus(account) {
     if (account.expires_at && Date.parse(account.expires_at) <= Date.now())
       return ["已过期", "off", detail];
     if (account.rate_limit_reason === "429_cooling")
-      return ["429 冷却", "warn", detail];
+      return ["429 短冷却", "warn", detail];
     return label
       ? [label, "warn", detail]
       : ["暂不可调度", "off", detail];
@@ -1507,9 +1575,9 @@ function accountStatus(account) {
       ? `，等待配额窗口于 ${dateTime(account.rate_limit_downweight_until)} 刷新`
       : "";
     return [
-      `429 降权 ${strikes}/3`,
+      `429 降峰 ${strikes} 次`,
       "warn",
-      `账号仍可调度，但因本配额窗口内已触发 ${strikes} 次 429 而降低选号优先级${until}；成功请求不会解除，可手动恢复`,
+      `账号仍可调度，但因本配额窗口内已触发 ${strikes} 次 429，选号优先级和峰值 RPM 均已降低${until}；成功请求不会解除，可手动恢复`,
     ];
   }
   if (
@@ -1641,25 +1709,24 @@ function renderRealtime() {
   if (!data) return;
   $("#realtime-rpm").textContent = Number(data.rpm || 0).toLocaleString("zh-CN");
   $("#realtime-tpm").textContent = compact(data.tpm);
-  $("#realtime-inflight").textContent = Number(
-    data.inflight || 0,
-  ).toLocaleString("zh-CN");
-  $("#realtime-active-accounts").textContent = `${data.active_accounts} / ${data.eligible_accounts}`;
+  $("#realtime-itpm").textContent = compact(data.itpm);
+  $("#realtime-cache-read-tpm").textContent = compact(data.cache_read_tpm);
+  $("#realtime-otpm").textContent = compact(data.otpm);
+  const inflight = Number(data.inflight || 0);
+  const concurrency = Number(data.concurrency_capacity || 0);
+  const concurrencyText = `${inflight.toLocaleString("zh-CN")} / ${concurrency.toLocaleString("zh-CN")}`;
+  $("#realtime-concurrency").textContent = concurrencyText;
+  $("#realtime-concurrency-item").title = `当前 ${inflight.toLocaleString("zh-CN")} 个在途请求，可调度账号并发容量 ${concurrency.toLocaleString("zh-CN")}`;
+  const waiting = Number(data.waiting_requests || 0);
+  $("#realtime-waiting").textContent = waiting.toLocaleString("zh-CN");
+  $("#realtime-queue-item").title = waiting
+    ? `${waiting.toLocaleString("zh-CN")} 个请求正在等待账号并发或 RPM 容量释放`
+    : "当前没有请求等待账号容量";
   const capacity = data.unlimited_capacity
     ? "含不限速账号"
     : `容量 ${Number(data.rpm_capacity || 0).toLocaleString("zh-CN")} RPM`;
   $("#realtime-rpm-capacity").textContent = capacity;
   $("#realtime-rpm-capacity").title = capacity;
-  const activeNames = (data.accounts || [])
-    .filter((item) => item.active)
-    .map((item) => item.name)
-    .join("、");
-  const activeText = activeNames || "暂无负载";
-  $("#realtime-active-names").textContent = activeText;
-  $("#realtime-active-names").title = activeText;
-  $("#realtime-active-item").title = activeNames
-    ? `当前激活：${activeNames}`
-    : "最近 60 秒没有账号承担请求";
   const updated = new Date(data.updated_at);
   const updatedText = Number.isNaN(updated.getTime())
     ? "刚刚更新"
@@ -2167,7 +2234,26 @@ function dispatchDiagnosticsText(value) {
 }
 
 function renderProxies() {
-  $("#nav-proxy-count").textContent = state.proxies.length;
+	const archivedView = state.proxyInventory === "archived";
+	$("#nav-proxy-count").textContent = state.proxies.length;
+	$("#archived-proxy-count").textContent = state.archivedProxies.length;
+	$$('[data-proxy-inventory]').forEach((button) => {
+		button.classList.toggle("active", button.dataset.proxyInventory === state.proxyInventory);
+	});
+	$("#test-proxies-batch").hidden = archivedView;
+	$("#import-proxies").hidden = archivedView;
+	$("#delete-proxies-batch").hidden = archivedView;
+	$("#proxy-select-header").hidden = archivedView;
+	$("#proxy-owner-header").textContent = archivedView ? "历史账号" : "当前占用";
+	$("#proxy-history-header").textContent = archivedView ? "账号数" : "历史账号";
+	$("#proxy-status-header").textContent = archivedView ? "归档状态" : "状态";
+	$("#proxy-time-header").textContent = archivedView ? "归档时间" : "最近检测";
+	$("#view-proxies .proxy-table-panel h2").textContent = archivedView
+		? "IP 归档"
+		: "代理清单";
+	$("#proxy-search").placeholder = archivedView
+		? "搜索归档代理、出口 IP 或历史账号"
+		: "搜索代理、出口 IP 或占用账号";
   $("#proxy-pool-list").innerHTML = state.proxyPools
     .map(
       (pool) =>
@@ -2180,9 +2266,24 @@ function renderProxies() {
     [...state.selectedProxyIDs].filter((id) => visibleIDs.has(id)),
   );
   $("#proxies-empty").hidden = selected.length > 0;
-  $("#proxies-body").innerHTML = paginatedItems("proxies", selected)
-    .map((item) => {
-      const retired = Boolean(
+	$("#proxies-body").innerHTML = paginatedItems("proxies", selected)
+		.map((item) => {
+			if (archivedView) {
+				const history = item.historical_accounts || "无历史账号";
+				return `<tr>
+					<td class="select-column admin-only-column" hidden></td>
+					<td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle mono" title="${escapeHTML(item.host)}:${item.port}">${escapeHTML(item.host)}:${item.port}</span></td>
+					<td><span class="pill">${item.protocol.toUpperCase()}</span></td>
+					<td class="mono" title="${escapeHTML(item.exit_ip || "未检测")}">${escapeHTML(item.exit_ip || "未检测")}</td>
+					<td class="num mono">${item.latency_ms == null ? "—" : `${item.latency_ms} ms`}</td>
+					<td title="${escapeHTML(history)}">${escapeHTML(history)}</td>
+					<td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
+					<td><span class="pill off" title="已从正常代理池归档，不再参与分配">已归档</span></td>
+					<td class="mono" title="${escapeHTML(dateTime(item.archived_at))}">${dateTime(item.archived_at)}</td>
+					<td class="actions"><span class="muted">留存</span></td>
+				</tr>`;
+			}
+			const retired = Boolean(
         item.single_use_enabled &&
           !item.assigned_to &&
           Number(item.used_account_count || 0) > 0,
@@ -2211,20 +2312,28 @@ function renderProxies() {
           <td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
           <td><span class="pill ${statusClass}" title="${retired ? "一次性 IP 已有绑定历史，不能再次分配" : statusText}">${statusText}</span></td>
           <td class="mono" title="${escapeHTML(dateTime(item.last_test_at))}">${dateTime(item.last_test_at)}</td>
-          <td class="actions">${isAdmin() ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="删除代理"><i data-lucide="trash-2"></i></button></span>` : '<span class="muted">只读</span>'}</td>
-        </tr>`;
+				  <td class="actions">${isAdmin() ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="归档代理"><i data-lucide="archive"></i></button></span>` : '<span class="muted">只读</span>'}</td>
+				</tr>`;
     })
     .join("");
   const options = `<option value="">全部代理池</option>${state.proxyPools.map((pool) => `<option value="${pool.id}">${escapeHTML(pool.name)}</option>`).join("")}`;
   $("#proxy-pool-filter").innerHTML = options;
-  $("#proxy-pool-filter").value = state.proxyPoolFilter;
-  syncProxySelection(selected);
+	$("#proxy-pool-filter").value = state.proxyPoolFilter;
+	$("#proxies-empty strong").textContent = archivedView
+		? "暂无归档 IP"
+		: "当前代理池为空";
+	$("#proxies-empty span").textContent = archivedView
+		? "释放的代理会保留在这里。"
+		: "批量导入或配置代理 API。";
+	syncProxySelection(selected);
   refreshIcons();
 }
 
 function filteredProxies() {
-  const search = state.proxySearch.trim().toLowerCase();
-  return state.proxies.filter((item) => {
+	const search = state.proxySearch.trim().toLowerCase();
+	const inventory =
+		state.proxyInventory === "archived" ? state.archivedProxies : state.proxies;
+	return inventory.filter((item) => {
     if (
       state.proxyPoolFilter &&
       String(item.pool_id) !== String(state.proxyPoolFilter)
@@ -2238,9 +2347,11 @@ function filteredProxies() {
       item.protocol,
       item.host,
       item.port,
-      item.exit_ip,
-      item.assigned_to,
-      item.status,
+		item.exit_ip,
+		item.assigned_to,
+		item.historical_accounts,
+		item.status,
+		item.archived_at,
     ]
       .filter((value) => value !== null && value !== undefined)
       .join(" ")
@@ -2250,7 +2361,7 @@ function filteredProxies() {
 }
 
 function syncProxySelection(scope = filteredProxies()) {
-  const selectable = isAdmin() ? scope : [];
+	const selectable = isAdmin() && state.proxyInventory === "active" ? scope : [];
   const selected = selectable.filter((item) => state.selectedProxyIDs.has(item.id));
   const selectAll = $("#select-all-proxies");
   selectAll.disabled = !isAdmin() || selectable.length === 0;
@@ -2330,9 +2441,101 @@ function renderAudit() {
   $("#audit-body").innerHTML = paginatedItems("audit", state.audits)
     .map(
       (item) =>
-        `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title">${escapeHTML(item.actor_username || "系统")}</span><span class="row-subtitle">${roleName(item.actor_role)}</span></td><td><span class="row-title">${escapeHTML(names[item.action] || item.action)}</span><span class="row-subtitle mono">${escapeHTML(item.method)} ${escapeHTML(item.path)}</span></td><td><span class="pill">${escapeHTML(item.target_type)}</span> <span class="mono">${escapeHTML(item.target_id || "—")}</span></td><td><span class="pill ${item.status_code < 400 ? "ok" : "error"}">HTTP ${item.status_code}</span></td><td class="mono">${escapeHTML(item.client_ip || "—")}</td><td class="num mono">${item.duration_ms} ms</td></tr>`,
+        `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title truncate-cell" title="${escapeHTML(item.actor_username || "系统")}">${escapeHTML(item.actor_username || "系统")}</span><span class="row-subtitle">${roleName(item.actor_role)}</span></td><td><span class="row-title truncate-cell" title="${escapeHTML(names[item.action] || item.action)}">${escapeHTML(names[item.action] || item.action)}</span><span class="row-subtitle mono truncate-cell" title="${escapeHTML(`${item.method} ${item.path}`)}">${escapeHTML(item.method)} ${escapeHTML(item.path)}</span></td><td><span class="pill">${escapeHTML(item.target_type)}</span> <span class="mono">${escapeHTML(item.target_id || "—")}</span></td><td><span class="pill ${item.status_code < 400 ? "ok" : "error"}">HTTP ${item.status_code}</span></td><td class="mono truncate-cell" title="${escapeHTML(item.client_ip || "—")}">${escapeHTML(item.client_ip || "—")}</td><td class="num mono">${item.duration_ms} ms</td><td class="actions"><span class="row-actions"><button type="button" data-audit-detail="operation" data-audit-id="${item.id}" title="查看完整记录" aria-label="查看完整记录"><i data-lucide="panel-right-open"></i></button></span></td></tr>`,
     )
     .join("");
+  refreshIcons();
+}
+
+function renderCacheAudit() {
+  const summary = state.cacheAuditSummary || {};
+  const total = state.serverPagination.cacheAudit?.total ?? state.cacheAudits.length;
+  $("#cache-audit-count").textContent = `${total} 条记录`;
+  $("#cache-audit-empty").hidden = state.cacheAudits.length > 0;
+  for (const [id, value] of [
+    ["cache-audit-sessions", summary.sessions],
+    ["cache-audit-initial", summary.initial],
+    ["cache-audit-tools", summary.tools_changed],
+    ["cache-audit-system", summary.system_changed],
+  ]) {
+    $(`#${id}`).textContent = compact(Number(value || 0));
+  }
+  const segmentLabels = {
+    initial: ["初始建立", "ok"],
+    tools: ["工具变更", "warn"],
+    system: ["System 变更", "warn"],
+    "tools+system": ["工具 + System", "error"],
+    unknown: ["未知变更", "off"],
+  };
+  $("#cache-audit-body").innerHTML = paginatedItems(
+    "cacheAudit",
+    state.cacheAudits,
+  )
+    .map((item) => {
+      const [segment, tone] = segmentLabels[item.changed_segment] || [
+        item.changed_segment,
+        "off",
+      ];
+      const account = item.account_name ||
+        (item.account_id ? `账号 #${item.account_id}` : "未关联账号");
+      const previous = item.previous_prefix_hash
+        ? `${item.previous_prefix_hash.slice(0, 8)} → `
+        : "";
+      const fingerprint = `${previous}${item.prefix_hash.slice(0, 8)}`;
+      return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title truncate-cell" title="${escapeHTML(account)}">${escapeHTML(account)}</span><span class="row-subtitle mono">${item.account_id ? `#${item.account_id}` : "—"}</span></td><td><span class="row-title mono truncate-cell" title="${escapeHTML(item.model)}">${escapeHTML(item.model || "—")}</span></td><td><span class="row-title mono truncate-cell" title="${escapeHTML(item.session_hash)}">${escapeHTML(item.session_hash)}</span></td><td><span class="pill ${tone}">${escapeHTML(segment)}</span></td><td><span class="audit-hash-flow mono" title="${escapeHTML(`${item.previous_prefix_hash || "初始"} → ${item.prefix_hash}`)}">${escapeHTML(fingerprint)}</span></td><td class="actions"><span class="row-actions"><button type="button" data-audit-detail="cache" data-audit-id="${item.id}" title="查看指纹详情" aria-label="查看指纹详情"><i data-lucide="fingerprint"></i></button></span></td></tr>`;
+    })
+    .join("");
+  refreshIcons();
+}
+
+function auditDetailField(label, value, options = {}) {
+  const text = String(value ?? "—");
+  const tag = options.block ? "pre" : "code";
+  return `<div class="audit-detail-field ${options.wide ? "wide" : ""}"><span>${escapeHTML(label)}</span><div class="audit-detail-value-row"><${tag} class="audit-detail-value ${options.mono === false ? "plain" : ""}">${escapeHTML(text)}</${tag}>${options.copy ? '<button type="button" class="icon-button" data-copy-audit-field title="复制" aria-label="复制字段"><i data-lucide="copy"></i></button>' : ""}</div></div>`;
+}
+
+function openAuditDetail(kind, id) {
+  const item =
+    kind === "cache"
+      ? state.cacheAudits.find((value) => value.id === id)
+      : state.audits.find((value) => value.id === id);
+  if (!item) return;
+  $("#audit-detail-kicker").textContent =
+    kind === "cache" ? "CACHE PREFIX / TRACE" : "SECURITY / AUDIT EVENT";
+  $("#audit-detail-title").textContent =
+    kind === "cache" ? `缓存指纹 #${item.id}` : `操作记录 #${item.id}`;
+  if (kind === "cache") {
+    $("#audit-detail-content").innerHTML = [
+      auditDetailField("时间", dateTime(item.created_at), { mono: false }),
+      auditDetailField("账号", item.account_name || (item.account_id ? `#${item.account_id}` : "未关联"), { mono: false }),
+      auditDetailField("模型", item.model, { copy: true }),
+      auditDetailField("变更区段", item.changed_segment, { mono: false }),
+      auditDetailField("会话指纹", item.session_hash, { wide: true, copy: true }),
+      auditDetailField("当前前缀", item.prefix_hash, { wide: true, copy: true }),
+      auditDetailField("上一前缀", item.previous_prefix_hash || "初始记录", { wide: true, copy: Boolean(item.previous_prefix_hash) }),
+      auditDetailField("工具指纹", item.tools_hash, { wide: true, copy: true }),
+      auditDetailField("System 指纹", item.system_hash, { wide: true, copy: true }),
+    ].join("");
+  } else {
+    let body = item.request_body || "{}";
+    try {
+      body = JSON.stringify(JSON.parse(body), null, 2);
+    } catch {
+      // Keep the redacted raw body when an old row is not valid JSON.
+    }
+    $("#audit-detail-content").innerHTML = [
+      auditDetailField("时间", dateTime(item.created_at), { mono: false }),
+      auditDetailField("操作用户", `${item.actor_username || "系统"} · ${roleName(item.actor_role)}`, { mono: false }),
+      auditDetailField("结果", `HTTP ${item.status_code} · ${item.duration_ms} ms`),
+      auditDetailField("客户端 IP", item.client_ip || "—", { copy: true }),
+      auditDetailField("请求", `${item.method} ${item.path}`, { wide: true, copy: true }),
+      auditDetailField("目标", `${item.target_type || "—"} ${item.target_id || ""}`.trim(), { wide: true }),
+      auditDetailField("User-Agent", item.user_agent || "—", { wide: true, copy: true }),
+      auditDetailField("脱敏请求体", body, { wide: true, block: true, copy: true }),
+    ].join("");
+  }
+  showInitializedDialog("#audit-detail-dialog");
+  refreshIcons();
 }
 function renderBilling() {
   const data = state.billing;
@@ -2517,6 +2720,8 @@ function populateSelects() {
 
 function setView(view) {
   state.view = view;
+  $("#cache-audit-mode").hidden = !isManager();
+  if (view === "audit") setAuditMode(state.auditMode);
   $$(".view").forEach((node) =>
     node.classList.toggle("active", node.id === `view-${view}`),
   );
@@ -2532,7 +2737,7 @@ function setView(view) {
     (isAdmin() || (state.me?.role === "user" && view === "access"));
   $("#primary-action").hidden = !canAct;
   if (view === "billing") loadBilling();
-  if (view === "audit") loadAudit();
+  if (view === "audit") loadActiveAudit();
   if (view === "accounts") {
     loadAccountSummary();
     loadRealtime();
@@ -2801,9 +3006,9 @@ async function switchPurposeGroup(purposeID, groupID) {
   await loadCore();
 }
 function syncGroupRateLimitDownweightFields() {
-  $("#group-rate-limit-cooling-threshold").disabled = !$(
-    "#group-rate-limit-downweight-enabled",
-  ).checked;
+  const disabled = !$("#group-rate-limit-downweight-enabled").checked;
+  $("#group-rate-limit-wait-seconds").disabled = disabled;
+  $("#group-rate-limit-cooling-threshold").disabled = disabled;
 }
 
 // The rows are driven by the strategies the group's accounts actually resolve,
@@ -2915,6 +3120,9 @@ function openGroup(item = null) {
     item?.rate_limit_downweight_enabled ?? true;
   $("#group-rate-limit-cooling-threshold").value = Number(
     item?.rate_limit_cooling_threshold || 3,
+  );
+  $("#group-rate-limit-wait-seconds").value = Number(
+    item?.rate_limit_wait_seconds || 120,
   );
   syncGroupRateLimitDownweightFields();
   $("#group-strategy-required").checked = Boolean(item?.strategy_required_enabled);
@@ -3313,7 +3521,11 @@ document.addEventListener("click", async (event) => {
       const impact = item.assigned_to
         ? `\n\n当前由 ${item.assigned_to} 使用。自动匹配账号会尝试切换到同池其他 IP；无法切换或手动绑定的账号将暂停调度。`
         : "";
-      if (confirm(`确认删除代理“${item.name}”？${impact}`)) {
+      if (
+        confirm(
+          `确认归档代理“${item.name}”？${impact}\n\n归档后仍可在 IP 归档页面查看记录，但不会再参与分配。`,
+        )
+      ) {
         const result = await api(`/api/proxies/${item.id}`, {
           method: "DELETE",
         });
@@ -3322,7 +3534,7 @@ document.addEventListener("click", async (event) => {
           details.push(`${result.reassigned_accounts} 个账号已切换 IP`);
         if (result.paused_accounts)
           details.push(`${result.paused_accounts} 个账号已暂停`);
-        toast(details.length ? `代理已删除，${details.join("，")}` : "代理已删除");
+        toast(details.length ? `代理已归档，${details.join("，")}` : "代理已归档");
         await loadCore();
       }
       return;
@@ -3342,7 +3554,7 @@ document.addEventListener("click", async (event) => {
       const confirmed = await confirmAction(
         `删除代理池“${item.name}”`,
         item.proxy_count
-          ? `池内 ${item.proxy_count} 个代理会一并删除，删除后无法恢复。`
+          ? `池内 ${item.proxy_count} 个代理会一并归档并保留在 IP 归档页面，代理池本身删除后无法恢复。`
           : "该代理池当前没有代理，删除后无法恢复。",
         "确认删除",
       );
@@ -3354,8 +3566,8 @@ document.addEventListener("click", async (event) => {
         state.proxyPoolFilter = "";
       resetPagination("proxies");
       toast(
-        result?.deleted_proxies
-          ? `代理池已删除，同时清理 ${result.deleted_proxies} 个代理`
+        result?.archived_proxies
+          ? `代理池已删除，同时归档 ${result.archived_proxies} 个代理`
           : "代理池已删除",
       );
       await loadCore();
@@ -3669,9 +3881,9 @@ $("#delete-proxies-batch").addEventListener("click", async (event) => {
   const preview = names.slice(0, 3).join("、");
   const suffix = names.length > 3 ? ` 等 ${ids.length} 个代理` : "";
   const confirmed = await confirmAction(
-    `删除 ${ids.length} 个代理`,
-    `将删除 ${preview}${suffix}。已占用代理会触发自动账号换 IP，无法换 IP 的账号会暂停调度。`,
-    `确认删除 ${ids.length} 个`,
+    `归档 ${ids.length} 个代理`,
+    `将归档 ${preview}${suffix}。记录会保留在 IP 归档页面；已占用代理会触发自动账号换 IP，无法换 IP 的账号会暂停调度。`,
+    `确认归档 ${ids.length} 个`,
   );
   if (!confirmed) return;
   try {
@@ -3683,7 +3895,7 @@ $("#delete-proxies-batch").addEventListener("click", async (event) => {
     state.selectedProxyIDs.clear();
     resetPagination("proxies");
     toast(
-      `已删除 ${result.deleted} 个代理，换 IP ${result.reassigned_accounts} 个，暂停 ${result.paused_accounts} 个账号`,
+      `已归档 ${result.archived ?? result.deleted} 个代理，换 IP ${result.reassigned_accounts} 个，暂停 ${result.paused_accounts} 个账号`,
       result.paused_accounts ? "error" : "success",
     );
     await loadCore();
@@ -3705,6 +3917,16 @@ $("#apply-audit-filters").addEventListener("click", () => {
   resetPagination("audit");
   loadAudit();
 });
+$("#apply-cache-audit-filters").addEventListener("click", () => {
+  resetPagination("cacheAudit");
+  loadCacheAudit();
+});
+$("#audit-mode-tabs").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-audit-mode]");
+  if (!button || button.disabled) return;
+  setAuditMode(button.dataset.auditMode);
+  loadActiveAudit();
+});
 $("#apply-authorization-filters").addEventListener(
   "click",
   () => {
@@ -3715,6 +3937,8 @@ $("#apply-authorization-filters").addEventListener(
 for (const [selector, key, loader] of [
   ["#billing-search", "usage", loadBilling],
   ["#authorization-search", "authorization", loadAuthorization],
+  ["#audit-search", "audit", loadAudit],
+  ["#cache-audit-search", "cacheAudit", loadCacheAudit],
 ]) {
   $(selector).addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -3723,6 +3947,27 @@ for (const [selector, key, loader] of [
     loader();
   });
 }
+document.addEventListener("click", async (event) => {
+  const detailButton = event.target.closest("button[data-audit-detail]");
+  if (detailButton) {
+    openAuditDetail(
+      detailButton.dataset.auditDetail,
+      Number(detailButton.dataset.auditId),
+    );
+    return;
+  }
+  const copyButton = event.target.closest("button[data-copy-audit-field]");
+  if (!copyButton) return;
+  const value = copyButton
+    .closest(".audit-detail-value-row")
+    ?.querySelector(".audit-detail-value")?.textContent;
+  try {
+    await copyToClipboard(value);
+    toast("字段已复制");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
 $("#deauth-window").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-window]");
   if (!button) return;
@@ -3848,6 +4093,14 @@ $("#account-from").addEventListener("change", loadAccountSummary);
 $("#account-to").addEventListener("change", loadAccountSummary);
 $("#proxy-pool-filter").addEventListener("change", (event) => {
   state.proxyPoolFilter = event.target.value;
+  state.selectedProxyIDs.clear();
+  resetPagination("proxies");
+  renderProxies();
+});
+$("#proxy-inventory-tabs").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-proxy-inventory]");
+  if (!button) return;
+  state.proxyInventory = button.dataset.proxyInventory;
   state.selectedProxyIDs.clear();
   resetPagination("proxies");
   renderProxies();
@@ -4251,6 +4504,9 @@ $("#group-form").addEventListener("submit", async (event) => {
         rate_limit_cooling_threshold: Number(
           $("#group-rate-limit-cooling-threshold").value,
         ),
+        rate_limit_wait_seconds: Number(
+          $("#group-rate-limit-wait-seconds").value,
+        ),
         strategy_required_enabled: $("#group-strategy-required").checked,
         capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,
         capacity_queue_timeout_seconds: Number(
@@ -4283,6 +4539,7 @@ $("#strategy-form").addEventListener("submit", async (event) => {
         description: $("#strategy-description").value,
         rpm_limit: Number($("#strategy-rpm").value),
         tpm_limit: Number($("#strategy-tpm").value),
+        itpm_limit: Number($("#strategy-itpm").value),
         concurrency_limit: Number($("#strategy-concurrency").value),
         rpm_strategy: $("#strategy-rpm-mode").value,
         rpm_sticky_buffer: Number($("#strategy-buffer").value),
@@ -4560,6 +4817,8 @@ function initializeDates() {
   $("#account-to").value = to;
   $("#audit-from").value = from;
   $("#audit-to").value = to;
+  $("#cache-audit-from").value = local(errorStart);
+  $("#cache-audit-to").value = to;
   $("#authorization-from").value = from;
   $("#authorization-to").value = to;
   $("#error-from").value = local(errorStart);

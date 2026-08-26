@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -46,6 +47,11 @@ func TestAccountArchiveQuarantinesProxyAndPreservesHistory(t *testing.T) {
 	}
 	if !archivedAt.Valid || currentProxy.Valid || !archivedProxy.Valid || archivedProxy.Int64 != proxyID || status != "disabled" || schedulable != 0 {
 		t.Fatalf("archived state = archived:%v current:%v previous:%v status:%s schedulable:%d", archivedAt, currentProxy, archivedProxy, status, schedulable)
+	}
+	var archivedProxies []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies/archived", nil, http.StatusOK, &archivedProxies)
+	if len(archivedProxies) != 1 || archivedProxies[0].ID != proxyID || archivedProxies[0].ArchivedAt == "" || !strings.Contains(archivedProxies[0].HistoricalAccounts, created.Name) {
+		t.Fatalf("released proxy archive = %+v", archivedProxies)
 	}
 
 	var current []account

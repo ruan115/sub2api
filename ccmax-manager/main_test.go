@@ -198,7 +198,7 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	var current []group
 	putJSON(t, handler, http.MethodGet, "/api/groups", nil, http.StatusOK, &current)
 	for _, item := range current {
-		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold {
+		if !item.RateLimitDownweightEnabled || item.RateLimitCoolingThreshold != defaultRateLimitCoolingThreshold || item.RateLimitWaitSeconds != defaultRateLimitCooldownSeconds {
 			t.Fatalf("group %s did not default to the previous always-on behaviour: %+v", item.ID, item)
 		}
 	}
@@ -207,8 +207,9 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "429 降权", "rate_multiplier": 1, "status": "active",
 		"rate_limit_downweight_enabled": false, "rate_limit_cooling_threshold": 7,
+		"rate_limit_wait_seconds": 90,
 	}, http.StatusOK, &updated)
-	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 {
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 {
 		t.Fatalf("group 429 downweight settings were not persisted: %+v", updated)
 	}
 
@@ -216,7 +217,7 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
 	}, http.StatusOK, &updated)
-	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 {
+	if updated.RateLimitDownweightEnabled || updated.RateLimitCoolingThreshold != 7 || updated.RateLimitWaitSeconds != 90 {
 		t.Fatalf("legacy update reset group 429 downweight settings: %+v", updated)
 	}
 
@@ -228,6 +229,12 @@ func TestGroupRateLimitDownweightSettingsPersistAndSurviveLegacyUpdate(t *testin
 		"name": "A 分组", "description": "无效阈值", "rate_multiplier": 1, "status": "active",
 		"rate_limit_cooling_threshold": 99,
 	}, http.StatusBadRequest, nil)
+	for _, seconds := range []int{59, 121} {
+		putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+			"name": "A 分组", "description": "无效冷却", "rate_multiplier": 1, "status": "active",
+			"rate_limit_wait_seconds": seconds,
+		}, http.StatusBadRequest, nil)
+	}
 }
 
 func TestGroupRejectAnthropicDowngradePersistsAndSurvivesLegacyUpdate(t *testing.T) {
@@ -812,6 +819,11 @@ func TestProxyDeletePausesManualAccount(t *testing.T) {
 	if updated.Schedulable || updated.ProxyID != nil || !strings.Contains(updated.ErrorMessage, "独享 IP") {
 		t.Fatalf("manual account was not safely paused: %+v", updated)
 	}
+	var archived []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies/archived", nil, http.StatusOK, &archived)
+	if len(archived) != 1 || !strings.Contains(archived[0].HistoricalAccounts, created.Name) || archived[0].ArchivedAt == "" {
+		t.Fatalf("archived proxy did not retain account history: %+v", archived)
+	}
 }
 
 func TestProxyBatchDeleteRemovesSelectedProxies(t *testing.T) {
@@ -833,13 +845,23 @@ func TestProxyBatchDeleteRemovesSelectedProxies(t *testing.T) {
 	ids := []int64{proxies[0].ID, proxies[1].ID}
 	var result proxyBatchDeleteResponse
 	putJSON(t, handler, http.MethodPost, "/api/proxies/batch-delete", map[string]any{"ids": ids}, http.StatusOK, &result)
-	if result.Matched != 2 || result.Deleted != 2 || result.ReassignedAccounts != 0 || result.PausedAccounts != 0 {
+	if result.Matched != 2 || result.Deleted != 2 || result.Archived != 2 || result.ReassignedAccounts != 0 || result.PausedAccounts != 0 {
 		t.Fatalf("batch delete result = %+v", result)
 	}
 	proxies = nil
 	putJSON(t, handler, http.MethodGet, "/api/proxies", nil, http.StatusOK, &proxies)
 	if len(proxies) != 0 {
 		t.Fatalf("remaining proxies = %+v", proxies)
+	}
+	var archived []proxyRecord
+	putJSON(t, handler, http.MethodGet, "/api/proxies/archived", nil, http.StatusOK, &archived)
+	if len(archived) != 2 {
+		t.Fatalf("archived proxies = %+v, want 2 records", archived)
+	}
+	for _, item := range archived {
+		if item.ArchivedAt == "" || item.Status != "disabled" {
+			t.Fatalf("archive record is incomplete: %+v", item)
+		}
 	}
 }
 
@@ -1431,6 +1453,53 @@ func TestAuditLogsUseServerSidePagination(t *testing.T) {
 	requestJSON(t, handler, http.MethodGet, "/api/audit-logs?action=test.event&page=2&page_size=10", nil, cookie, "", http.StatusOK, &page)
 	if page.Total != 25 || page.Page != 2 || page.PageSize != 10 || page.TotalPages != 3 || len(page.Items) != 10 {
 		t.Fatalf("audit page=%+v", page)
+	}
+}
+
+func TestCachePrefixAuditLogsSupportSearchSummaryAndPagination(t *testing.T) {
+	t.Setenv("CCMAX_ADMIN_PASSWORD", "admin-password")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	cookie := loginCookie(t, handler, "admin", "admin-password")
+	result, err := a.db.Exec(`INSERT INTO accounts (name) VALUES ('audit-account@example.com')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	for _, event := range []struct {
+		session string
+		segment string
+		model   string
+	}{
+		{session: "session-alpha", segment: "tools", model: "claude-fable-5"},
+		{session: "session-alpha", segment: "system", model: "claude-fable-5"},
+		{session: "session-beta", segment: "initial", model: "claude-opus-4-8"},
+	} {
+		if _, err := a.db.Exec(`INSERT INTO cache_prefix_events
+			(session_hash, account_id, model, prefix_hash, tools_hash, system_hash, changed_segment, previous_prefix_hash)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, event.session, accountID, event.model, "prefix-"+event.segment, "tools", "system", event.segment, "previous"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var page struct {
+		Items   []cachePrefixAuditLog   `json:"items"`
+		Summary cachePrefixAuditSummary `json:"summary"`
+		Total   int64                   `json:"total"`
+		Page    int                     `json:"page"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/audit-logs/cache-prefixes?search=alpha&segment=tools&page=1&page_size=1", nil, cookie, "", http.StatusOK, &page)
+	if page.Total != 1 || page.Page != 1 || len(page.Items) != 1 || page.Items[0].ChangedSegment != "tools" {
+		t.Fatalf("cache audit page=%+v", page)
+	}
+	if page.Summary.Sessions != 1 || page.Summary.ToolsChanged != 1 || page.Summary.SystemChanged != 0 || page.Summary.Accounts != 1 {
+		t.Fatalf("cache audit summary=%+v", page.Summary)
+	}
+	if page.Items[0].AccountName != "audit-account@example.com" || page.Items[0].AccountID == nil || *page.Items[0].AccountID != accountID {
+		t.Fatalf("cache audit account=%+v", page.Items[0])
 	}
 }
 

@@ -298,7 +298,7 @@
             <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
             <button data-account-status="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
             <button data-account-status="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
-            <button data-account-status="cooling_429" title="连续 429 触发的自动冷却，等待下一个 5h 窗口刷新">429 冷却 <b id="status-cooling-429-count">0</b></button>
+            <button data-account-status="cooling_429" title="普通瞬时 429 触发 60～120 秒短冷却">429 冷却 <b id="status-cooling-429-count">0</b></button>
             <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
           </div>
           <section class="panel table-panel accounts-panel">
@@ -380,14 +380,23 @@
               <div class="realtime-load-item" title="最近 60 秒上游请求数">
                 <span>RPM</span><strong id="realtime-rpm">0</strong><small id="realtime-rpm-capacity">60 秒滚动</small>
               </div>
-              <div class="realtime-load-item" title="最近 60 秒输入、输出及缓存 Token 总量">
-                <span>TPM</span><strong id="realtime-tpm">0</strong><small>60 秒滚动</small>
+              <div class="realtime-load-item" title="上游真实限流口径：未缓存输入（input + cache_creation），缓存读不计入">
+                <span>ITPM</span><strong id="realtime-itpm">0</strong><small>60 秒滚动 · 上游限流口径</small>
               </div>
-              <div class="realtime-load-item" title="当前仍在处理的上游请求">
-                <span>在途请求</span><strong id="realtime-inflight">0</strong><small>当前并发</small>
+              <div class="realtime-load-item" title="最近 60 秒缓存读取量。不计入上游 ITPM 限流，命中越多越省额度">
+                <span>缓存读</span><strong id="realtime-cache-read-tpm">0</strong><small>60 秒滚动 · 不占限流</small>
               </div>
-              <div class="realtime-load-item" id="realtime-active-item" title="最近 60 秒实际承担请求的账号；该数量随滚动窗口变化">
-                <span>负载账号</span><strong id="realtime-active-accounts">0 / 0</strong><small id="realtime-active-names">暂无负载</small>
+              <div class="realtime-load-item" title="最近 60 秒输出 Token 量，对应上游独立的 OTPM 限额">
+                <span>OTPM</span><strong id="realtime-otpm">0</strong><small>60 秒滚动</small>
+              </div>
+              <div class="realtime-load-item" title="最近 60 秒输入、输出及缓存 Token 总量。仅表示上下文吞吐，不是限流负载">
+                <span>总吞吐</span><strong id="realtime-tpm">0</strong><small>60 秒滚动 · 非限流口径</small>
+              </div>
+              <div class="realtime-load-item" id="realtime-concurrency-item" title="当前在途请求数 / 当前可调度账号的并发容量">
+                <span>当前 / 可用并发</span><strong id="realtime-concurrency">0 / 0</strong><small>在途 / 并发容量</small>
+              </div>
+              <div class="realtime-load-item" id="realtime-queue-item" title="正在等待账号并发或 RPM 容量释放的请求">
+                <span>等待队列</span><strong id="realtime-waiting">0</strong><small>容量等待请求</small>
               </div>
             </div>
             <div class="table-wrap">
@@ -746,8 +755,20 @@
                   <p class="kicker">PROXY INVENTORY</p>
                   <h2>代理清单</h2>
                 </div>
-                <div class="heading-actions">
-                  <label class="search-field proxy-search-field">
+				<div class="heading-actions">
+				  <div
+					class="segmented"
+					id="proxy-inventory-tabs"
+					aria-label="代理清单视图"
+				  >
+					<button class="active" type="button" data-proxy-inventory="active">
+					  正常代理
+					</button>
+					<button type="button" data-proxy-inventory="archived">
+					  归档记录 <b id="archived-proxy-count">0</b>
+					</button>
+				  </div>
+				  <label class="search-field proxy-search-field">
                     <i data-lucide="search"></i>
                     <input
                       id="proxy-search"
@@ -777,7 +798,7 @@
                     type="button"
                     disabled
                   >
-                    <i data-lucide="trash-2"></i><span>删除已选</span><b id="selected-proxy-count">0</b>
+					<i data-lucide="archive"></i><span>归档已选</span><b id="selected-proxy-count">0</b>
                   </button>
                 </div>
               </div>
@@ -785,15 +806,15 @@
                 <table class="proxy-table">
                   <thead>
                     <tr>
-                      <th class="select-column admin-only-column"><input type="checkbox" id="select-all-proxies" aria-label="选择全部代理" /></th>
+					  <th class="select-column admin-only-column" id="proxy-select-header"><input type="checkbox" id="select-all-proxies" aria-label="选择全部代理" /></th>
                       <th>代理</th>
                       <th>协议</th>
                       <th>出口 IP</th>
                       <th class="num">延迟</th>
-                      <th>当前占用</th>
-                      <th class="num" title="历史绑定过该 IP 的不同账号数">历史账号</th>
-                      <th>状态</th>
-                      <th>最近检测</th>
+					  <th id="proxy-owner-header">当前占用</th>
+                      <th class="num" id="proxy-history-header" title="历史绑定过该 IP 的不同账号数">历史账号</th>
+					  <th id="proxy-status-header">状态</th>
+					  <th id="proxy-time-header">最近检测</th>
                       <th class="actions">操作</th>
                     </tr>
                   </thead>
@@ -1013,57 +1034,136 @@
         </section>
 
         <section class="view" id="view-audit">
-          <section class="panel filter-bar audit-filters">
-            <label class="search-field"
-              ><i data-lucide="search"></i
-              ><input
-                id="audit-actor"
-                type="search"
-                placeholder="筛选操作用户" /></label
-            ><select id="audit-action" data-choice>
-              <option value="">全部操作</option>
-              <option value="auth">登录与会话</option>
-              <option value="account">账号</option>
-              <option value="api_key">API Key</option>
-              <option value="user">用户</option>
-              <option value="proxy">代理</option>
-              <option value="price">价格</option></select
-            ><label class="date-filter"
-              ><span>开始</span><input type="datetime-local" step="60" id="audit-from" /></label
-            ><label class="date-filter"
-              ><span>结束</span><input type="datetime-local" step="60" id="audit-to" /></label
-            ><button class="button secondary" id="apply-audit-filters">
-              <i data-lucide="list-filter"></i><span>筛选</span>
-            </button>
+          <section class="panel audit-commandbar">
+            <div>
+              <p class="kicker">AUDIT / FORENSICS</p>
+              <h2>审计视图</h2>
+            </div>
+            <div class="segmented" id="audit-mode-tabs" aria-label="审计类型">
+              <button type="button" class="active" data-audit-mode="operations">
+                <i data-lucide="shield-check"></i><span>操作审计</span>
+              </button>
+              <button type="button" id="cache-audit-mode" data-audit-mode="cache">
+                <i data-lucide="fingerprint"></i><span>缓存前缀</span>
+              </button>
+            </div>
           </section>
-          <section class="panel table-panel">
-            <div class="section-heading">
-              <div>
-                <p class="kicker">AUDIT TRAIL</p>
-                <h2>操作日志</h2>
+          <div class="audit-pane" data-audit-pane="operations">
+            <section class="panel filter-bar audit-filters">
+              <label class="search-field"
+                ><i data-lucide="search"></i
+                ><input
+                  id="audit-search"
+                  type="search"
+                  placeholder="用户或 IP" /></label
+              ><select id="audit-action" data-choice>
+                <option value="">全部操作</option>
+                <option value="auth">登录与会话</option>
+                <option value="account">账号</option>
+                <option value="api_key">API Key</option>
+                <option value="user">用户</option>
+                <option value="proxy">代理</option>
+                <option value="price">价格</option></select
+              ><select id="audit-result" data-choice>
+                <option value="">全部结果</option>
+                <option value="success">成功</option>
+                <option value="failed">失败</option></select
+              ><label class="date-filter"
+                ><span>开始</span><input type="datetime-local" step="60" id="audit-from" /></label
+              ><label class="date-filter"
+                ><span>结束</span><input type="datetime-local" step="60" id="audit-to" /></label
+              ><button class="button secondary" id="apply-audit-filters">
+                <i data-lucide="list-filter"></i><span>查询</span>
+              </button>
+            </section>
+            <section class="panel table-panel">
+              <div class="section-heading">
+                <div>
+                  <p class="kicker">AUDIT TRAIL</p>
+                  <h2>操作日志</h2>
+                </div>
+                <span class="section-count" id="audit-count">0 条记录</span>
               </div>
-              <span class="section-count" id="audit-count">0 条记录</span>
-            </div>
-            <div class="table-wrap">
-              <table class="audit-table">
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>用户</th>
-                    <th>操作</th>
-                    <th>目标</th>
-                    <th>结果</th>
-                    <th>IP</th>
-                    <th class="num">耗时</th>
-                  </tr>
-                </thead>
-                <tbody id="audit-body"></tbody>
-              </table>
-            </div>
-            <div class="empty-state" id="audit-empty" hidden>
-              <strong>当前条件没有操作记录</strong>
-            </div>
-          </section>
+              <div class="table-wrap">
+                <table class="audit-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>用户</th>
+                      <th>操作</th>
+                      <th>目标</th>
+                      <th>结果</th>
+                      <th>IP</th>
+                      <th class="num">耗时</th>
+                      <th class="actions"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="audit-body"></tbody>
+                </table>
+              </div>
+              <div class="empty-state" id="audit-empty" hidden>
+                <strong>当前条件没有操作记录</strong>
+              </div>
+            </section>
+          </div>
+          <div class="audit-pane" data-audit-pane="cache" hidden>
+            <section class="panel filter-bar audit-filters cache-audit-filters">
+              <label class="search-field"
+                ><i data-lucide="search"></i
+                ><input
+                  id="cache-audit-search"
+                  type="search"
+                  placeholder="账号、会话指纹或模型" /></label
+              ><select id="cache-audit-segment" data-choice>
+                <option value="">全部变更</option>
+                <option value="initial">初始建立</option>
+                <option value="tools">工具变更</option>
+                <option value="system">System 变更</option>
+                <option value="tools+system">工具 + System</option>
+                <option value="unknown">未知变更</option></select
+              ><label class="date-filter"
+                ><span>开始</span><input type="datetime-local" step="60" id="cache-audit-from" /></label
+              ><label class="date-filter"
+                ><span>结束</span><input type="datetime-local" step="60" id="cache-audit-to" /></label
+              ><button class="button secondary" id="apply-cache-audit-filters">
+                <i data-lucide="list-filter"></i><span>查询</span>
+              </button>
+            </section>
+            <section class="panel table-panel cache-audit-panel">
+              <div class="section-heading cache-audit-heading">
+                <div>
+                  <p class="kicker">PREFIX STABILITY</p>
+                  <h2>缓存前缀审计</h2>
+                </div>
+                <span class="section-count" id="cache-audit-count">0 条记录</span>
+              </div>
+              <div class="audit-summary-strip" aria-label="缓存审计摘要">
+                <div><span>会话</span><strong id="cache-audit-sessions">0</strong></div>
+                <div><span>初始指纹</span><strong id="cache-audit-initial">0</strong></div>
+                <div><span>工具变更</span><strong id="cache-audit-tools">0</strong></div>
+                <div><span>System 变更</span><strong id="cache-audit-system">0</strong></div>
+              </div>
+              <div class="table-wrap">
+                <table class="audit-table cache-audit-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>账号</th>
+                      <th>模型</th>
+                      <th>会话指纹</th>
+                      <th>变更</th>
+                      <th>前缀指纹</th>
+                      <th class="actions"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="cache-audit-body"></tbody>
+                </table>
+              </div>
+              <div class="empty-state" id="cache-audit-empty" hidden>
+                <strong>当前条件没有前缀变更记录</strong>
+              </div>
+            </section>
+          </div>
         </section>
       </main>
     </div>
@@ -1693,22 +1793,40 @@
           </div>
           <div class="group-mode-setting">
             <div>
-              <strong>429 降权与冷却</strong>
-              <small>账号首次收到上游 429 即降低调度权重，直到其配额窗口刷新或管理员手动恢复；关闭后 429 不影响该账号的调度顺序</small>
+              <strong>429 自适应短冷却</strong>
+              <small>开启后，普通瞬时 429 才会学习临时 RPM 阈值、降低权重并短暂冷却；明确的 5h/7d 配额耗尽仍按上游重置时间冷却</small>
             </div>
-            <label class="compact-toggle" title="429 降权与冷却">
+            <label class="compact-toggle" title="429 自适应短冷却">
               <input
                 id="group-rate-limit-downweight-enabled"
                 type="checkbox"
                 checked
-                aria-label="429 降权与冷却" />
+                aria-label="429 自适应短冷却" />
               <i></i>
             </label>
           </div>
           <div class="group-mode-setting">
             <div>
-              <strong>冷却阈值</strong>
-              <small>降权累计到该次数后升级为冷却（暂不可调度）；填 1 表示首次 429 即冷却。仅在开启 429 降权与冷却时生效</small>
+              <strong>最长冷却时间</strong>
+              <small>首次冷却 60 秒，重复触发时逐步延长，达到次数阈值后使用此上限</small>
+            </div>
+            <label class="compact-number" title="429 最长冷却时间">
+              <input
+                id="group-rate-limit-wait-seconds"
+                type="number"
+                min="60"
+                max="120"
+                step="1"
+                value="120"
+                required
+                aria-label="429 最长冷却时间" />
+              <span>秒</span>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>最长冷却阈值</strong>
+              <small>同一账号达到该次数后，本轮使用配置的最长冷却时间</small>
             </div>
             <label class="compact-number" title="冷却阈值">
               <input
@@ -1810,7 +1928,14 @@
               id="strategy-tpm"
               type="number"
               min="0"
-              value="0" /><small>最近 60 秒 token 总量达到后暂停调度，0 不限制</small></label
+              value="0" /><small>最近 60 秒 token 总量（含缓存读）达到后暂停调度，0 不限制。这不是上游的限流口径</small></label
+          ><label
+            ><span>ITPM 限制</span
+            ><input
+              id="strategy-itpm"
+              type="number"
+              min="0"
+              value="0" /><small>上游真实限流口径：仅计未缓存输入（input + cache_creation），缓存读不计入。0 不限制</small></label
           ><label
             ><span>并发限制</span
             ><input
@@ -2347,6 +2472,17 @@
           </div>
         </div>
       </div>
+    </dialog>
+
+    <dialog id="audit-detail-dialog" class="modal wide audit-detail-dialog">
+      <div class="modal-head">
+        <div>
+          <p class="kicker" id="audit-detail-kicker">AUDIT EVENT</p>
+          <h2 id="audit-detail-title">审计详情</h2>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog>×</button>
+      </div>
+      <div class="audit-detail-grid" id="audit-detail-content"></div>
     </dialog>
 
     <dialog id="confirm-dialog" class="modal confirm-modal">

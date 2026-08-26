@@ -99,6 +99,9 @@ func (a *app) migrateSharedData() error {
 	if err := a.migrateGroupStrategyShares(); err != nil {
 		return err
 	}
+	if err := a.migrateCachePrefixAudit(); err != nil {
+		return err
+	}
 	// In-flight counters are process leases. A previous process cannot release
 	// them after a crash or restart, so never carry them into this process.
 	if _, err := a.db.Exec(`DELETE FROM account_inflight`); err != nil {

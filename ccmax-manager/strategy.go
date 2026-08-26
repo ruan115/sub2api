@@ -44,6 +44,7 @@ type dispatchStrategy struct {
 	Description      string `json:"description"`
 	RPMLimit         int    `json:"rpm_limit"`
 	TPMLimit         int64  `json:"tpm_limit"`
+	ITPMLimit        int64  `json:"itpm_limit"`
 	ConcurrencyLimit int    `json:"concurrency_limit"`
 	RPMStrategy      string `json:"rpm_strategy"`
 	RPMStickyBuffer  int    `json:"rpm_sticky_buffer"`
@@ -59,6 +60,7 @@ type dispatchStrategyInput struct {
 	Description      string `json:"description"`
 	RPMLimit         int    `json:"rpm_limit"`
 	TPMLimit         int64  `json:"tpm_limit"`
+	ITPMLimit        int64  `json:"itpm_limit"`
 	ConcurrencyLimit int    `json:"concurrency_limit"`
 	RPMStrategy      string `json:"rpm_strategy"`
 	RPMStickyBuffer  int    `json:"rpm_sticky_buffer"`
@@ -70,7 +72,7 @@ func (input *dispatchStrategyInput) validate() error {
 	if input.Name == "" {
 		return errors.New("strategy name is required")
 	}
-	if input.RPMLimit < 0 || input.TPMLimit < 0 || input.ConcurrencyLimit < 0 || input.RPMStickyBuffer < 0 {
+	if input.RPMLimit < 0 || input.TPMLimit < 0 || input.ITPMLimit < 0 || input.ConcurrencyLimit < 0 || input.RPMStickyBuffer < 0 {
 		return errors.New("strategy limits cannot be negative")
 	}
 	if input.RPMStrategy == "" {
@@ -85,7 +87,7 @@ func (input *dispatchStrategyInput) validate() error {
 	return nil
 }
 
-const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode,
+const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode,
 	(SELECT COUNT(*) FROM groups g WHERE g.strategy_id = s.id) AS bound_groups,
 	(SELECT COUNT(DISTINCT a.id) FROM accounts a
 		LEFT JOIN account_groups ag ON ag.account_id = a.id
@@ -97,7 +99,7 @@ const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit,
 
 func scanDispatchStrategy(rows *sql.Rows) (dispatchStrategy, error) {
 	var item dispatchStrategy
-	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
+	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
 	return item, err
 }
 
@@ -136,8 +138,8 @@ func (a *app) handleStrategyCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode)
+	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -160,8 +162,8 @@ func (a *app) handleStrategyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`UPDATE dispatch_strategies SET name = ?, description = ?, rpm_limit = ?, tpm_limit = ?, concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
-		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, id)
+	result, err := a.db.Exec(`UPDATE dispatch_strategies SET name = ?, description = ?, rpm_limit = ?, tpm_limit = ?, itpm_limit = ?, concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
+		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

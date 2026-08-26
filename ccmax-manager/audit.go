@@ -187,7 +187,10 @@ func auditAction(r *http.Request) (string, string, string) {
 		action = "proxy.test"
 	}
 	if path == "proxies/batch-delete" {
-		action = "proxy.delete"
+		action = "proxy.archive"
+	}
+	if targetType == "proxy" && r.Method == http.MethodDelete {
+		action = "proxy.archive"
 	}
 	if path == "accounts/health/refresh" {
 		action = "account.health_refresh"
@@ -242,6 +245,17 @@ func (a *app) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if actor := strings.TrimSpace(r.URL.Query().Get("actor")); actor != "" {
 		where = append(where, "actor_username LIKE ?")
 		args = append(args, "%"+actor+"%")
+	}
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		like := "%" + search + "%"
+		where = append(where, "(actor_username LIKE ? OR action LIKE ? OR path LIKE ? OR target_id LIKE ? OR client_ip LIKE ?)")
+		args = append(args, like, like, like, like, like)
+	}
+	switch strings.TrimSpace(r.URL.Query().Get("result")) {
+	case "success":
+		where = append(where, "status_code < 400")
+	case "failed":
+		where = append(where, "status_code >= 400")
 	}
 	if from := normalizeDateStart(strings.TrimSpace(r.URL.Query().Get("from"))); from != "" {
 		where = append(where, "created_at >= ?")

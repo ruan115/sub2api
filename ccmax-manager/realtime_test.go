@@ -43,28 +43,31 @@ func TestRealtimeStatsUsesRollingMinute(t *testing.T) {
 	if _, err := a.db.Exec(`INSERT INTO account_inflight (account_id, requests) VALUES (?, 2)`, second.ID); err != nil {
 		t.Fatal(err)
 	}
+	waiters := new(int64)
+	*waiters = 3
+	a.capacityWaiters.Store("a", waiters)
 
 	var result realtimeLoad
 	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=a", nil, http.StatusOK, &result)
 	if result.WindowSeconds != 60 || result.RPM != 3 || result.TPM != 150 || result.Inflight != 2 {
 		t.Fatalf("realtime totals = %+v", result)
 	}
-	if result.ActiveAccounts != 2 || result.EligibleAccounts != 2 || result.RPMCapacity != 20 || result.Unlimited {
+	if result.ActiveAccounts != 2 || result.EligibleAccounts != 2 || result.RPMCapacity != 20 || result.ConcurrencyCapacity != 8 || result.WaitingRequests != 3 || result.Unlimited {
 		t.Fatalf("realtime capacity = %+v", result)
 	}
 	if len(result.Accounts) != 2 || result.Accounts[0].AccountID != first.ID || result.Accounts[0].RPM != 2 || result.Accounts[0].TPM != 150 {
 		t.Fatalf("realtime accounts = %+v", result.Accounts)
 	}
-	a.captureAccountRPMThreshold("a", first.ID)
+	a.captureAccountRPMThreshold("a", first.ID, time.Now().UTC().Add(time.Minute))
 	var limited realtimeLoad
 	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=a", nil, http.StatusOK, &limited)
-	if limited.EligibleAccounts != 1 || limited.RPMCapacity != 10 || limited.Accounts[0].EffectiveRPM != 2 || limited.Accounts[0].TemporaryRPM != 2 || limited.Accounts[0].Eligible {
+	if limited.EligibleAccounts != 1 || limited.RPMCapacity != 10 || limited.ConcurrencyCapacity != 4 || limited.WaitingRequests != 3 || limited.Accounts[0].EffectiveRPM != 1 || limited.Accounts[0].TemporaryRPM != 1 || limited.Accounts[0].Eligible {
 		t.Fatalf("realtime learned threshold = %+v", limited)
 	}
 
 	var empty realtimeLoad
 	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=b", nil, http.StatusOK, &empty)
-	if len(empty.Accounts) != 0 || empty.RPM != 0 || empty.TPM != 0 {
+	if len(empty.Accounts) != 0 || empty.RPM != 0 || empty.TPM != 0 || empty.WaitingRequests != 0 {
 		t.Fatalf("group filter leaked realtime data: %+v", empty)
 	}
 }

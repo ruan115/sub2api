@@ -26,6 +26,7 @@ func (a *app) migrateAdvancedFeatures() error {
 			description TEXT NOT NULL DEFAULT '',
 			rpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (rpm_limit >= 0),
 			tpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (tpm_limit >= 0),
+			itpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0),
 			concurrency_limit INTEGER NOT NULL DEFAULT 0 CHECK (concurrency_limit >= 0),
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
@@ -35,6 +36,11 @@ func (a *app) migrateAdvancedFeatures() error {
 			deleted_at TEXT
 		)`); err != nil {
 		return fmt.Errorf("create dispatch strategies table: %w", err)
+	}
+	// Added before the rebuild below so an existing table gains the column and
+	// the rebuild's INSERT ... SELECT can carry it across.
+	if err := addColumnIfMissing(a.db, "dispatch_strategies", "itpm_limit", "INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0)"); err != nil {
+		return err
 	}
 	if err := a.migrateDispatchStrategyModes(); err != nil {
 		return err
@@ -89,6 +95,15 @@ func (a *app) migrateAdvancedFeatures() error {
 	}
 	if err := addColumnIfMissing(a.db, "groups", "rate_limit_cooling_threshold", "INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10)"); err != nil {
 		return err
+	}
+	// Reuse the former 429 wait-seconds column as the maximum duration for the
+	// switch-controlled transient cooldown. Values from the old 1-600 second
+	// retry setting are normalised into the new 60-120 second safety range.
+	if err := addColumnIfMissing(a.db, "groups", "rate_limit_wait_seconds", "INTEGER NOT NULL DEFAULT 120 CHECK (rate_limit_wait_seconds BETWEEN 60 AND 120)"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE groups SET rate_limit_wait_seconds = ? WHERE rate_limit_wait_seconds < ? OR rate_limit_wait_seconds > ?`, defaultRateLimitCooldownSeconds, minRateLimitCooldownSeconds, maxRateLimitCooldownSeconds); err != nil {
+		return fmt.Errorf("normalise group 429 cooldown seconds: %w", err)
 	}
 	if err := addColumnIfMissing(a.db, "groups", "strategy_id", "INTEGER REFERENCES dispatch_strategies(id) ON DELETE SET NULL"); err != nil {
 		return err
@@ -295,6 +310,12 @@ func (a *app) migrateAdvancedFeatures() error {
 		// hit rolls over; quota_refreshed_at then earns a short priority boost.
 		{"rate_limit_downweight_until", "TEXT"},
 		{"quota_refreshed_at", "TEXT"},
+		// The upstream's own remaining-ITPM report, sampled from response
+		// headers. Authoritative, so the dispatcher never has to estimate a
+		// request's token cost before sending it.
+		{"itpm_remaining", "INTEGER"},
+		{"itpm_reset_at", "TEXT"},
+		{"itpm_sampled_at", "TEXT"},
 	}
 	for _, column := range accountColumns {
 		if err := addColumnIfMissing(a.db, "accounts", column.name, column.definition); err != nil {
@@ -390,6 +411,7 @@ func (a *app) migrateDispatchStrategyModes() error {
 			description TEXT NOT NULL DEFAULT '',
 			rpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (rpm_limit >= 0),
 			tpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (tpm_limit >= 0),
+			itpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0),
 			concurrency_limit INTEGER NOT NULL DEFAULT 0 CHECK (concurrency_limit >= 0),
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
@@ -398,8 +420,8 @@ func (a *app) migrateDispatchStrategyModes() error {
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
 		)`,
-		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at)
-		 SELECT id, name, description, rpm_limit, tpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at FROM dispatch_strategies`,
+		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at)
+		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at FROM dispatch_strategies`,
 		`DROP TABLE dispatch_strategies`,
 		`ALTER TABLE dispatch_strategies_migrated RENAME TO dispatch_strategies`,
 	}
