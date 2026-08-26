@@ -176,6 +176,8 @@ func (a *app) migrateMySQL() error {
 			token_expires_at DATETIME(3) NULL,
 			quota_5h_utilization DECIMAL(10,4) NOT NULL DEFAULT 0,
 			quota_5h_reset_at DATETIME(3) NULL,
+			quota_5h_threshold_enabled TINYINT(1) NOT NULL DEFAULT 0,
+			quota_5h_threshold_percent INT NOT NULL DEFAULT 80,
 			quota_7d_utilization DECIMAL(10,4) NOT NULL DEFAULT 0,
 			quota_7d_reset_at DATETIME(3) NULL,
 			quota_sampled_at DATETIME(3) NULL,
@@ -613,6 +615,15 @@ func (a *app) migrateMySQL() error {
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_refreshed_at", "DATETIME(3) NULL"); err != nil {
 		return err
 	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_5h_threshold_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_5h_threshold_percent", "INT NOT NULL DEFAULT 80"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET quota_5h_threshold_percent = 80 WHERE quota_5h_threshold_percent < 1 OR quota_5h_threshold_percent > 100`); err != nil {
+		return fmt.Errorf("normalise MySQL account 5h threshold: %w", err)
+	}
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "reauthorized_at", "DATETIME(3) NULL"); err != nil {
 		return err
 	}
@@ -631,6 +642,7 @@ func (a *app) migrateMySQL() error {
 		{"account_rpm_events", "idx_account_rpm_created", "`created_at`, `account_id`"},
 		{"dispatch_sessions", "idx_dispatch_sessions_expiry", "`expires_at`"},
 		{"account_model_cooldowns", "idx_account_model_cooldowns_expiry", "`reset_at`, `account_id`, `model`"},
+		{"accounts", "idx_accounts_quota_5h_threshold", "`quota_5h_threshold_enabled`, `quota_5h_utilization`"},
 	} {
 		if err := ensureMySQLIndex(a.db.DB, index.table, index.name, index.columns); err != nil {
 			return err

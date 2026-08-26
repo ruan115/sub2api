@@ -332,6 +332,8 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"token_expires_at", "TEXT"},
 		{"quota_5h_utilization", "REAL NOT NULL DEFAULT 0"},
 		{"quota_5h_reset_at", "TEXT"},
+		{"quota_5h_threshold_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"quota_5h_threshold_percent", "INTEGER NOT NULL DEFAULT 80 CHECK (quota_5h_threshold_percent BETWEEN 1 AND 100)"},
 		{"quota_7d_utilization", "REAL NOT NULL DEFAULT 0"},
 		{"quota_7d_reset_at", "TEXT"},
 		{"quota_sampled_at", "TEXT"},
@@ -368,6 +370,9 @@ func (a *app) migrateAdvancedFeatures() error {
 		if err := addColumnIfMissing(a.db, "accounts", column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	if _, err := a.db.Exec(`CREATE INDEX IF NOT EXISTS idx_accounts_quota_5h_threshold ON accounts(quota_5h_threshold_enabled, quota_5h_utilization)`); err != nil {
+		return fmt.Errorf("index account 5h threshold: %w", err)
 	}
 	priceColumns := []struct{ name, definition string }{
 		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
@@ -654,6 +659,13 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 		term := "%" + search + "%"
 		whereArgs = append(whereArgs, term, term, term, term, term, term, term, term)
 	}
+	quotaConditions, quotaArgs, err := accountQuotaFilterConditions(r, "a")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	where = append(where, quotaConditions...)
+	whereArgs = append(whereArgs, quotaArgs...)
 	join := "LEFT JOIN usage_logs u ON u.account_id = a.id"
 	joinArgs := []any{}
 	if user := currentUser(r); user.Role == "user" {

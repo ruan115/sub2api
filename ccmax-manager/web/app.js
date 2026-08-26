@@ -41,6 +41,8 @@ const state = {
   accountGroup: "",
   accountSearch: "",
   accountStatus: "",
+  accountMin5HUtilization: "",
+  accountQuotaThreshold: "",
   deadStatus: "pending",
   deadSearch: "",
   accountsLoadedAt: 0,
@@ -689,6 +691,9 @@ function configureRole() {
   const accountRefreshLabel = isAdmin()
     ? "检测当前页账号存活状态并刷新列表"
     : "刷新账号列表";
+  $("#refresh-accounts-label").textContent = isAdmin()
+    ? "更新状态"
+    : "刷新列表";
   $("#refresh-accounts").title = accountRefreshLabel;
   $("#refresh-accounts").setAttribute("aria-label", accountRefreshLabel);
   $("#add-api-key").hidden =
@@ -748,6 +753,10 @@ async function loadAccountPage() {
     if (state.accountGroup) params.set("group_id", state.accountGroup);
     if (state.accountStatus) params.set("status", state.accountStatus);
     if (state.accountSearch) params.set("search", state.accountSearch);
+    if (state.accountMin5HUtilization !== "")
+      params.set("min_5h_utilization", state.accountMin5HUtilization);
+    if (state.accountQuotaThreshold)
+      params.set("quota_5h_threshold", state.accountQuotaThreshold);
     const payload = await api(`/api/accounts?${params}`);
     state.accounts = payload.items;
     state.accountStatusCounts = payload.status_counts || {};
@@ -1001,6 +1010,10 @@ async function loadAccountSummary() {
   if (state.accountSearch) params.set("search", state.accountSearch);
   if (state.accountGroup) params.set("group_id", state.accountGroup);
   if (state.accountStatus) params.set("status", state.accountStatus);
+  if (state.accountMin5HUtilization !== "")
+    params.set("min_5h_utilization", state.accountMin5HUtilization);
+  if (state.accountQuotaThreshold)
+    params.set("quota_5h_threshold", state.accountQuotaThreshold);
   if ($("#account-from").value) params.set("from", $("#account-from").value);
   if ($("#account-to").value) params.set("to", $("#account-to").value);
   try {
@@ -3044,6 +3057,10 @@ function openAccount(account = null) {
   $("#account-rpm-enabled").checked = (account?.base_rpm || 0) > 0;
   $("#account-rpm-strategy").value = account?.rpm_strategy || "tiered";
   $("#account-rpm-buffer").value = account?.rpm_sticky_buffer || 0;
+  $("#account-quota-threshold-enabled").checked =
+    account?.quota_5h_threshold_enabled ?? false;
+  $("#account-quota-threshold-percent").value =
+    account?.quota_5h_threshold_percent ?? 80;
   fillStrategySelect($("#account-strategy"), account?.strategy_id);
   ensureStrategiesLoaded().then(() =>
     fillStrategySelect($("#account-strategy"), account?.strategy_id),
@@ -3102,6 +3119,7 @@ function openBatchAccountEdit() {
     ["rpm_strategy", "#batch-edit-rpm-strategy"],
     ["rpm_sticky_buffer", "#batch-edit-rpm-buffer"],
     ["user_msg_queue_mode", "#batch-edit-queue-mode"],
+    ["quota_5h_threshold_percent", "#batch-edit-quota-threshold-percent"],
     ["priority", "#batch-edit-priority"],
     ["rate_multiplier", "#batch-edit-rate"],
     ["account_price", "#batch-edit-price"],
@@ -3113,6 +3131,18 @@ function openBatchAccountEdit() {
       ? "已选账号当前值不一致"
       : `当前值：${current.value ?? "—"}`;
   });
+  const quotaThresholdEnabled = batchEditCommonValue(
+    accounts,
+    "quota_5h_threshold_enabled",
+    Boolean,
+  );
+  $("#batch-edit-quota-threshold-enabled").value = String(
+    quotaThresholdEnabled.value,
+  );
+  $('[data-batch-edit-hint="quota_5h_threshold_enabled"]').textContent =
+    quotaThresholdEnabled.mixed
+      ? "已选账号当前状态不一致"
+      : `当前状态：${quotaThresholdEnabled.value ? "开启" : "关闭"}`;
   const strategy = batchEditCommonValue(
     accounts,
     "strategy_id",
@@ -3170,6 +3200,8 @@ function syncAccountControls() {
     "#account-rpm-buffer-hint",
   );
   if (!rpmEnabled) $("#account-rpm-buffer").disabled = true;
+  $("#account-quota-threshold-percent").disabled =
+    !$("#account-quota-threshold-enabled").checked;
   syncAccountAuthFields();
   stabilizeAccountDialogViewport();
 }
@@ -4451,6 +4483,20 @@ $("#account-search").addEventListener("input", (event) => {
   clearTimeout(accountSearchTimer);
   accountSearchTimer = setTimeout(loadAccountPage, 250);
 });
+let accountQuotaFilterTimer;
+$("#account-min-5h-utilization").addEventListener("input", (event) => {
+  state.accountMin5HUtilization = event.target.value;
+  state.selectedAccountIDs.clear();
+  resetPagination("accounts");
+  clearTimeout(accountQuotaFilterTimer);
+  accountQuotaFilterTimer = setTimeout(loadAccountPage, 250);
+});
+$("#account-quota-threshold-filter").addEventListener("change", (event) => {
+  state.accountQuotaThreshold = event.target.value;
+  state.selectedAccountIDs.clear();
+  resetPagination("accounts");
+  loadAccountPage();
+});
 $("#account-status-tabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-account-status]");
   if (!button) return;
@@ -4567,6 +4613,10 @@ $("#account-proxy-text").addEventListener("input", () => {
 });
 $("#account-rpm-enabled").addEventListener("change", syncAccountControls);
 $("#account-rpm-strategy").addEventListener("change", syncAccountControls);
+$("#account-quota-threshold-enabled").addEventListener(
+  "change",
+  syncAccountControls,
+);
 $("#batch-rpm-strategy").addEventListener("change", () =>
   syncRPMBufferControl(
     "#batch-rpm-strategy",
@@ -4726,6 +4776,7 @@ $("#batch-account-form").addEventListener("submit", async (event) => {
     ["priority", "#batch-edit-priority"],
     ["rate_multiplier", "#batch-edit-rate"],
     ["account_price", "#batch-edit-price"],
+    ["quota_5h_threshold_percent", "#batch-edit-quota-threshold-percent"],
   ];
   numberFields.forEach(([key, selector]) => {
     if (applies(key)) payload[key] = Number($(selector).value);
@@ -4734,6 +4785,9 @@ $("#batch-account-form").addEventListener("submit", async (event) => {
     payload.rpm_strategy = $("#batch-edit-rpm-strategy").value;
   if (applies("user_msg_queue_mode"))
     payload.user_msg_queue_mode = $("#batch-edit-queue-mode").value;
+  if (applies("quota_5h_threshold_enabled"))
+    payload.quota_5h_threshold_enabled =
+      $("#batch-edit-quota-threshold-enabled").value === "true";
   if (applies("strategy_id")) {
     if (!state.strategiesLoaded) {
       toast("策略列表不可用，无法批量修改调度策略", "error");
@@ -4826,6 +4880,10 @@ $("#account-form").addEventListener("submit", async (event) => {
       rpm_sticky_buffer: Number($("#account-rpm-buffer").value),
       strategy_id: strategySelectPayload($("#account-strategy")),
       user_msg_queue_mode: $("#account-queue-mode").value,
+      quota_5h_threshold_enabled: $("#account-quota-threshold-enabled").checked,
+      quota_5h_threshold_percent: Number(
+        $("#account-quota-threshold-percent").value,
+      ),
     };
     if (sessionKey) payload.session_key = sessionKey;
     if (credentialsText) payload.credentials = JSON.parse(credentialsText);

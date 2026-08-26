@@ -62,18 +62,19 @@ func gatewayCorrelationIDs(ctx context.Context, upstreamRequestID string) (reque
 }
 
 type gatewayCapacityDiagnostics struct {
-	Candidates           int `json:"candidates"`
-	Excluded             int `json:"excluded"`
-	StickyPinned         int `json:"sticky_pinned"`
-	StrategyMissing      int `json:"strategy_missing"`
-	StrategyShareBlocked int `json:"strategy_share_blocked"`
-	ModelCooldown        int `json:"model_cooldown"`
-	ModelUnsupported     int `json:"model_unsupported"`
-	ConcurrencyBlocked   int `json:"concurrency_blocked"`
-	TemporaryRPMBlocked  int `json:"temporary_rpm_blocked"`
-	TPMBlocked           int `json:"tpm_blocked"`
-	ITPMBlocked          int `json:"itpm_blocked"`
-	RPMBlocked           int `json:"rpm_blocked"`
+	Candidates             int `json:"candidates"`
+	Excluded               int `json:"excluded"`
+	StickyPinned           int `json:"sticky_pinned"`
+	StrategyMissing        int `json:"strategy_missing"`
+	StrategyShareBlocked   int `json:"strategy_share_blocked"`
+	ModelCooldown          int `json:"model_cooldown"`
+	ModelUnsupported       int `json:"model_unsupported"`
+	ConcurrencyBlocked     int `json:"concurrency_blocked"`
+	TemporaryRPMBlocked    int `json:"temporary_rpm_blocked"`
+	TPMBlocked             int `json:"tpm_blocked"`
+	ITPMBlocked            int `json:"itpm_blocked"`
+	ITPMReservationBlocked int `json:"itpm_reservation_blocked"`
+	RPMBlocked             int `json:"rpm_blocked"`
 }
 
 type gatewayCapacityError struct {

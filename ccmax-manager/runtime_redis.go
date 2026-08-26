@@ -35,6 +35,93 @@ end
 return 0
 `)
 
+// redisReserveITPMScript keeps the estimate for every in-flight request in a
+// hash and its crash-recovery deadline in a sorted set. Selection is serialized
+// per group, but an account may belong to more than one group, so admission
+// still has to be atomic per account.
+var redisReserveITPMScript = redis.NewScript(`
+local now = redis.call('TIME')
+local now_ms = (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[1], 0, now_ms)
+for _, lease_id in ipairs(expired) do
+  redis.call('HDEL', KEYS[2], lease_id)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now_ms)
+
+local reserved = 0
+local exclusive = 0
+for _, value in ipairs(redis.call('HVALS', KEYS[2])) do
+  local separator = string.find(value, ':', 1, true)
+  if separator then
+    reserved = reserved + (tonumber(string.sub(value, 1, separator - 1)) or 0)
+    exclusive = math.max(exclusive, tonumber(string.sub(value, separator + 1)) or 0)
+  end
+end
+
+local estimate = tonumber(ARGV[2])
+local current = tonumber(ARGV[3])
+local soft_limit = tonumber(ARGV[4])
+local hard_limit = tonumber(ARGV[5])
+local sticky = tonumber(ARGV[6])
+local requested_exclusive = tonumber(ARGV[7])
+local inflight = tonumber(ARGV[8])
+local small_limit = tonumber(ARGV[9])
+local ttl_ms = tonumber(ARGV[10])
+
+if exclusive > 0 then
+  return -1
+end
+if requested_exclusive > 0 then
+  if inflight > 0 or reserved > 0 then
+    return -1
+  end
+else
+  local projected = current + reserved + estimate
+  if hard_limit > 0 and (current + reserved >= hard_limit or projected > hard_limit) then
+    return -1
+  end
+  if soft_limit > 0 and projected > soft_limit and sticky == 0 and estimate > small_limit then
+    return -1
+  end
+end
+
+redis.call('HSET', KEYS[2], ARGV[1], tostring(estimate) .. ':' .. tostring(requested_exclusive))
+redis.call('ZADD', KEYS[1], now_ms + ttl_ms, ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ttl_ms + 60000)
+redis.call('PEXPIRE', KEYS[2], ttl_ms + 60000)
+return reserved + estimate
+`)
+
+var redisReleaseITPMScript = redis.NewScript(`
+redis.call('ZREM', KEYS[1], ARGV[1])
+return redis.call('HDEL', KEYS[2], ARGV[1])
+`)
+
+var redisSettleITPMScript = redis.NewScript(`
+if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 0 then
+  return 0
+end
+local now = redis.call('TIME')
+local now_ms = (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+redis.call('HSET', KEYS[2], ARGV[1], tostring(ARGV[2]) .. ':0')
+redis.call('ZADD', KEYS[1], now_ms + tonumber(ARGV[3]), ARGV[1])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 60000)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 60000)
+return 1
+`)
+
+var redisRenewITPMScript = redis.NewScript(`
+if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 0 then
+  return 0
+end
+local now = redis.call('TIME')
+local now_ms = (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+redis.call('ZADD', KEYS[1], now_ms + tonumber(ARGV[2]), ARGV[1])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) + 60000)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[2]) + 60000)
+return 1
+`)
+
 type redisRuntime struct {
 	client *redis.Client
 }
@@ -135,4 +222,53 @@ func (runtime *redisRuntime) acquireDispatchLock(ctx context.Context, groupID st
 		case <-timer.C:
 		}
 	}
+}
+
+func (runtime *redisRuntime) reserveAccountITPM(ctx context.Context, accountID int64, leaseID string, estimated, current, softLimit, hardLimit int64, sticky, exclusive bool, inflight int, smallLimit int64, ttl time.Duration) (bool, int64, error) {
+	if runtime == nil || runtime.client == nil || estimated <= 0 {
+		return true, 0, nil
+	}
+	prefix := redisRuntimePrefix + "account-itpm:" + strconv.FormatInt(accountID, 10)
+	result, err := redisReserveITPMScript.Run(ctx, runtime.client, []string{prefix + ":expiry", prefix + ":leases"},
+		leaseID, estimated, current, softLimit, hardLimit, boolInt(sticky), boolInt(exclusive), inflight, smallLimit, ttl.Milliseconds()).Int64()
+	if err != nil {
+		return false, 0, fmt.Errorf("reserve account ITPM: %w", err)
+	}
+	if result < 0 {
+		return false, 0, nil
+	}
+	return true, result, nil
+}
+
+func (runtime *redisRuntime) releaseAccountITPM(ctx context.Context, accountID int64, leaseID string) error {
+	if runtime == nil || runtime.client == nil || accountID <= 0 || strings.TrimSpace(leaseID) == "" {
+		return nil
+	}
+	prefix := redisRuntimePrefix + "account-itpm:" + strconv.FormatInt(accountID, 10)
+	if err := redisReleaseITPMScript.Run(ctx, runtime.client, []string{prefix + ":expiry", prefix + ":leases"}, leaseID).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("release account ITPM: %w", err)
+	}
+	return nil
+}
+
+func (runtime *redisRuntime) settleAccountITPM(ctx context.Context, accountID int64, leaseID string, actual int64, ttl time.Duration) error {
+	if runtime == nil || runtime.client == nil || accountID <= 0 || strings.TrimSpace(leaseID) == "" {
+		return nil
+	}
+	prefix := redisRuntimePrefix + "account-itpm:" + strconv.FormatInt(accountID, 10)
+	if err := redisSettleITPMScript.Run(ctx, runtime.client, []string{prefix + ":expiry", prefix + ":leases"}, leaseID, actual, ttl.Milliseconds()).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("settle account ITPM: %w", err)
+	}
+	return nil
+}
+
+func (runtime *redisRuntime) renewAccountITPM(ctx context.Context, accountID int64, leaseID string, ttl time.Duration) error {
+	if runtime == nil || runtime.client == nil || accountID <= 0 || strings.TrimSpace(leaseID) == "" {
+		return nil
+	}
+	prefix := redisRuntimePrefix + "account-itpm:" + strconv.FormatInt(accountID, 10)
+	if err := redisRenewITPMScript.Run(ctx, runtime.client, []string{prefix + ":expiry", prefix + ":leases"}, leaseID, ttl.Milliseconds()).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("renew account ITPM: %w", err)
+	}
+	return nil
 }

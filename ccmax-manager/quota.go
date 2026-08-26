@@ -159,6 +159,9 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 		if err := a.persistAccountQuota(accountID, quota, true); err != nil {
 			return accountQuota{}, err
 		}
+		if err := a.enforceAccountFiveHourThreshold(accountID, quota.FiveHour, rateLimitPolicy{}); err != nil {
+			return accountQuota{}, err
+		}
 		return quota, nil
 	}
 	return accountQuota{}, errors.New("Anthropic usage API authorization failed")
@@ -211,6 +214,99 @@ func (a *app) persistAccountQuota(accountID int64, quota accountQuota, active bo
 		}
 	}
 	return tx.Commit()
+}
+
+func (a *app) enforceStoredAccountFiveHourThreshold(accountID int64, policy rateLimitPolicy) error {
+	var window quotaWindow
+	var reset sql.NullString
+	if err := a.db.QueryRow(`SELECT quota_5h_utilization, quota_5h_reset_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&window.Utilization, &reset); err != nil {
+		return err
+	}
+	window.ResetsAt = nullText(reset)
+	return a.enforceAccountFiveHourThreshold(accountID, window, policy)
+}
+
+func (a *app) accountFiveHourThresholdReleaseDeadline(accountID int64, resetAt time.Time, policy rateLimitPolicy) (time.Time, error) {
+	if policy.FiveHourStaggerSet {
+		return policy.quotaReleaseDeadline(accountID, "5h", resetAt), nil
+	}
+	rows, err := a.db.Query(`SELECT g.five_hour_release_stagger_enabled, g.five_hour_release_stagger_min_minutes, g.five_hour_release_stagger_max_minutes
+		FROM groups g JOIN account_groups ag ON ag.group_id = g.id
+		WHERE ag.account_id = ? AND g.status = 'active'`, accountID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer rows.Close()
+	deadline := resetAt.UTC()
+	found := false
+	for rows.Next() {
+		var enabled int
+		var minimum, maximum int
+		if err := rows.Scan(&enabled, &minimum, &maximum); err != nil {
+			return time.Time{}, err
+		}
+		found = true
+		candidate := (rateLimitPolicy{
+			FiveHourStaggerSet:     true,
+			FiveHourStaggerEnabled: enabled == 1,
+			FiveHourStaggerMin:     minimum,
+			FiveHourStaggerMax:     maximum,
+		}).quotaReleaseDeadline(accountID, "5h", resetAt)
+		if candidate.After(deadline) {
+			deadline = candidate
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, err
+	}
+	if !found {
+		deadline = policy.quotaReleaseDeadline(accountID, "5h", resetAt)
+	}
+	return deadline, nil
+}
+
+func (a *app) clearAccountFiveHourThresholdCooldown(accountID int64) error {
+	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = NULL, rate_limit_window = '',
+		rate_limit_reason = CASE WHEN rate_limit_downweight_until > `+nowSQL+` THEN '429_backoff' ELSE '' END,
+		quota_refreshed_at = CASE WHEN quota_5h_reset_at IS NOT NULL AND quota_5h_reset_at <= `+nowSQL+` THEN quota_5h_reset_at ELSE quota_refreshed_at END,
+		error_message = CASE WHEN auth_error = '' THEN '' ELSE error_message END,
+		updated_at = `+nowSQL+`
+		WHERE id = ? AND deleted_at IS NULL AND rate_limit_reason = 'quota_threshold'`, accountID)
+	return err
+}
+
+func (a *app) enforceAccountFiveHourThreshold(accountID int64, window quotaWindow, policy rateLimitPolicy) error {
+	var enabled int
+	var threshold int
+	var existingReason string
+	var existingReset sql.NullString
+	if err := a.db.QueryRow(`SELECT quota_5h_threshold_enabled, quota_5h_threshold_percent, rate_limit_reason, rate_limit_reset_at
+		FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&enabled, &threshold, &existingReason, &existingReset); err != nil {
+		return err
+	}
+	if enabled != 1 || window.Utilization < float64(threshold) {
+		return a.clearAccountFiveHourThresholdCooldown(accountID)
+	}
+	now := time.Now().UTC()
+	resetAt, valid := parseQuotaResetTime(window.ResetsAt)
+	if !valid || !resetAt.After(now) {
+		return a.clearAccountFiveHourThresholdCooldown(accountID)
+	}
+	eligibleAt, err := a.accountFiveHourThresholdReleaseDeadline(accountID, resetAt, policy)
+	if err != nil {
+		return err
+	}
+	if existingReset.Valid {
+		if current, ok := parseQuotaResetTime(existingReset.String); ok && current.After(now) && existingReason != "quota_threshold" {
+			return nil
+		}
+	}
+	message := fmt.Sprintf("5h 使用率 %.1f%% 已达到账户阈值 %d%%，提前冷却至 %s", window.Utilization, threshold, eligibleAt.Local().Format("01/02 15:04"))
+	_, err = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '5h', rate_limit_reason = 'quota_threshold',
+		quota_refreshed_at = NULL, error_message = ?, updated_at = `+nowSQL+`
+		WHERE id = ? AND deleted_at IS NULL AND quota_5h_threshold_enabled = 1
+		AND quota_5h_utilization >= quota_5h_threshold_percent`, eligibleAt.Format(time.RFC3339Nano), message, accountID)
+	return err
 }
 
 func unixFromTime(value string) int64 {
@@ -307,7 +403,13 @@ func (a *app) captureAccountUpstreamStateWithPolicy(accountID int64, response *h
 		logDatabaseWriteError("record valid upstream account", err)
 	}
 	if quota, ok := quotaFromHeaders(response.Header); ok {
-		_ = a.persistAccountQuota(accountID, quota, false)
+		if err := a.persistAccountQuota(accountID, quota, false); err != nil {
+			logDatabaseWriteError("record account quota headers", err)
+		} else if strings.TrimSpace(response.Header.Get("anthropic-ratelimit-unified-5h-utilization")) != "" && quota.FiveHour.ResetsAt != "" {
+			if err := a.enforceAccountFiveHourThreshold(accountID, quota.FiveHour, policy); err != nil {
+				logDatabaseWriteError("enforce account 5h quota threshold", err)
+			}
+		}
 	}
 	a.captureAccountRateLimitBudget(accountID, response.Header)
 	resetAt, window, ok := sub2service.ResolveCCMaxCompatibilityCooldownWindow(response.StatusCode, response.Header)
@@ -619,7 +721,7 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 	// event and must not extend the cooldown or manufacture extra strikes.
 	var existingReason string
 	var existingReset sql.NullString
-	if err := a.db.QueryRow(`SELECT rate_limit_reason, rate_limit_reset_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&existingReason, &existingReset); err == nil && existingReset.Valid && (existingReason == "429_cooling" || existingReason == "quota_exhausted") {
+	if err := a.db.QueryRow(`SELECT rate_limit_reason, rate_limit_reset_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&existingReason, &existingReset); err == nil && existingReset.Valid && (existingReason == "429_cooling" || existingReason == "quota_exhausted" || existingReason == "quota_threshold") {
 		if parsed, parseErr := parseQuotaResetTime(existingReset.String); parseErr && parsed.After(now) {
 			return parsed, existingReason == "429_cooling"
 		}
@@ -900,8 +1002,8 @@ func (a *app) clearAccount429State(accountID int64) (bool, error) {
 		return false, sql.ErrNoRows
 	}
 	result, err := tx.Exec(`UPDATE accounts SET
-		rate_limit_reset_at = CASE WHEN rate_limit_reason IN ('429_cooling', 'quota_exhausted') THEN NULL ELSE rate_limit_reset_at END,
-		rate_limit_window = CASE WHEN rate_limit_reason IN ('429_cooling', 'quota_exhausted') THEN '' ELSE rate_limit_window END,
+		rate_limit_reset_at = CASE WHEN rate_limit_reason IN ('429_cooling', 'quota_exhausted', 'quota_threshold') THEN NULL ELSE rate_limit_reset_at END,
+		rate_limit_window = CASE WHEN rate_limit_reason IN ('429_cooling', 'quota_exhausted', 'quota_threshold') THEN '' ELSE rate_limit_window END,
 		error_message = CASE WHEN rate_limit_reason != '' AND auth_error = '' THEN '' ELSE error_message END,
 		rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
 		rate_limit_downweight_until = NULL, quota_refreshed_at = `+nowSQL+`, updated_at = `+nowSQL+`
@@ -1013,7 +1115,7 @@ func (a *app) sweepAccountRateLimitState() {
 		consecutive_429 = CASE WHEN rate_limit_downweight_until > ` + nowSQL + ` THEN consecutive_429 ELSE 0 END,
 		last_429_at = CASE WHEN rate_limit_downweight_until > ` + nowSQL + ` THEN last_429_at ELSE NULL END,
 		quota_refreshed_at = CASE
-			WHEN rate_limit_reason = 'quota_exhausted' AND rate_limit_window = '5h' THEN COALESCE(quota_5h_reset_at, ` + nowSQL + `)
+			WHEN rate_limit_reason IN ('quota_exhausted', 'quota_threshold') AND rate_limit_window = '5h' THEN COALESCE(quota_5h_reset_at, ` + nowSQL + `)
 			WHEN rate_limit_reason = 'quota_exhausted' AND rate_limit_window = '7d' THEN COALESCE(quota_7d_reset_at, ` + nowSQL + `)
 			WHEN rate_limit_reason = 'quota_exhausted' THEN ` + nowSQL + `
 			ELSE quota_refreshed_at
@@ -1024,7 +1126,7 @@ func (a *app) sweepAccountRateLimitState() {
 			ELSE ''
 		END,
 		updated_at = ` + nowSQL + `
-		WHERE rate_limit_reason IN ('429_cooling', 'quota_exhausted')
+		WHERE rate_limit_reason IN ('429_cooling', 'quota_exhausted', 'quota_threshold')
 		AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at <= ` + nowSQL)
 	logDatabaseWriteError("release expired account rate-limit cooldowns", err)
 	// Remove an expired priority penalty. Explicit quota refreshes are stamped

@@ -107,10 +107,11 @@ func (c *gatewayHedgeController) group(groupID string) *gatewayHedgeGroupState {
 }
 
 type gatewayHedgeAttempt struct {
-	account  gatewayAccount
-	prepared claudePreparedRequest
-	response *http.Response
-	started  time.Time
+	account             gatewayAccount
+	prepared            claudePreparedRequest
+	response            *http.Response
+	started             time.Time
+	stopITPMReservation func()
 }
 
 type gatewayHedgeTerminal struct {
@@ -132,14 +133,15 @@ type gatewayReplayReadCloser struct {
 	io.Closer
 }
 
-func (a *app) handleGatewayStreamHedge(w http.ResponseWriter, r *http.Request, key gatewayKey, body []byte, model, session string, excluded map[int64]bool, adaptive bool) (bool, *gatewayUpstreamFailure, error) {
-	primary, err := a.acquireGatewayAccountWithPolicy(key, "", model, excluded, adaptive)
+func (a *app) handleGatewayStreamHedge(w http.ResponseWriter, r *http.Request, key gatewayKey, body []byte, model, session string, excluded map[int64]bool, adaptive bool, demand gatewayDispatchDemand) (bool, *gatewayUpstreamFailure, error) {
+	primary, err := a.acquireGatewayAccountWithPolicyDemand(key, "", model, excluded, adaptive, demand)
 	if err != nil {
 		return false, nil, err
 	}
 	excluded[primary.ID] = true
 	if accountRequestPassthrough(primary) {
 		a.releaseGatewayAccount(primary.ID)
+		a.releaseGatewayITPM(primary)
 		delete(excluded, primary.ID)
 		return false, nil, nil
 	}
@@ -177,7 +179,7 @@ func (a *app) handleGatewayStreamHedge(w http.ResponseWriter, r *http.Request, k
 			return false
 		}
 		secondStarted = true
-		secondary, acquireErr := a.acquireGatewayAccountWithPolicy(key, "", model, excluded, adaptive)
+		secondary, acquireErr := a.acquireGatewayAccountWithPolicyDemand(key, "", model, excluded, adaptive, demand)
 		if acquireErr != nil {
 			lastErr = acquireErr
 			return false
@@ -185,6 +187,7 @@ func (a *app) handleGatewayStreamHedge(w http.ResponseWriter, r *http.Request, k
 		excluded[secondary.ID] = true
 		if accountRequestPassthrough(secondary) {
 			a.releaseGatewayAccount(secondary.ID)
+			a.releaseGatewayITPM(secondary)
 			delete(excluded, secondary.ID)
 			return false
 		}
@@ -274,6 +277,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	queueRelease := func() {}
 	var response *http.Response
 	keepResponse := false
+	stopITPMReservation := a.keepGatewayITPMReservation(account)
 	defer func() {
 		queueRelease()
 		if !keepResponse {
@@ -281,6 +285,8 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 				_ = response.Body.Close()
 			}
 			a.releaseGatewayAccount(account.ID)
+			a.releaseGatewayITPM(account)
+			stopITPMReservation()
 		}
 	}()
 
@@ -373,7 +379,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	}
 	response.Body = &gatewayReplayReadCloser{Reader: io.MultiReader(bytes.NewReader(buffered), reader), Closer: response.Body}
 	keepResponse = true
-	return gatewayHedgeOutcome{attempt: &gatewayHedgeAttempt{account: account, prepared: prepared, response: response, started: started}}
+	return gatewayHedgeOutcome{attempt: &gatewayHedgeAttempt{account: account, prepared: prepared, response: response, started: started, stopITPMReservation: stopITPMReservation}}
 }
 
 func readGatewayStreamBootstrap(body io.Reader) ([]byte, *bufio.Reader, error) {
@@ -418,8 +424,10 @@ func (a *app) drainGatewayHedgeOutcomes(results <-chan gatewayHedgeOutcome, coun
 		for i := 0; i < count; i++ {
 			outcome := <-results
 			if outcome.attempt != nil {
+				outcome.attempt.stopITPMReservation()
 				_ = outcome.attempt.response.Body.Close()
 				a.releaseGatewayAccount(outcome.attempt.account.ID)
+				a.releaseGatewayITPM(outcome.attempt.account)
 			}
 		}
 	}()
@@ -428,6 +436,7 @@ func (a *app) drainGatewayHedgeOutcomes(results <-chan gatewayHedgeOutcome, coun
 
 func (a *app) forwardGatewayHedgeWinner(w http.ResponseWriter, r *http.Request, key gatewayKey, model string, attempt *gatewayHedgeAttempt, drained <-chan struct{}) {
 	defer a.releaseGatewayAccount(attempt.account.ID)
+	defer attempt.stopITPMReservation()
 	defer attempt.response.Body.Close()
 	attributeGatewayErrorAccount(w, attempt.account.ID)
 	usage, forwardErr := forwardGatewayResponse(w, attempt.response, true, attempt.account, key.GroupID, attempt.prepared)
@@ -436,12 +445,18 @@ func (a *app) forwardGatewayHedgeWinner(w http.ResponseWriter, r *http.Request, 
 	case <-time.After(2 * time.Second):
 	}
 	var downgradeErr *gatewayModelDowngradeError
+	usageCommitted := false
 	if errors.As(forwardErr, &downgradeErr) {
 		if usage.hasUsage() {
-			a.recordGatewayRejectedDowngradeUsage(r.Context(), key, attempt.account, downgradeErr.actual, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
+			usageCommitted = a.recordGatewayRejectedDowngradeUsage(r.Context(), key, attempt.account, downgradeErr.actual, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
 		}
 	} else if forwardErr == nil || usage.hasUsage() {
-		a.recordGatewayUsage(r.Context(), key, attempt.account, model, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
+		usageCommitted = a.recordGatewayUsage(r.Context(), key, attempt.account, model, gatewayRecordedStream(r.Context(), true), attempt.response.Header.Get("request-id"), usage, attempt.started)
+	}
+	if usageCommitted {
+		a.releaseGatewayITPM(attempt.account)
+	} else {
+		a.settleGatewayITPM(attempt.account, usage)
 	}
 	if errors.As(forwardErr, &downgradeErr) && !downgradeErr.committed {
 		copyGatewayRequestID(w.Header(), attempt.response.Header)

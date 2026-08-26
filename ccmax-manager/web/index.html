@@ -283,6 +283,27 @@
                 ><span>B 组</span>
               </button>
             </div>
+            <label class="quota-utilization-filter"
+              ><span>5h 使用率 ≥</span
+              ><span class="percent-input"
+                ><input
+                  id="account-min-5h-utilization"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  inputmode="decimal"
+                  placeholder="不限"
+                  aria-label="最低 5h 使用率" /><b>%</b></span
+            ></label>
+            <label class="threshold-status-filter"
+              ><span>提前冷却</span
+              ><select id="account-quota-threshold-filter" aria-label="按 5h 提前冷却状态筛选">
+                <option value="">全部</option>
+                <option value="enabled">已开启</option>
+                <option value="reached">已达到阈值</option>
+              </select></label
+            >
             <label class="date-filter"
               ><span>开始</span><input type="datetime-local" step="60" id="account-from" /></label
             ><label class="date-filter"
@@ -324,13 +345,15 @@
                   /><i></i>
                 </label>
                 <button
-                  class="icon-button compact"
+                  class="button secondary small account-refresh-button"
                   id="refresh-accounts"
                   type="button"
                   title="检测当前页账号存活状态并刷新列表"
                   aria-label="检测当前页账号存活状态并刷新列表"
                 >
-                  <i data-lucide="refresh-cw"></i>
+                  <i data-lucide="refresh-cw"></i><span id="refresh-accounts-label"
+                    >更新状态</span
+                  >
                 </button>
                 <button
                   class="button secondary small"
@@ -1375,6 +1398,25 @@
             ><small>单独绑定时优先于分组策略</small></label
           >
           <div class="form-section span-2">
+            <strong>5h 配额保护</strong><span>达到账号阈值后提前停止调度</span>
+          </div>
+          <label class="toggle-field"
+            ><span>启用提前冷却</span
+            ><input type="checkbox" id="account-quota-threshold-enabled" /><i></i></label
+          ><label class="quota-threshold-value-field"
+            ><span>5h 使用率阈值</span
+            ><span class="percent-input"
+              ><input
+                id="account-quota-threshold-percent"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                value="80"
+                required /><b>%</b></span
+            ><small>达到阈值即冷却至 5h 刷新时间，并沿用所属分组的刷新错峰配置</small></label
+          >
+          <div class="form-section span-2">
             <strong>请求处理</strong
             ><span>关闭：Sub2API 原版完整链路；开启：原始请求完整透传</span>
           </div>
@@ -1478,6 +1520,19 @@
             <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="strategy_id" /><span>调度策略</span></label>
             <select class="batch-edit-value" id="batch-edit-strategy"><option value="">跟随分组（解绑）</option></select>
             <small data-batch-edit-hint="strategy_id"></small>
+          </div>
+          <div class="form-section span-2">
+            <strong>5h 配额保护</strong><span>达到账号阈值后提前停止调度</span>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="quota_5h_threshold_enabled" /><span>提前冷却</span></label>
+            <select class="batch-edit-value" id="batch-edit-quota-threshold-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+            <small data-batch-edit-hint="quota_5h_threshold_enabled"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="quota_5h_threshold_percent" /><span>5h 使用率阈值</span></label>
+            <span class="percent-input"><input class="batch-edit-value" id="batch-edit-quota-threshold-percent" type="number" min="1" max="100" step="1" /><b>%</b></span>
+            <small data-batch-edit-hint="quota_5h_threshold_percent"></small>
           </div>
           <div class="form-section span-2">
             <strong>共有配置</strong><span>这些字段可以由多个账号使用相同配置</span>

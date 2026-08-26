@@ -60,14 +60,15 @@ type app struct {
 	// entry only becomes readable once the first response starts streaming, so
 	// concurrent requests sharing a prefix each pay the full cache-creation
 	// price and none of them can read what the others are still writing.
-	coldCacheFlights coldCacheFlightTable
-	streamHedges     *gatewayHedgeController
-	redis            *redisRuntime
-	batchAuthMu      sync.Mutex
-	reserveMu        sync.Mutex
-	errorPruneMu     sync.Mutex
-	lastErrorPrune   time.Time
-	errorRetention   int
+	coldCacheFlights      coldCacheFlightTable
+	streamHedges          *gatewayHedgeController
+	redis                 *redisRuntime
+	localITPMReservations localITPMReservationStore
+	batchAuthMu           sync.Mutex
+	reserveMu             sync.Mutex
+	errorPruneMu          sync.Mutex
+	lastErrorPrune        time.Time
+	errorRetention        int
 }
 
 type group struct {
@@ -163,101 +164,105 @@ type groupInput struct {
 }
 
 type account struct {
-	ID                   int64          `json:"id"`
-	Name                 string         `json:"name"`
-	Platform             string         `json:"platform"`
-	AuthType             string         `json:"auth_type"`
-	CredentialHint       string         `json:"credential_hint"`
-	SourceSKHint         string         `json:"source_sk_hint"`
-	HasCredentials       bool           `json:"has_credentials"`
-	Credentials          map[string]any `json:"credentials,omitempty"`
-	Extra                map[string]any `json:"extra"`
-	Status               string         `json:"status"`
-	Schedulable          bool           `json:"schedulable"`
-	Concurrency          int            `json:"concurrency"`
-	Priority             int            `json:"priority"`
-	RateMultiplier       float64        `json:"rate_multiplier"`
-	Notes                string         `json:"notes"`
-	ErrorMessage         string         `json:"error_message"`
-	LastUsedAt           string         `json:"last_used_at"`
-	ExpiresAt            string         `json:"expires_at"`
-	RateLimitResetAt     string         `json:"rate_limit_reset_at"`
-	RateLimitWindow      string         `json:"rate_limit_window"`
-	RateLimitReason      string         `json:"rate_limit_reason"`
-	Consecutive429       int            `json:"consecutive_429"`
-	Last429At            string         `json:"last_429_at"`
-	DownweightUntil      string         `json:"rate_limit_downweight_until"`
-	QuotaRefreshedAt     string         `json:"quota_refreshed_at"`
-	LimitWindow          string         `json:"limit_window"`
-	GroupIDs             []string       `json:"group_ids"`
-	CreatedAt            string         `json:"created_at"`
-	UpdatedAt            string         `json:"updated_at"`
-	ProxyPoolID          *int64         `json:"proxy_pool_id"`
-	ProxyPoolName        string         `json:"proxy_pool_name"`
-	ProxyID              *int64         `json:"proxy_id"`
-	ProxyName            string         `json:"proxy_name"`
-	ProxyHint            string         `json:"proxy_hint"`
-	ProxyIP              string         `json:"proxy_ip"`
-	AutoProxy            bool           `json:"auto_proxy"`
-	BaseRPM              int            `json:"base_rpm"`
-	RPMStrategy          string         `json:"rpm_strategy"`
-	RPMStickyBuffer      int            `json:"rpm_sticky_buffer"`
-	UserMsgQueueMode     string         `json:"user_msg_queue_mode"`
-	StrategyID           *int64         `json:"strategy_id"`
-	AuthStatus           string         `json:"auth_status"`
-	AuthError            string         `json:"auth_error"`
-	AuthCheckedAt        string         `json:"auth_checked_at"`
-	TokenExpiresAt       string         `json:"token_expires_at"`
-	Quota5H              float64        `json:"quota_5h_utilization"`
-	Quota5HResetAt       string         `json:"quota_5h_reset_at"`
-	Quota7D              float64        `json:"quota_7d_utilization"`
-	Quota7DResetAt       string         `json:"quota_7d_reset_at"`
-	QuotaSampledAt       string         `json:"quota_sampled_at"`
-	SubscriptionType     string         `json:"subscription_type"`
-	RateLimitTier        string         `json:"rate_limit_tier"`
-	AccountPrice         float64        `json:"account_price"`
-	OnboardedAt          string         `json:"onboarded_at"`
-	ReauthorizedAt       string         `json:"reauthorized_at"`
-	ReauthorizationCount int            `json:"reauthorization_count"`
-	InvalidatedAt        string         `json:"invalidated_at"`
-	ArchivedAt           string         `json:"archived_at"`
-	SurvivalTotal        int64          `json:"survival_seconds_total"`
-	SurvivalSeconds      int64          `json:"survival_seconds"`
-	RequestCount         int64          `json:"request_count"`
-	InputTokens          int64          `json:"input_tokens"`
-	OutputTokens         int64          `json:"output_tokens"`
-	TotalBilledCost      float64        `json:"total_billed_cost"`
-	TotalActualCost      float64        `json:"total_actual_cost"`
-	ProxyStatus          string         `json:"proxy_status"`
-	DispatchStatus       string         `json:"dispatch_status"`
+	ID                      int64          `json:"id"`
+	Name                    string         `json:"name"`
+	Platform                string         `json:"platform"`
+	AuthType                string         `json:"auth_type"`
+	CredentialHint          string         `json:"credential_hint"`
+	SourceSKHint            string         `json:"source_sk_hint"`
+	HasCredentials          bool           `json:"has_credentials"`
+	Credentials             map[string]any `json:"credentials,omitempty"`
+	Extra                   map[string]any `json:"extra"`
+	Status                  string         `json:"status"`
+	Schedulable             bool           `json:"schedulable"`
+	Concurrency             int            `json:"concurrency"`
+	Priority                int            `json:"priority"`
+	RateMultiplier          float64        `json:"rate_multiplier"`
+	Notes                   string         `json:"notes"`
+	ErrorMessage            string         `json:"error_message"`
+	LastUsedAt              string         `json:"last_used_at"`
+	ExpiresAt               string         `json:"expires_at"`
+	RateLimitResetAt        string         `json:"rate_limit_reset_at"`
+	RateLimitWindow         string         `json:"rate_limit_window"`
+	RateLimitReason         string         `json:"rate_limit_reason"`
+	Consecutive429          int            `json:"consecutive_429"`
+	Last429At               string         `json:"last_429_at"`
+	DownweightUntil         string         `json:"rate_limit_downweight_until"`
+	QuotaRefreshedAt        string         `json:"quota_refreshed_at"`
+	LimitWindow             string         `json:"limit_window"`
+	GroupIDs                []string       `json:"group_ids"`
+	CreatedAt               string         `json:"created_at"`
+	UpdatedAt               string         `json:"updated_at"`
+	ProxyPoolID             *int64         `json:"proxy_pool_id"`
+	ProxyPoolName           string         `json:"proxy_pool_name"`
+	ProxyID                 *int64         `json:"proxy_id"`
+	ProxyName               string         `json:"proxy_name"`
+	ProxyHint               string         `json:"proxy_hint"`
+	ProxyIP                 string         `json:"proxy_ip"`
+	AutoProxy               bool           `json:"auto_proxy"`
+	BaseRPM                 int            `json:"base_rpm"`
+	RPMStrategy             string         `json:"rpm_strategy"`
+	RPMStickyBuffer         int            `json:"rpm_sticky_buffer"`
+	UserMsgQueueMode        string         `json:"user_msg_queue_mode"`
+	StrategyID              *int64         `json:"strategy_id"`
+	AuthStatus              string         `json:"auth_status"`
+	AuthError               string         `json:"auth_error"`
+	AuthCheckedAt           string         `json:"auth_checked_at"`
+	TokenExpiresAt          string         `json:"token_expires_at"`
+	Quota5H                 float64        `json:"quota_5h_utilization"`
+	Quota5HResetAt          string         `json:"quota_5h_reset_at"`
+	Quota5HThresholdEnabled bool           `json:"quota_5h_threshold_enabled"`
+	Quota5HThresholdPercent int            `json:"quota_5h_threshold_percent"`
+	Quota7D                 float64        `json:"quota_7d_utilization"`
+	Quota7DResetAt          string         `json:"quota_7d_reset_at"`
+	QuotaSampledAt          string         `json:"quota_sampled_at"`
+	SubscriptionType        string         `json:"subscription_type"`
+	RateLimitTier           string         `json:"rate_limit_tier"`
+	AccountPrice            float64        `json:"account_price"`
+	OnboardedAt             string         `json:"onboarded_at"`
+	ReauthorizedAt          string         `json:"reauthorized_at"`
+	ReauthorizationCount    int            `json:"reauthorization_count"`
+	InvalidatedAt           string         `json:"invalidated_at"`
+	ArchivedAt              string         `json:"archived_at"`
+	SurvivalTotal           int64          `json:"survival_seconds_total"`
+	SurvivalSeconds         int64          `json:"survival_seconds"`
+	RequestCount            int64          `json:"request_count"`
+	InputTokens             int64          `json:"input_tokens"`
+	OutputTokens            int64          `json:"output_tokens"`
+	TotalBilledCost         float64        `json:"total_billed_cost"`
+	TotalActualCost         float64        `json:"total_actual_cost"`
+	ProxyStatus             string         `json:"proxy_status"`
+	DispatchStatus          string         `json:"dispatch_status"`
 }
 
 type accountInput struct {
-	Name             string          `json:"name"`
-	Platform         string          `json:"platform"`
-	AuthType         string          `json:"auth_type"`
-	SessionKey       string          `json:"session_key"`
-	Credentials      json.RawMessage `json:"credentials"`
-	Extra            json.RawMessage `json:"extra"`
-	Status           string          `json:"status"`
-	Schedulable      *bool           `json:"schedulable"`
-	Concurrency      int             `json:"concurrency"`
-	Priority         int             `json:"priority"`
-	RateMultiplier   float64         `json:"rate_multiplier"`
-	Notes            string          `json:"notes"`
-	ErrorMessage     string          `json:"error_message"`
-	ExpiresAt        string          `json:"expires_at"`
-	RateLimitResetAt string          `json:"rate_limit_reset_at"`
-	GroupIDs         []string        `json:"group_ids"`
-	ProxyPoolID      *int64          `json:"proxy_pool_id"`
-	ProxyID          *int64          `json:"proxy_id"`
-	ProxyText        string          `json:"proxy_text"`
-	AutoProxy        bool            `json:"auto_proxy"`
-	BaseRPM          int             `json:"base_rpm"`
-	RPMStrategy      string          `json:"rpm_strategy"`
-	RPMStickyBuffer  int             `json:"rpm_sticky_buffer"`
-	UserMsgQueueMode string          `json:"user_msg_queue_mode"`
-	AccountPrice     float64         `json:"account_price"`
+	Name                    string          `json:"name"`
+	Platform                string          `json:"platform"`
+	AuthType                string          `json:"auth_type"`
+	SessionKey              string          `json:"session_key"`
+	Credentials             json.RawMessage `json:"credentials"`
+	Extra                   json.RawMessage `json:"extra"`
+	Status                  string          `json:"status"`
+	Schedulable             *bool           `json:"schedulable"`
+	Concurrency             int             `json:"concurrency"`
+	Priority                int             `json:"priority"`
+	RateMultiplier          float64         `json:"rate_multiplier"`
+	Notes                   string          `json:"notes"`
+	ErrorMessage            string          `json:"error_message"`
+	ExpiresAt               string          `json:"expires_at"`
+	RateLimitResetAt        string          `json:"rate_limit_reset_at"`
+	GroupIDs                []string        `json:"group_ids"`
+	ProxyPoolID             *int64          `json:"proxy_pool_id"`
+	ProxyID                 *int64          `json:"proxy_id"`
+	ProxyText               string          `json:"proxy_text"`
+	AutoProxy               bool            `json:"auto_proxy"`
+	BaseRPM                 int             `json:"base_rpm"`
+	RPMStrategy             string          `json:"rpm_strategy"`
+	RPMStickyBuffer         int             `json:"rpm_sticky_buffer"`
+	UserMsgQueueMode        string          `json:"user_msg_queue_mode"`
+	AccountPrice            float64         `json:"account_price"`
+	Quota5HThresholdEnabled *bool           `json:"quota_5h_threshold_enabled"`
+	Quota5HThresholdPercent *int            `json:"quota_5h_threshold_percent"`
 	// StrategyID binds the account to a dispatch strategy. nil keeps the
 	// current binding (old clients), 0 clears it, >0 sets it.
 	StrategyID *int64 `json:"strategy_id"`
@@ -273,17 +278,19 @@ type accountBatchScheduleInput struct {
 }
 
 type accountBatchUpdateInput struct {
-	IDs              []int64   `json:"ids"`
-	Concurrency      *int      `json:"concurrency"`
-	Priority         *int      `json:"priority"`
-	RateMultiplier   *float64  `json:"rate_multiplier"`
-	AccountPrice     *float64  `json:"account_price"`
-	BaseRPM          *int      `json:"base_rpm"`
-	RPMStrategy      *string   `json:"rpm_strategy"`
-	RPMStickyBuffer  *int      `json:"rpm_sticky_buffer"`
-	UserMsgQueueMode *string   `json:"user_msg_queue_mode"`
-	StrategyID       *int64    `json:"strategy_id"`
-	GroupIDs         *[]string `json:"group_ids"`
+	IDs                     []int64   `json:"ids"`
+	Concurrency             *int      `json:"concurrency"`
+	Priority                *int      `json:"priority"`
+	RateMultiplier          *float64  `json:"rate_multiplier"`
+	AccountPrice            *float64  `json:"account_price"`
+	BaseRPM                 *int      `json:"base_rpm"`
+	RPMStrategy             *string   `json:"rpm_strategy"`
+	RPMStickyBuffer         *int      `json:"rpm_sticky_buffer"`
+	UserMsgQueueMode        *string   `json:"user_msg_queue_mode"`
+	StrategyID              *int64    `json:"strategy_id"`
+	GroupIDs                *[]string `json:"group_ids"`
+	Quota5HThresholdEnabled *bool     `json:"quota_5h_threshold_enabled"`
+	Quota5HThresholdPercent *int      `json:"quota_5h_threshold_percent"`
 }
 
 type purpose struct {
@@ -628,6 +635,8 @@ func (a *app) migrate() error {
 			last_429_at TEXT,
 			rate_limit_downweight_until TEXT,
 			quota_refreshed_at TEXT,
+			quota_5h_threshold_enabled INTEGER NOT NULL DEFAULT 0,
+			quota_5h_threshold_percent INTEGER NOT NULL DEFAULT 80 CHECK (quota_5h_threshold_percent BETWEEN 1 AND 100),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
@@ -1574,7 +1583,8 @@ const accountSelectBase = `SELECT a.id, a.name, a.platform, a.auth_type, a.crede
 	COALESCE(NULLIF(px.exit_ip, ''), NULLIF(archived_px.exit_ip, ''), px.host, archived_px.host, ''),
 	a.auto_proxy, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.strategy_id,
 	a.auth_status, a.auth_error, a.auth_checked_at, a.token_expires_at,
-	a.quota_5h_utilization, a.quota_5h_reset_at, a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_sampled_at,
+	a.quota_5h_utilization, a.quota_5h_reset_at, a.quota_5h_threshold_enabled, a.quota_5h_threshold_percent,
+	a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_sampled_at,
 	a.subscription_type, a.rate_limit_tier, a.account_price, a.onboarded_at, a.reauthorized_at, a.reauthorization_count, a.invalidated_at, a.archived_at, a.survival_seconds_total, COALESCE(px.status, archived_px.status, ''), `
 
 const accountUsageSummaryFields = `COALESCE(aut.request_count, 0), COALESCE(aut.input_tokens, 0),
@@ -1589,16 +1599,17 @@ const accountListSelect = accountSelect
 
 func scanAccount(row scanner, reveal bool) (account, error) {
 	var item account
-	var schedulable, autoProxy int
+	var schedulable, autoProxy, quota5HThresholdEnabled int
 	var proxyPoolID, proxyID, strategyID sql.NullInt64
 	var lastUsed, expires, rateLimit, last429, downweightUntil, quotaRefreshed, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, reauthorized, invalidated, archived sql.NullString
 	var credentialsJSON, extraJSON string
-	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &reauthorized, &item.ReauthorizationCount, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
+	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &quota5HThresholdEnabled, &item.Quota5HThresholdPercent, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &reauthorized, &item.ReauthorizationCount, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
 	if err != nil {
 		return item, err
 	}
 	item.Schedulable = schedulable == 1
 	item.AutoProxy = autoProxy == 1
+	item.Quota5HThresholdEnabled = quota5HThresholdEnabled == 1
 	item.ProxyPoolID = nullIntPointer(proxyPoolID)
 	item.ProxyID = nullIntPointer(proxyID)
 	item.StrategyID = nullIntPointer(strategyID)
@@ -1625,6 +1636,29 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 		item.Credentials = decodeObject(credentialsJSON)
 	}
 	return item, nil
+}
+
+func accountQuotaFilterConditions(r *http.Request, alias string) ([]string, []any, error) {
+	conditions := []string{}
+	args := []any{}
+	if raw := strings.TrimSpace(r.URL.Query().Get("min_5h_utilization")); raw != "" {
+		minimum, err := strconv.ParseFloat(raw, 64)
+		if err != nil || minimum < 0 || minimum > 100 {
+			return nil, nil, errors.New("min_5h_utilization must be between 0 and 100")
+		}
+		conditions = append(conditions, alias+".quota_5h_utilization >= ?")
+		args = append(args, minimum)
+	}
+	switch status := strings.TrimSpace(r.URL.Query().Get("quota_5h_threshold")); status {
+	case "":
+	case "enabled":
+		conditions = append(conditions, alias+".quota_5h_threshold_enabled = 1")
+	case "reached":
+		conditions = append(conditions, alias+".quota_5h_threshold_enabled = 1 AND "+alias+".quota_5h_utilization >= "+alias+".quota_5h_threshold_percent")
+	default:
+		return nil, nil, errors.New("quota_5h_threshold must be enabled or reached")
+	}
+	return conditions, args, nil
 }
 
 func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
@@ -1659,6 +1693,15 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		term := "%" + search + "%"
 		args = append(args, term, term, term, term, term, term, term, term)
 	}
+	quotaConditions, quotaArgs, err := accountQuotaFilterConditions(r, "a")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for _, condition := range quotaConditions {
+		where += ` AND (` + condition + `)`
+	}
+	args = append(args, quotaArgs...)
 	baseWhere := where
 	baseArgs := append([]any(nil), args...)
 	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" {
@@ -1855,7 +1898,7 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, account_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, strategyValue, input.AccountPrice)
+	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, account_price, quota_5h_threshold_enabled, quota_5h_threshold_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, strategyValue, input.AccountPrice, boolInt(boolPointerValue(input.Quota5HThresholdEnabled, false)), intPointerValue(input.Quota5HThresholdPercent, 80))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1994,18 +2037,26 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var quota5HThresholdEnabled, quota5HThresholdPercent any
+	if input.Quota5HThresholdEnabled != nil {
+		quota5HThresholdEnabled = boolInt(*input.Quota5HThresholdEnabled)
+	}
+	if input.Quota5HThresholdPercent != nil {
+		quota5HThresholdPercent = *input.Quota5HThresholdPercent
+	}
 	result, err := tx.Exec(`UPDATE accounts SET name = ?, platform = ?, auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, extra_json = ?, status = ?, schedulable = ?, concurrency = ?, priority = ?, rate_multiplier = ?, notes = ?, error_message = ?, expires_at = NULLIF(?, ''), rate_limit_reset_at = NULLIF(?, ''),
 		rate_limit_window = CASE WHEN NULLIF(?, '') IS NULL THEN '' ELSE rate_limit_window END,
 		rate_limit_reason = CASE WHEN NULLIF(?, '') IS NULL THEN '' ELSE rate_limit_reason END,
 		consecutive_429 = CASE WHEN NULLIF(?, '') IS NULL THEN 0 ELSE consecutive_429 END,
 		last_429_at = CASE WHEN NULLIF(?, '') IS NULL THEN NULL ELSE last_429_at END,
-		proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?,
+		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt,
 		// Clearing the cooldown field is the administrator's manual recovery, so
 		// the automatic 429 bookkeeping has to go with it. Otherwise the account
 		// keeps its strikes and the next single 429 re-parks it.
 		input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt,
-		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, id, leaseOwner)
+		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, id, leaseOwner)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2055,6 +2106,10 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
+	if err := a.enforceStoredAccountFiveHourThreshold(id, rateLimitPolicy{}); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	item, err := a.getAccount(id, false)
 	if err != nil {
 		writeDBError(w, err)
@@ -2097,6 +2152,9 @@ func normalizeAccountInput(input *accountInput, existingCredentials, existingExt
 	input.GroupIDs = uniqueGroups(input.GroupIDs)
 	if input.Name == "" || input.Concurrency <= 0 || input.RateMultiplier < 0 || input.AccountPrice < 0 || input.BaseRPM < 0 || input.BaseRPM > 10000 || input.RPMStickyBuffer < 0 {
 		return "", "", errors.New("invalid account fields")
+	}
+	if input.Quota5HThresholdPercent != nil && (*input.Quota5HThresholdPercent < 1 || *input.Quota5HThresholdPercent > 100) {
+		return "", "", errors.New("5h quota threshold must be between 1 and 100")
 	}
 	if input.Status != "active" && input.Status != "error" && input.Status != "disabled" {
 		return "", "", errors.New("invalid account status")
@@ -2574,6 +2632,12 @@ func (a *app) handleAccountBatchUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.StrategyID != nil {
 		appendUpdate("strategy_id", strategyValue)
 	}
+	if input.Quota5HThresholdEnabled != nil {
+		appendUpdate("quota_5h_threshold_enabled", boolInt(*input.Quota5HThresholdEnabled))
+	}
+	if input.Quota5HThresholdPercent != nil {
+		appendUpdate("quota_5h_threshold_percent", *input.Quota5HThresholdPercent)
+	}
 	setParts = append(setParts, "updated_at = "+nowSQL)
 	accountIDs := make([]any, 0, len(accounts))
 	for _, item := range accounts {
@@ -2628,11 +2692,18 @@ func (a *app) handleAccountBatchUpdate(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
+	if input.Quota5HThresholdEnabled != nil || input.Quota5HThresholdPercent != nil {
+		for _, item := range accounts {
+			if err := a.enforceStoredAccountFiveHourThreshold(item.id, rateLimitPolicy{}); err != nil {
+				logDatabaseWriteError("enforce batch account 5h quota threshold", err)
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]int{"matched": len(accounts), "updated": len(accounts), "skipped": len(ids) - len(accounts)})
 }
 
 func normalizeAccountBatchUpdate(input *accountBatchUpdateInput) error {
-	if input.Concurrency == nil && input.Priority == nil && input.RateMultiplier == nil && input.AccountPrice == nil && input.BaseRPM == nil && input.RPMStrategy == nil && input.RPMStickyBuffer == nil && input.UserMsgQueueMode == nil && input.StrategyID == nil && input.GroupIDs == nil {
+	if input.Concurrency == nil && input.Priority == nil && input.RateMultiplier == nil && input.AccountPrice == nil && input.BaseRPM == nil && input.RPMStrategy == nil && input.RPMStickyBuffer == nil && input.UserMsgQueueMode == nil && input.StrategyID == nil && input.GroupIDs == nil && input.Quota5HThresholdEnabled == nil && input.Quota5HThresholdPercent == nil {
 		return errors.New("select at least one field to update")
 	}
 	if input.Concurrency != nil && *input.Concurrency <= 0 {
@@ -2649,6 +2720,9 @@ func normalizeAccountBatchUpdate(input *accountBatchUpdateInput) error {
 	}
 	if input.RPMStickyBuffer != nil && *input.RPMStickyBuffer < 0 {
 		return errors.New("RPM sticky buffer cannot be negative")
+	}
+	if input.Quota5HThresholdPercent != nil && (*input.Quota5HThresholdPercent < 1 || *input.Quota5HThresholdPercent > 100) {
+		return errors.New("5h quota threshold must be between 1 and 100")
 	}
 	if input.RPMStrategy != nil {
 		value := strings.TrimSpace(*input.RPMStrategy)

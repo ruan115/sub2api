@@ -96,6 +96,12 @@ type gatewayAccount struct {
 	// RPMReserved is true when the RPM event was already inserted inside the
 	// selection transaction, so the caller must not record it again.
 	RPMReserved bool
+	// ITPMReservationID tracks the request's cross-process uncached-input
+	// reservation. It is released on every failure path and only after actual
+	// usage has been committed on success.
+	ITPMReservationID string
+	EstimatedITPM     int64
+	ITPMExclusive     bool
 }
 
 type messageEnvelope struct {
@@ -304,11 +310,12 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		AnthropicBeta: key.AnthropicBetaPassthrough,
 	}))
 	session := sub2service.GenerateCCMaxCompatibilitySessionHash(body, gatewayClientIP(r), r.UserAgent(), key.ID)
+	demand := estimateGatewayDispatchDemand(body, countTokens)
 	excluded := map[int64]bool{}
 	var lastFailure *gatewayUpstreamFailure
 	var lastDispatchError error
-	if !key.RPMDispatchEnabled && (key.StreamHedgeEnabled || key.AdaptiveHedgeEnabled) && envelope.Stream && !countTokens && a.gatewayStickyAccountID(key.ID, session) == 0 {
-		handled, hedgeFailure, hedgeErr := a.handleGatewayStreamHedge(w, r, key, body, envelope.Model, session, excluded, key.AdaptiveHedgeEnabled)
+	if !demand.Oversized && !key.RPMDispatchEnabled && (key.StreamHedgeEnabled || key.AdaptiveHedgeEnabled) && envelope.Stream && !countTokens && a.gatewayStickyAccountID(key.ID, session) == 0 {
+		handled, hedgeFailure, hedgeErr := a.handleGatewayStreamHedge(w, r, key, body, envelope.Model, session, excluded, key.AdaptiveHedgeEnabled, demand)
 		if handled {
 			return
 		}
@@ -343,9 +350,9 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			// queueing on, block for the full timeout before failing anyway.
 			break
 		}
-		account, acquireErr := a.acquireGatewayAccountPinned(key, session, envelope.Model, excluded, false, pinLarge && !releaseStickyPin)
-		if acquireErr != nil && !countTokens && errors.Is(acquireErr, errNoGatewayAccountCapacity) && a.gatewayShouldQueue(key) {
-			account, acquireErr = a.waitForGatewayCapacityPinned(r.Context(), key, session, envelope.Model, excluded, acquireErr, pinLarge && !releaseStickyPin)
+		account, acquireErr := a.acquireGatewayAccountPinnedDemand(key, session, envelope.Model, excluded, false, pinLarge && !releaseStickyPin, demand)
+		if acquireErr != nil && !countTokens && errors.Is(acquireErr, errNoGatewayAccountCapacity) && (a.gatewayShouldQueue(key) || gatewayITPMCapacityBlocked(acquireErr)) {
+			account, acquireErr = a.waitForGatewayCapacityPinnedDemand(r.Context(), key, session, envelope.Model, excluded, acquireErr, pinLarge && !releaseStickyPin, demand)
 			if acquireErr != nil && recordGatewayContextFailure(w, r, acquireErr) {
 				return
 			}
@@ -356,12 +363,15 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		excluded[account.ID] = true
 		attributeGatewayErrorAccount(w, account.ID)
+		stopITPMKeepAlive := a.keepGatewayITPMReservation(account)
 		// Only one large request per (account, session) talks to the upstream at
 		// a time. Concurrent siblings would each miss the cache the first one is
 		// still writing and pay a full creation for the same prefix.
 		flightRelease, flightErr := a.acquireColdCacheFlight(r.Context(), account.ID, session, pinLarge)
 		if flightErr != nil {
+			stopITPMKeepAlive()
 			a.releaseGatewayAccount(account.ID)
+			a.releaseGatewayITPM(account)
 			recordGatewayContextFailure(w, r, flightErr)
 			return
 		}
@@ -370,6 +380,13 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		// every path that abandons this attempt, including the success path
 		// after forwarding, so pairing the two keeps the lifetimes identical.
 		releaseAccount := func() {
+			stopITPMKeepAlive()
+			flightRelease()
+			a.releaseGatewayAccount(account.ID)
+			a.releaseGatewayITPM(account)
+		}
+		releaseExecution := func() {
+			stopITPMKeepAlive()
 			flightRelease()
 			a.releaseGatewayAccount(account.ID)
 		}
@@ -533,7 +550,23 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		queueRelease()
 		usage, forwardErr := forwardGatewayResponse(w, response, prepared.Stream && !countTokens, account, key.GroupID, prepared)
 		response.Body.Close()
-		releaseAccount()
+		usageCommitted := false
+		var earlyDowngradeErr *gatewayModelDowngradeError
+		if response.StatusCode >= 200 && response.StatusCode < 300 && !countTokens && (forwardErr == nil || usage.hasUsage()) {
+			if errors.As(forwardErr, &earlyDowngradeErr) {
+				if usage.hasUsage() {
+					usageCommitted = a.recordGatewayRejectedDowngradeUsage(r.Context(), key, account, earlyDowngradeErr.actual, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
+				}
+			} else {
+				usageCommitted = a.recordGatewayUsage(r.Context(), key, account, envelope.Model, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
+			}
+		}
+		releaseExecution()
+		if usageCommitted || countTokens || response.StatusCode < 200 || response.StatusCode >= 300 {
+			a.releaseGatewayITPM(account)
+		} else {
+			a.settleGatewayITPM(account, usage)
+		}
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(forwardErr, &preOutputErr) {
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
@@ -572,9 +605,6 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		var downgradeErr *gatewayModelDowngradeError
 		if errors.As(forwardErr, &downgradeErr) {
-			if usage.hasUsage() {
-				a.recordGatewayRejectedDowngradeUsage(r.Context(), key, account, downgradeErr.actual, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
-			}
 			if !downgradeErr.committed {
 				copyGatewayRequestID(w.Header(), response.Header)
 				writeAnthropicGatewayError(w, http.StatusBadGateway, "api_error", downgradeErr.Error())
@@ -592,9 +622,6 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 				_, writeErr := a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
 				logDatabaseWriteError("update API key last-used time", writeErr)
 				return
-			}
-			if forwardErr == nil || usage.hasUsage() {
-				a.recordGatewayUsage(r.Context(), key, account, envelope.Model, gatewayRecordedStream(r.Context(), prepared.Stream), response.Header.Get("request-id"), usage, started)
 			}
 		}
 		if forwardErr != nil {
@@ -1577,7 +1604,7 @@ func copyGatewayRequestID(target, source http.Header) {
 	}
 }
 
-func (a *app) recordGatewayUsage(ctx context.Context, key gatewayKey, account gatewayAccount, model string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) {
+func (a *app) recordGatewayUsage(ctx context.Context, key gatewayKey, account gatewayAccount, model string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) bool {
 	requestID, clientRequestID, traceID, upstreamRequestID := gatewayCorrelationIDs(ctx, upstreamRequestID)
 	_, _, usageErr := a.recordUsage(usageInput{
 		UserID: key.UserID, APIKeyID: key.ID, RequestID: requestID, ClientRequestID: clientRequestID, TraceID: traceID, UpstreamRequestID: upstreamRequestID,
@@ -1586,13 +1613,14 @@ func (a *app) recordGatewayUsage(ctx context.Context, key gatewayKey, account ga
 		CacheReadTokens: usage.CacheRead, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
 	})
 	if usageErr == nil {
-		return
+		return true
 	}
 	_, writeErr := a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
 	logDatabaseWriteError("update API key last-used fallback", writeErr)
+	return false
 }
 
-func (a *app) recordGatewayRejectedDowngradeUsage(ctx context.Context, key gatewayKey, account gatewayAccount, actualModel string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) {
+func (a *app) recordGatewayRejectedDowngradeUsage(ctx context.Context, key gatewayKey, account gatewayAccount, actualModel string, stream bool, upstreamRequestID string, usage tokenUsage, started time.Time) bool {
 	requestID, clientRequestID, traceID, upstreamRequestID := gatewayCorrelationIDs(ctx, upstreamRequestID)
 	zero := 0.0
 	_, _, usageErr := a.recordUsage(usageInput{
@@ -1602,10 +1630,11 @@ func (a *app) recordGatewayRejectedDowngradeUsage(ctx context.Context, key gatew
 		CacheReadTokens: usage.CacheRead, BilledCostOverride: &zero, Stream: stream, DurationMS: int(time.Since(started).Milliseconds()),
 	})
 	if usageErr == nil {
-		return
+		return true
 	}
 	_, writeErr := a.db.Exec(`UPDATE api_keys SET last_used_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ?`, key.ID)
 	logDatabaseWriteError("update rejected-downgrade API key last-used fallback", writeErr)
+	return false
 }
 
 func bearerOrAPIKey(r *http.Request) string {
@@ -1800,7 +1829,7 @@ func gatewayClientIP(r *http.Request) string {
 }
 
 func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool) (gatewayAccount, error) {
-	return a.acquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, false)
+	return a.acquireGatewayAccountWithPolicyDemand(key, sessionHash, requestedModel, excluded, false, gatewayDispatchDemand{})
 }
 
 // pinSticky turns the session's bound account from a preference into a
@@ -1809,7 +1838,11 @@ func (a *app) acquireGatewayAccount(key gatewayKey, sessionHash, requestedModel 
 // or refuse — than to serve somewhere else. See handleClaudeGateway for where
 // this is decided.
 func (a *app) acquireGatewayAccountPinned(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware, pinSticky bool) (gatewayAccount, error) {
-	account, err := a.tryAcquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, loadAware, pinSticky)
+	return a.acquireGatewayAccountPinnedDemand(key, sessionHash, requestedModel, excluded, loadAware, pinSticky, gatewayDispatchDemand{})
+}
+
+func (a *app) acquireGatewayAccountPinnedDemand(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware, pinSticky bool, demand gatewayDispatchDemand) (gatewayAccount, error) {
+	account, err := a.tryAcquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, loadAware, pinSticky, demand)
 	if err == nil || !errors.Is(err, errNoGatewayAccountCapacity) {
 		return account, err
 	}
@@ -1820,7 +1853,7 @@ func (a *app) acquireGatewayAccountPinned(key gatewayKey, sessionHash, requested
 	if !ready {
 		return gatewayAccount{}, err
 	}
-	return a.tryAcquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, loadAware, pinSticky)
+	return a.tryAcquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, loadAware, pinSticky, demand)
 }
 
 const (
@@ -1837,6 +1870,10 @@ func (a *app) waitForGatewayCapacity(ctx context.Context, key gatewayKey, sessio
 }
 
 func (a *app) waitForGatewayCapacityPinned(ctx context.Context, key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, initialErr error, pinSticky bool) (gatewayAccount, error) {
+	return a.waitForGatewayCapacityPinnedDemand(ctx, key, sessionHash, requestedModel, excluded, initialErr, pinSticky, gatewayDispatchDemand{})
+}
+
+func (a *app) waitForGatewayCapacityPinnedDemand(ctx context.Context, key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, initialErr error, pinSticky bool, demand gatewayDispatchDemand) (gatewayAccount, error) {
 	counterValue, _ := a.capacityWaiters.LoadOrStore(key.GroupID, new(int64))
 	counter := counterValue.(*int64)
 	if atomic.AddInt64(counter, 1) > gatewayCapacityQueueMaxWaiters {
@@ -1848,6 +1885,9 @@ func (a *app) waitForGatewayCapacityPinned(ctx context.Context, key gatewayKey, 
 	timeout := time.Duration(key.CapacityQueueTimeout) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second
+	}
+	if !key.CapacityQueueEnabled && gatewayITPMCapacityBlocked(initialErr) && timeout > gatewayITPMAutoQueueTimeout {
+		timeout = gatewayITPMAutoQueueTimeout
 	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -1861,7 +1901,7 @@ func (a *app) waitForGatewayCapacityPinned(ctx context.Context, key gatewayKey, 
 		case <-deadline.C:
 			return gatewayAccount{}, fmt.Errorf("request waited %s in the capacity queue without a free account: %w", timeout, lastCapacityErr)
 		case <-ticker.C:
-			account, err := a.acquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, false, pinSticky)
+			account, err := a.acquireGatewayAccountPinnedDemand(key, sessionHash, requestedModel, excluded, false, pinSticky, demand)
 			if err == nil {
 				return account, nil
 			}
@@ -1874,7 +1914,11 @@ func (a *app) waitForGatewayCapacityPinned(ctx context.Context, key gatewayKey, 
 }
 
 func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool) (gatewayAccount, error) {
-	account, err := a.tryAcquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, loadAware)
+	return a.acquireGatewayAccountWithPolicyDemand(key, sessionHash, requestedModel, excluded, loadAware, gatewayDispatchDemand{})
+}
+
+func (a *app) acquireGatewayAccountWithPolicyDemand(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool, demand gatewayDispatchDemand) (gatewayAccount, error) {
+	account, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, sessionHash, requestedModel, excluded, loadAware, demand)
 	if err == nil || !errors.Is(err, errNoGatewayAccountCapacity) {
 		return account, err
 	}
@@ -1885,14 +1929,18 @@ func (a *app) acquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, reque
 	if !ready {
 		return gatewayAccount{}, err
 	}
-	return a.tryAcquireGatewayAccountWithPolicy(key, sessionHash, requestedModel, excluded, loadAware)
+	return a.tryAcquireGatewayAccountWithPolicyDemand(key, sessionHash, requestedModel, excluded, loadAware, demand)
 }
 
 func (a *app) tryAcquireGatewayAccountWithPolicy(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool) (gatewayAccount, error) {
-	return a.tryAcquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, loadAware, false)
+	return a.tryAcquireGatewayAccountWithPolicyDemand(key, sessionHash, requestedModel, excluded, loadAware, gatewayDispatchDemand{})
 }
 
-func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware, pinSticky bool) (gatewayAccount, error) {
+func (a *app) tryAcquireGatewayAccountWithPolicyDemand(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware bool, demand gatewayDispatchDemand) (gatewayAccount, error) {
+	return a.tryAcquireGatewayAccountPinned(key, sessionHash, requestedModel, excluded, loadAware, false, demand)
+}
+
+func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware, pinSticky bool, demand gatewayDispatchDemand) (gatewayAccount, error) {
 	serializedDispatch := key.RPMDispatchEnabled || a.groupUsesRPMReservationStrategy(key.GroupID)
 	if serializedDispatch {
 		lockValue, _ := a.dispatchLocks.LoadOrStore(key.GroupID, &sync.Mutex{})
@@ -1980,7 +2028,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		-- Upstream ITPM counts uncached input only: cache reads are excluded on
 		-- every current model, so charging them here would throttle exactly the
 		-- warm sessions that cost the least upstream.
-		CASE WHEN ds.itpm_limit > 0 THEN COALESCE((SELECT SUM(u.input_tokens + u.cache_creation_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) ELSE 0 END AS current_itpm,
+		COALESCE((SELECT SUM(u.input_tokens + u.cache_creation_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_itpm,
 		CASE WHEN EXISTS (SELECT 1 FROM account_model_cooldowns mc WHERE mc.account_id = a.id AND mc.model = ? AND mc.reset_at > `+nowSQL+`) THEN 1 ELSE 0 END AS model_cooldown
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
 		LEFT JOIN groups g ON g.id = ag.group_id
@@ -2077,172 +2125,213 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 			}
 		}
 	}
-	selectedIndex := -1
 	diagnostics := gatewayCapacityDiagnostics{Candidates: len(candidates)}
-	for index, candidate := range candidates {
-		if pinSticky && stickyID != 0 && candidate.account.ID != stickyID {
-			// The session is warm on stickyID. Serving it anywhere else would
-			// turn a cache read into a cache creation, which costs far more
-			// upstream ITPM than waiting does. Report no capacity instead so the
-			// group's capacity queue holds the request on its own account.
-			diagnostics.StickyPinned++
-			continue
-		}
-		if excluded[candidate.account.ID] {
-			diagnostics.Excluded++
-			continue
-		}
-		if strategyOverShare(shareWeights, shareTotalWeight, strategyRPM, groupRPM, candidate.strategyID) {
-			diagnostics.StrategyShareBlocked++
-			continue
-		}
-		if key.StrategyRequiredEnabled && candidate.strategyID == 0 {
-			diagnostics.StrategyMissing++
-			continue
-		}
-		if candidate.modelCooldown == 1 {
-			diagnostics.ModelCooldown++
-			continue
-		}
-		if !accountSupportsModel(candidate.account, requestedModel) {
-			diagnostics.ModelUnsupported++
-			continue
-		}
-		if candidate.inflight >= candidate.account.Concurrency {
-			diagnostics.ConcurrencyBlocked++
-			continue
-		}
-		if candidate.temporaryRPM > 0 && candidate.rpm >= candidate.temporaryRPM {
-			// A learned threshold comes from a 429, so it is rate limiting, not
-			// account failure, and it does not release a pinned session: moving a
-			// large warm request off its account converts a nearly free cache read
-			// into a full-price cache creation, which is what made the account hit
-			// the limit in the first place. The ceiling itself now survives to the
-			// 5h window, but the block is "rolling 60s count >= ceiling", so it
-			// clears as traffic ages out and the capacity queue holds the request
-			// until the account can take it again.
-			diagnostics.TemporaryRPMBlocked++
-			continue
-		}
-		if candidate.strategyTPM > 0 && candidate.tpm >= candidate.strategyTPM {
-			diagnostics.TPMBlocked++
-			continue
-		}
-		if candidate.strategyITPM > 0 && candidate.itpm >= candidate.strategyITPM {
-			diagnostics.ITPMBlocked++
-			continue
-		}
-		sticky := stickyID == candidate.account.ID
-		if !rpmSchedulable(candidate.account, candidate.rpm, sticky) {
-			diagnostics.RPMBlocked++
-			continue
-		}
-		if sticky && candidate.strategyMode == "round_robin" {
-			// Keep an eligible conversation on its bound account so upstream
-			// prompt-cache reads survive round-robin dispatch. The reservation
-			// below still increments this account's RPM, so sticky traffic uses
-			// its normal share and new sessions fill the lower-load accounts.
-			selectedIndex = index
-			break
-		}
-		if selectedIndex < 0 {
-			selectedIndex = index
-			if !loadAware && candidate.strategyMode == "" {
+	reservationBlocked := map[int64]bool{}
+	var selectedCandidate candidate
+	var selected gatewayAccount
+	for {
+		selectedIndex := -1
+		for index, candidate := range candidates {
+			if reservationBlocked[candidate.account.ID] {
+				continue
+			}
+			if pinSticky && !demand.Oversized && stickyID != 0 && candidate.account.ID != stickyID {
+				// The session is warm on stickyID. Serving it anywhere else would
+				// turn a cache read into a cache creation, which costs far more
+				// upstream ITPM than waiting does. Report no capacity instead so the
+				// group's capacity queue holds the request on its own account.
+				diagnostics.StickyPinned++
+				continue
+			}
+			if excluded[candidate.account.ID] {
+				diagnostics.Excluded++
+				continue
+			}
+			if strategyOverShare(shareWeights, shareTotalWeight, strategyRPM, groupRPM, candidate.strategyID) {
+				diagnostics.StrategyShareBlocked++
+				continue
+			}
+			if key.StrategyRequiredEnabled && candidate.strategyID == 0 {
+				diagnostics.StrategyMissing++
+				continue
+			}
+			if candidate.modelCooldown == 1 {
+				diagnostics.ModelCooldown++
+				continue
+			}
+			if !accountSupportsModel(candidate.account, requestedModel) {
+				diagnostics.ModelUnsupported++
+				continue
+			}
+			if candidate.inflight >= candidate.account.Concurrency {
+				diagnostics.ConcurrencyBlocked++
+				continue
+			}
+			if demand.Oversized && candidate.inflight > 0 {
+				diagnostics.ConcurrencyBlocked++
+				continue
+			}
+			if candidate.temporaryRPM > 0 && candidate.rpm >= candidate.temporaryRPM {
+				// A learned threshold comes from a 429, so it is rate limiting, not
+				// account failure, and it does not release a pinned session: moving a
+				// large warm request off its account converts a nearly free cache read
+				// into a full-price cache creation, which is what made the account hit
+				// the limit in the first place. The ceiling itself now survives to the
+				// 5h window, but the block is "rolling 60s count >= ceiling", so it
+				// clears as traffic ages out and the capacity queue holds the request
+				// until the account can take it again.
+				diagnostics.TemporaryRPMBlocked++
+				continue
+			}
+			if candidate.strategyTPM > 0 && candidate.tpm >= candidate.strategyTPM {
+				diagnostics.TPMBlocked++
+				continue
+			}
+			sticky := stickyID == candidate.account.ID
+			if demand.EstimatedITPM > 0 && !demand.Oversized {
+				softLimit, hardLimit := gatewayEffectiveITPMLimits(candidate.strategyITPM)
+				projected := candidate.itpm + demand.EstimatedITPM
+				if candidate.itpm >= hardLimit || projected > hardLimit || (projected > softLimit && !sticky && demand.EstimatedITPM > gatewayITPMSmallRequest) {
+					diagnostics.ITPMBlocked++
+					continue
+				}
+			} else if demand.EstimatedITPM == 0 && candidate.strategyITPM > 0 && candidate.itpm >= candidate.strategyITPM {
+				diagnostics.ITPMBlocked++
+				continue
+			}
+			if !rpmSchedulable(candidate.account, candidate.rpm, sticky) {
+				diagnostics.RPMBlocked++
+				continue
+			}
+			if !demand.Oversized && sticky && candidate.strategyMode == "round_robin" {
+				// Keep an eligible conversation on its bound account so upstream
+				// prompt-cache reads survive round-robin dispatch. The reservation
+				// below still increments this account's RPM, so sticky traffic uses
+				// its normal share and new sessions fill the lower-load accounts.
+				selectedIndex = index
 				break
 			}
-			continue
-		}
-		selected := candidates[selectedIndex]
-		if candidate.groupPriority != selected.groupPriority || candidate.accountPriority != selected.accountPriority {
-			break
-		}
-		// Cold start only: with no bound account the session has no cache
-		// anywhere, so placement is free and should go where the upstream says
-		// there is the most input budget left. A warm session never reaches this
-		// — moving it is what pinSticky exists to prevent.
-		if stickyID == 0 && candidate.itpmRemaining >= 0 && selected.itpmRemaining >= 0 &&
-			coldStartBudgetBucket(candidate.itpmRemaining) != coldStartBudgetBucket(selected.itpmRemaining) {
-			if coldStartBudgetBucket(candidate.itpmRemaining) > coldStartBudgetBucket(selected.itpmRemaining) {
+			if selectedIndex < 0 {
 				selectedIndex = index
+				if !demand.Oversized && !loadAware && candidate.strategyMode == "" {
+					break
+				}
+				continue
 			}
-			continue
-		}
-		// Mirrors the weight_tier ordering: freshly refreshed beats normal beats
-		// rate-limited, and within a tier fewer strikes wins.
-		if candidate.weightTier != selected.weightTier {
-			if candidate.weightTier < selected.weightTier {
-				selectedIndex = index
-			}
-			continue
-		}
-		if key.RateLimitDownweightEnabled && candidate.consecutive429 != selected.consecutive429 {
-			if candidate.consecutive429 < selected.consecutive429 {
-				selectedIndex = index
-			}
-			continue
-		}
-		if loadAware {
-			if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
-				(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
-				selectedIndex = index
-			}
-			continue
-		}
-		// Strategy dispatch modes compare only accounts bound to the same
-		// strategy: "serial" concentrates traffic on the busiest account,
-		// "balance" spreads it to the least loaded one.
-		if candidate.strategyID > 0 && candidate.strategyID == selected.strategyID {
-			switch candidate.strategyMode {
-			case "serial":
-				if candidate.rpm > selected.rpm || (candidate.rpm == selected.rpm && candidate.inflight > selected.inflight) {
+			selected := candidates[selectedIndex]
+			if demand.Oversized {
+				if candidate.itpm < selected.itpm || (candidate.itpm == selected.itpm && candidate.account.ID < selected.account.ID) {
 					selectedIndex = index
 				}
-			case "balance":
+				continue
+			}
+			if candidate.groupPriority != selected.groupPriority || candidate.accountPriority != selected.accountPriority {
+				break
+			}
+			// Cold start only: with no bound account the session has no cache
+			// anywhere, so placement is free and should go where the upstream says
+			// there is the most input budget left. A warm session never reaches this
+			// — moving it is what pinSticky exists to prevent.
+			if stickyID == 0 && candidate.itpmRemaining >= 0 && selected.itpmRemaining >= 0 &&
+				coldStartBudgetBucket(candidate.itpmRemaining) != coldStartBudgetBucket(selected.itpmRemaining) {
+				if coldStartBudgetBucket(candidate.itpmRemaining) > coldStartBudgetBucket(selected.itpmRemaining) {
+					selectedIndex = index
+				}
+				continue
+			}
+			// Mirrors the weight_tier ordering: freshly refreshed beats normal beats
+			// rate-limited, and within a tier fewer strikes wins.
+			if candidate.weightTier != selected.weightTier {
+				if candidate.weightTier < selected.weightTier {
+					selectedIndex = index
+				}
+				continue
+			}
+			if key.RateLimitDownweightEnabled && candidate.consecutive429 != selected.consecutive429 {
+				if candidate.consecutive429 < selected.consecutive429 {
+					selectedIndex = index
+				}
+				continue
+			}
+			if loadAware {
 				if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
 					(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
 					selectedIndex = index
 				}
-			case "round_robin":
-				candidateRPM := gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM)
-				selectedRPM := gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)
-				if candidateRPM < selectedRPM ||
-					(candidateRPM == selectedRPM && gatewayCandidateOlder(candidate.lastUsed, selected.lastUsed)) ||
-					(candidateRPM == selectedRPM && candidate.lastUsed == selected.lastUsed && candidate.account.ID < selected.account.ID) {
-					selectedIndex = index
-				}
-			case "concentrated":
-				// Accounts already carrying traffic form the active set; an
-				// account at zero RPM is 待调度 and only gets promoted when no
-				// active account can take the request. Within the active set the
-				// busiest account is filled first.
-				candidateActive := candidate.rpm > 0
-				selectedActive := selected.rpm > 0
-				if candidateActive != selectedActive {
-					if candidateActive {
-						selectedIndex = index
-					}
-					continue
-				}
-				if candidateActive {
+				continue
+			}
+			// Strategy dispatch modes compare only accounts bound to the same
+			// strategy: "serial" concentrates traffic on the busiest account,
+			// "balance" spreads it to the least loaded one.
+			if candidate.strategyID > 0 && candidate.strategyID == selected.strategyID {
+				switch candidate.strategyMode {
+				case "serial":
 					if candidate.rpm > selected.rpm || (candidate.rpm == selected.rpm && candidate.inflight > selected.inflight) {
 						selectedIndex = index
 					}
-					continue
-				}
-				// Promote deterministically so a burst does not wake several
-				// idle accounts at once.
-				if gatewayCandidateOlder(candidate.lastUsed, selected.lastUsed) ||
-					(candidate.lastUsed == selected.lastUsed && candidate.account.ID < selected.account.ID) {
-					selectedIndex = index
+				case "balance":
+					if gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) < gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) ||
+						(gatewayCandidateLoad(candidate.inflight, candidate.account.Concurrency) == gatewayCandidateLoad(selected.inflight, selected.account.Concurrency) && gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM) < gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)) {
+						selectedIndex = index
+					}
+				case "round_robin":
+					candidateRPM := gatewayCandidateRPMLoad(candidate.rpm, candidate.account.BaseRPM)
+					selectedRPM := gatewayCandidateRPMLoad(selected.rpm, selected.account.BaseRPM)
+					if candidateRPM < selectedRPM ||
+						(candidateRPM == selectedRPM && gatewayCandidateOlder(candidate.lastUsed, selected.lastUsed)) ||
+						(candidateRPM == selectedRPM && candidate.lastUsed == selected.lastUsed && candidate.account.ID < selected.account.ID) {
+						selectedIndex = index
+					}
+				case "concentrated":
+					// Accounts already carrying traffic form the active set; an
+					// account at zero RPM is 待调度 and only gets promoted when no
+					// active account can take the request. Within the active set the
+					// busiest account is filled first.
+					candidateActive := candidate.rpm > 0
+					selectedActive := selected.rpm > 0
+					if candidateActive != selectedActive {
+						if candidateActive {
+							selectedIndex = index
+						}
+						continue
+					}
+					if candidateActive {
+						if candidate.rpm > selected.rpm || (candidate.rpm == selected.rpm && candidate.inflight > selected.inflight) {
+							selectedIndex = index
+						}
+						continue
+					}
+					// Promote deterministically so a burst does not wake several
+					// idle accounts at once.
+					if gatewayCandidateOlder(candidate.lastUsed, selected.lastUsed) ||
+						(candidate.lastUsed == selected.lastUsed && candidate.account.ID < selected.account.ID) {
+						selectedIndex = index
+					}
 				}
 			}
 		}
+		if selectedIndex < 0 {
+			return gatewayAccount{}, &gatewayCapacityError{groupID: key.GroupID, diagnostics: diagnostics}
+		}
+		selectedCandidate = candidates[selectedIndex]
+		selected = selectedCandidate.account
+		allowed, reserveErr := a.reserveGatewayITPM(&selected, demand, selectedCandidate.itpm, selectedCandidate.strategyITPM, stickyID == selected.ID, selectedCandidate.inflight)
+		if reserveErr != nil {
+			return gatewayAccount{}, reserveErr
+		}
+		if !allowed {
+			diagnostics.ITPMReservationBlocked++
+			reservationBlocked[selected.ID] = true
+			continue
+		}
+		break
 	}
-	if selectedIndex < 0 {
-		return gatewayAccount{}, &gatewayCapacityError{groupID: key.GroupID, diagnostics: diagnostics}
-	}
-	selectedCandidate := candidates[selectedIndex]
-	selected := selectedCandidate.account
+	reservationHeld := selected.ITPMReservationID != ""
+	defer func() {
+		if reservationHeld {
+			a.releaseGatewayITPM(selected)
+		}
+	}()
 	if key.RPMDispatchEnabled || selected.RPMStrategy == "fixed" || dispatchModeReservesRPM(selectedCandidate.strategyMode) {
 		// Reserve RPM in the same transaction as selection so a concurrent
 		// burst cannot overfill one account before opening the next. Fixed,
@@ -2269,6 +2358,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 	if err := tx.Commit(); err != nil {
 		return gatewayAccount{}, err
 	}
+	reservationHeld = false
 	return selected, nil
 }
 

@@ -1519,11 +1519,12 @@ textarea:focus {
   accent-color: var(--a);
 }
 .account-sticky-region {
-  position: sticky;
-  top: 88px;
-  z-index: 14;
+  position: static;
   background: var(--canvas);
-  box-shadow: 0 14px 20px -20px rgba(29, 29, 31, 0.42);
+  box-shadow: none;
+}
+.account-refresh-button {
+  white-space: nowrap;
 }
 .account-sticky-inventory {
   overflow: hidden;
@@ -1539,6 +1540,40 @@ textarea:focus {
 .account-filters > .choices {
   width: 135px;
   flex: 0 0 135px;
+}
+.quota-utilization-filter,
+.threshold-status-filter {
+  display: grid;
+  gap: 5px;
+  width: 132px;
+  flex: 0 0 132px;
+  min-width: 0;
+}
+.quota-utilization-filter > span:first-child,
+.threshold-status-filter > span:first-child {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.percent-input {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.percent-input input {
+  padding-right: 30px;
+}
+.percent-input b {
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  color: var(--muted);
+  font-size: 11px;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 .date-filter {
   display: grid;
@@ -2975,6 +3010,11 @@ pre.audit-detail-value {
   padding: 20px;
   scrollbar-gutter: stable;
 }
+.modal form > .form-grid,
+.modal > .form-grid {
+  grid-auto-rows: max-content;
+  align-content: start;
+}
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3446,6 +3486,11 @@ label small {
     width: 145px;
     flex: 0 1 145px;
   }
+  .account-sticky-region .quota-utilization-filter,
+  .account-sticky-region .threshold-status-filter {
+    width: 118px;
+    flex-basis: 118px;
+  }
   .account-sticky-region .date-filter input {
     padding-right: 7px;
     padding-left: 7px;
@@ -3779,14 +3824,22 @@ label small {
     gap: 10px;
   }
   .account-heading-actions {
-    display: grid;
+    display: flex;
     width: 100%;
-    grid-template-columns: auto minmax(82px, 1fr) auto auto;
+    flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: flex-start;
     gap: 8px;
   }
+  .account-heading-actions .section-count {
+    margin-right: auto;
+  }
   .account-heading-actions .compact-toggle {
-    justify-self: end;
+    flex: 0 0 auto;
+  }
+  .account-heading-actions .account-refresh-button {
+    min-width: 98px;
   }
   .gateway-endpoint {
     align-items: flex-start;
