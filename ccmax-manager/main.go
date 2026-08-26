@@ -1641,6 +1641,14 @@ func scanAccount(row scanner, reveal bool) (account, error) {
 func accountQuotaFilterConditions(r *http.Request, alias string) ([]string, []any, error) {
 	conditions := []string{}
 	args := []any{}
+	if raw := strings.TrimSpace(r.URL.Query().Get("quota_5h_utilization")); raw != "" {
+		utilization, err := strconv.ParseFloat(raw, 64)
+		if err != nil || utilization < 0 || utilization > 100 {
+			return nil, nil, errors.New("quota_5h_utilization must be between 0 and 100")
+		}
+		conditions = append(conditions, alias+".quota_5h_utilization = ?")
+		args = append(args, utilization)
+	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("min_5h_utilization")); raw != "" {
 		minimum, err := strconv.ParseFloat(raw, 64)
 		if err != nil || minimum < 0 || minimum > 100 {
@@ -1653,10 +1661,12 @@ func accountQuotaFilterConditions(r *http.Request, alias string) ([]string, []an
 	case "":
 	case "enabled":
 		conditions = append(conditions, alias+".quota_5h_threshold_enabled = 1")
+	case "disabled":
+		conditions = append(conditions, alias+".quota_5h_threshold_enabled = 0")
 	case "reached":
 		conditions = append(conditions, alias+".quota_5h_threshold_enabled = 1 AND "+alias+".quota_5h_utilization >= "+alias+".quota_5h_threshold_percent")
 	default:
-		return nil, nil, errors.New("quota_5h_threshold must be enabled or reached")
+		return nil, nil, errors.New("quota_5h_threshold must be enabled, disabled, or reached")
 	}
 	return conditions, args, nil
 }

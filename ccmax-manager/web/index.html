@@ -284,23 +284,24 @@
               </button>
             </div>
             <label class="quota-utilization-filter"
-              ><span>5h 使用率 ≥</span
+              ><span>5h 使用率 =</span
               ><span class="percent-input"
                 ><input
-                  id="account-min-5h-utilization"
+                  id="account-5h-utilization"
                   type="number"
                   min="0"
                   max="100"
-                  step="1"
+                  step="0.01"
                   inputmode="decimal"
                   placeholder="不限"
-                  aria-label="最低 5h 使用率" /><b>%</b></span
+                  aria-label="精确 5h 使用率" /><b>%</b></span
             ></label>
             <label class="threshold-status-filter"
               ><span>提前冷却</span
               ><select id="account-quota-threshold-filter" aria-label="按 5h 提前冷却状态筛选">
                 <option value="">全部</option>
                 <option value="enabled">已开启</option>
+                <option value="disabled">未开启</option>
                 <option value="reached">已达到阈值</option>
               </select></label
             >

@@ -41,7 +41,7 @@ const state = {
   accountGroup: "",
   accountSearch: "",
   accountStatus: "",
-  accountMin5HUtilization: "",
+  account5HUtilization: "",
   accountQuotaThreshold: "",
   deadStatus: "pending",
   deadSearch: "",
@@ -753,8 +753,8 @@ async function loadAccountPage() {
     if (state.accountGroup) params.set("group_id", state.accountGroup);
     if (state.accountStatus) params.set("status", state.accountStatus);
     if (state.accountSearch) params.set("search", state.accountSearch);
-    if (state.accountMin5HUtilization !== "")
-      params.set("min_5h_utilization", state.accountMin5HUtilization);
+    if (state.account5HUtilization !== "")
+      params.set("quota_5h_utilization", state.account5HUtilization);
     if (state.accountQuotaThreshold)
       params.set("quota_5h_threshold", state.accountQuotaThreshold);
     const payload = await api(`/api/accounts?${params}`);
@@ -1010,8 +1010,8 @@ async function loadAccountSummary() {
   if (state.accountSearch) params.set("search", state.accountSearch);
   if (state.accountGroup) params.set("group_id", state.accountGroup);
   if (state.accountStatus) params.set("status", state.accountStatus);
-  if (state.accountMin5HUtilization !== "")
-    params.set("min_5h_utilization", state.accountMin5HUtilization);
+  if (state.account5HUtilization !== "")
+    params.set("quota_5h_utilization", state.account5HUtilization);
   if (state.accountQuotaThreshold)
     params.set("quota_5h_threshold", state.accountQuotaThreshold);
   if ($("#account-from").value) params.set("from", $("#account-from").value);
@@ -4484,8 +4484,8 @@ $("#account-search").addEventListener("input", (event) => {
   accountSearchTimer = setTimeout(loadAccountPage, 250);
 });
 let accountQuotaFilterTimer;
-$("#account-min-5h-utilization").addEventListener("input", (event) => {
-  state.accountMin5HUtilization = event.target.value;
+$("#account-5h-utilization").addEventListener("input", (event) => {
+  state.account5HUtilization = event.target.value;
   state.selectedAccountIDs.clear();
   resetPagination("accounts");
   clearTimeout(accountQuotaFilterTimer);

@@ -129,14 +129,30 @@ func TestAccountFiveHourThresholdPersistsAndFilters(t *testing.T) {
 	if page.Total != 2 || len(page.Items) != 2 {
 		t.Fatalf("minimum utilization page = %+v", page)
 	}
+	requestJSON(t, handler, http.MethodGet, "/api/accounts?paginated=1&quota_5h_utilization=75", nil, nil, "", http.StatusOK, &page)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Name != "below-account" {
+		t.Fatalf("exact utilization page = %+v", page)
+	}
 	requestJSON(t, handler, http.MethodGet, "/api/accounts?paginated=1&quota_5h_threshold=reached", nil, nil, "", http.StatusOK, &page)
 	if page.Total != 2 || len(page.Items) != 2 {
 		t.Fatalf("reached threshold page = %+v", page)
 	}
 	var summary accountSummary
+	requestJSON(t, handler, http.MethodGet, "/api/accounts/summary?quota_5h_utilization=75", nil, nil, "", http.StatusOK, &summary)
+	if summary.Accounts != 1 {
+		t.Fatalf("exact utilization summary = %+v", summary)
+	}
 	requestJSON(t, handler, http.MethodGet, "/api/accounts/summary?quota_5h_threshold=reached", nil, nil, "", http.StatusOK, &summary)
 	if summary.Accounts != 2 {
 		t.Fatalf("reached threshold summary = %+v", summary)
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/accounts?paginated=1&quota_5h_threshold=disabled", nil, nil, "", http.StatusOK, &page)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Name != "disabled-account" {
+		t.Fatalf("disabled threshold page = %+v", page)
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/accounts/summary?quota_5h_threshold=disabled", nil, nil, "", http.StatusOK, &summary)
+	if summary.Accounts != 1 {
+		t.Fatalf("disabled threshold summary = %+v", summary)
 	}
 
 	response := httptest.NewRecorder()
