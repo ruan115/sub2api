@@ -140,8 +140,28 @@ func TestAccountStatisticsSubscriptionAndDispatchState(t *testing.T) {
 	}
 	var daily []dailyStat
 	putJSON(t, handler, http.MethodGet, "/api/stats/daily?days=1", nil, http.StatusOK, &daily)
-	if len(daily) != 1 || daily[0].AccountsOnboarded != 2 || daily[0].AccountsDied != 1 {
+	if len(daily) != 1 || daily[0].Requests != 1 || daily[0].BilledCost <= 0 || daily[0].AccountsOnboarded != 2 || daily[0].AccountsDied != 1 {
 		t.Fatalf("daily lifecycle = %+v", daily)
+	}
+}
+
+func TestDailyStatsDateKeyNormalizesDatabaseDriverValues(t *testing.T) {
+	date := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "mysql time", value: date},
+		{name: "sqlite text", value: "2026-08-26"},
+		{name: "mysql timestamp text", value: "2026-08-26T00:00:00Z"},
+		{name: "driver bytes", value: []byte("2026-08-26")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := dailyStatsDateKey(test.value); got != "2026-08-26" {
+				t.Fatalf("dailyStatsDateKey(%#v) = %q", test.value, got)
+			}
+		})
 	}
 }
 

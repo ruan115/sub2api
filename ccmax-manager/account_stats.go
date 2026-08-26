@@ -411,14 +411,15 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for usageRows.Next() {
-		var date string
+		var databaseDate any
 		var requests, inputTokens, outputTokens int64
 		var billed, actual float64
-		if scanErr := usageRows.Scan(&date, &requests, &inputTokens, &outputTokens, &billed, &actual); scanErr != nil {
+		if scanErr := usageRows.Scan(&databaseDate, &requests, &inputTokens, &outputTokens, &billed, &actual); scanErr != nil {
 			usageRows.Close()
 			writeDBError(w, scanErr)
 			return
 		}
+		date := dailyStatsDateKey(databaseDate)
 		if item := items[date]; item != nil {
 			item.Requests, item.InputTokens, item.OutputTokens, item.BilledCost, item.ActualCost = requests, inputTokens, outputTokens, billed, actual
 		}
@@ -445,13 +446,14 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for authRows.Next() {
-		var date string
+		var databaseDate any
 		var total, successful int64
-		if scanErr := authRows.Scan(&date, &total, &successful); scanErr != nil {
+		if scanErr := authRows.Scan(&databaseDate, &total, &successful); scanErr != nil {
 			authRows.Close()
 			writeDBError(w, scanErr)
 			return
 		}
+		date := dailyStatsDateKey(databaseDate)
 		if item := items[date]; item != nil {
 			item.Authorizations, item.AuthSuccessful = total, successful
 		}
@@ -463,6 +465,29 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 		result = append(result, *items[date])
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func dailyStatsDateKey(value any) string {
+	if date, ok := value.(time.Time); ok {
+		return date.Format("2006-01-02")
+	}
+	var text string
+	switch value := value.(type) {
+	case string:
+		text = value
+	case []byte:
+		text = string(value)
+	default:
+		text = fmt.Sprint(value)
+	}
+	text = strings.TrimSpace(text)
+	if len(text) >= len("2006-01-02") {
+		candidate := text[:len("2006-01-02")]
+		if _, err := time.Parse("2006-01-02", candidate); err == nil {
+			return candidate
+		}
+	}
+	return text
 }
 
 func dailyStatsRange(r *http.Request) (time.Time, time.Time, int, error) {
@@ -519,11 +544,12 @@ func (a *app) mergeDailyAccountEvents(items map[string]*dailyStat, start, end, e
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var date string
+		var databaseDate any
 		var count int64
-		if err := rows.Scan(&date, &count); err != nil {
+		if err := rows.Scan(&databaseDate, &count); err != nil {
 			return err
 		}
+		date := dailyStatsDateKey(databaseDate)
 		if item := items[date]; item != nil {
 			assign(item, count)
 		}
