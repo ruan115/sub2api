@@ -1543,15 +1543,17 @@ function accountStatus(account) {
 			);
 			const eligibleAt = Date.parse(account.rate_limit_reset_at);
 			if (
-				account.limit_window === "5h" &&
 				Number.isFinite(quotaReset) &&
 				quotaReset <= Date.now() &&
 				Number.isFinite(eligibleAt) &&
 				eligibleAt > Date.now()
 			) {
-				reasons.push(`5h 额度已刷新，错峰等待至 ${dateTime(account.rate_limit_reset_at)}`);
+				reasons.push(`${account.limit_window} 额度已刷新，错峰等待至 ${dateTime(account.rate_limit_reset_at)}`);
 			} else {
-				reasons.push(`${label}，预计 ${dateTime(account.rate_limit_reset_at)} 恢复`);
+				const resetText = Number.isFinite(quotaReset)
+					? `额度 ${dateTime(account.limit_window === "5h" ? account.quota_5h_reset_at : account.quota_7d_reset_at)} 刷新，`
+					: "";
+				reasons.push(`${label}，${resetText}错峰至 ${dateTime(account.rate_limit_reset_at)} 恢复`);
 			}
 		}
     const detail = reasons.join(" · ") || account.error_message || "当前不满足调度条件";

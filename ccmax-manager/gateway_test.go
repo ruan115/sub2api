@@ -2628,8 +2628,12 @@ func TestGatewayChoosesSub2ExceededAnthropicWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resetAt.Equal(sevenDayReset) {
-		t.Fatalf("reset at %s, want exceeded 7d window %s", resetAt, sevenDayReset)
+	wantEligibleAt := staggeredAccountQuotaRelease(created.ID, sevenDayReset)
+	if !resetAt.Equal(wantEligibleAt) {
+		t.Fatalf("reset at %s, want staggered 7d release %s", resetAt, wantEligibleAt)
+	}
+	if delay := resetAt.Sub(sevenDayReset); delay < accountQuotaReleaseDelayMin || delay > accountQuotaReleaseDelayMax {
+		t.Fatalf("7d stagger delay = %s, want 15-30m", delay)
 	}
 }
 
@@ -2685,6 +2689,52 @@ func TestStaggeredAccountQuotaReleaseSpreadsCohort(t *testing.T) {
 	}
 	if len(seen) < 64 {
 		t.Fatalf("only %d distinct release instants for 128 accounts", len(seen))
+	}
+}
+
+func TestLegacyQuotaReleaseDeadlinesGainRequiredStagger(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	now := time.Now().UTC()
+	fiveHour := createGatewayTestAccount(t, a, handler, "legacy-five-hour", "https://example.test", 0, nil, map[string]any{"access_token": "token-5h"})
+	sevenDay := createGatewayTestAccount(t, a, handler, "legacy-seven-day", "https://example.test", 0, nil, map[string]any{"access_token": "token-7d"})
+	fiveHourReset := now.Add(2 * time.Hour).Truncate(time.Second)
+	sevenDayReset := now.Add(4 * 24 * time.Hour).Truncate(time.Second)
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reason = '429_cooling', rate_limit_window = '5h', quota_5h_reset_at = ?, rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`,
+		fiveHourReset.Format(time.RFC3339Nano), fiveHourReset.Format(time.RFC3339Nano), fiveHourReset.Format(time.RFC3339Nano), fiveHour.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET rate_limit_reason = 'quota_exhausted', rate_limit_window = '7d', quota_7d_reset_at = ?, rate_limit_reset_at = ?, rate_limit_downweight_until = ? WHERE id = ?`,
+		sevenDayReset.Format(time.RFC3339Nano), sevenDayReset.Format(time.RFC3339Nano), sevenDayReset.Format(time.RFC3339Nano), sevenDay.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a.enforceQuotaReleaseStagger()
+
+	for _, expectation := range []struct {
+		name      string
+		accountID int64
+		window    string
+		resetAt   time.Time
+	}{
+		{"5h", fiveHour.ID, "5h", fiveHourReset},
+		{"7d", sevenDay.ID, "7d", sevenDayReset},
+	} {
+		var reason, window, resetAt, downweightUntil string
+		if err := a.db.QueryRow(`SELECT rate_limit_reason, rate_limit_window, rate_limit_reset_at, rate_limit_downweight_until FROM accounts WHERE id = ?`, expectation.accountID).
+			Scan(&reason, &window, &resetAt, &downweightUntil); err != nil {
+			t.Fatal(err)
+		}
+		want := staggeredAccountQuotaRelease(expectation.accountID, expectation.resetAt)
+		got, ok := parseQuotaResetTime(resetAt)
+		if !ok || !got.Equal(want) {
+			t.Fatalf("%s repaired release = %q, want %s", expectation.name, resetAt, want)
+		}
+		gotDownweight, ok := parseQuotaResetTime(downweightUntil)
+		if reason != "quota_exhausted" || window != expectation.window || !ok || !gotDownweight.Equal(want) {
+			t.Fatalf("%s repaired state = reason %q window %q downweight %q", expectation.name, reason, window, downweightUntil)
+		}
 	}
 }
 

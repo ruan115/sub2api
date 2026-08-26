@@ -312,10 +312,10 @@ func (a *app) captureAccountUpstreamState(accountID int64, response *http.Respon
 		logDatabaseWriteError("record account retry-after cooldown", err)
 		return
 	}
-	// Keep the sampled quota reset untouched, but stagger 5h accounts before
-	// making them dispatchable so a large cohort does not return at once.
+	// Keep the sampled quota reset untouched, but stagger quota-limited accounts
+	// before making them dispatchable so a large cohort does not return at once.
 	eligibleAt := resetAt.UTC()
-	if window == "5h" {
+	if window == "5h" || window == "7d" {
 		eligibleAt = staggeredAccountQuotaRelease(accountID, eligibleAt)
 	}
 	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, updated_at = `+nowSQL+` WHERE id = ?`, eligibleAt.Format(time.RFC3339Nano), window, accountID)
@@ -495,9 +495,9 @@ func (a *app) captureAccount429State(accountID int64, policy rateLimitPolicy, re
 		quotaResetAt := a.nextAccountQuotaReset(accountID, response.Header, now, explicitWindow)
 		eligibleAt := quotaResetAt
 		message := "上游 " + explicitWindow + " 配额窗口已满，等待窗口刷新"
-		if explicitWindow == "5h" {
+		if explicitWindow == "5h" || explicitWindow == "7d" {
 			eligibleAt = staggeredAccountQuotaRelease(accountID, quotaResetAt)
-			message = fmt.Sprintf("上游 5h 配额窗口已满，刷新后错峰等待至 %s", eligibleAt.Local().Format("01/02 15:04"))
+			message = fmt.Sprintf("上游 %s 配额窗口已满，刷新后错峰等待至 %s", explicitWindow, eligibleAt.Local().Format("01/02 15:04"))
 		}
 		_, err := a.db.Exec(`UPDATE accounts SET
 			consecutive_429 = consecutive_429 + 1,
@@ -590,15 +590,128 @@ func (a *app) nextAccount5HReset(accountID int64, headers http.Header, now time.
 }
 
 // staggeredAccountQuotaRelease returns a stable pseudo-random instant for one
-// account and quota window. Stability matters because both the generic quota
-// recorder and gateway classification can observe the same response; they must
-// compute the same release instead of extending it on every write.
+// account and quota window. Both 5h and 7d quota releases use it. Stability
+// matters because the generic quota recorder and gateway classification can
+// observe the same response; they must compute the same release instead of
+// extending it on every write.
 func staggeredAccountQuotaRelease(accountID int64, quotaResetAt time.Time) time.Time {
 	seed := fmt.Sprintf("%d:%d", accountID, quotaResetAt.UTC().Unix())
 	digest := sha256.Sum256([]byte(seed))
 	spanSeconds := uint64((accountQuotaReleaseDelayMax-accountQuotaReleaseDelayMin)/time.Second) + 1
 	offset := time.Duration(binary.BigEndian.Uint64(digest[:8])%spanSeconds) * time.Second
 	return quotaResetAt.UTC().Add(accountQuotaReleaseDelayMin + offset)
+}
+
+type quotaReleaseRepair struct {
+	accountID      int64
+	window         string
+	rateLimitReset time.Time
+	quotaReset     time.Time
+}
+
+func databaseQuotaTime(value any) (time.Time, bool) {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC(), !typed.IsZero()
+	case string:
+		return parseQuotaResetTime(typed)
+	case []byte:
+		return parseQuotaResetTime(string(typed))
+	default:
+		return time.Time{}, false
+	}
+}
+
+// enforceQuotaReleaseStagger upgrades live rows written by older releases.
+// New responses already store the staggered deadline, but legacy rows may
+// still become dispatchable at the exact 5h/7d reset and release a whole cohort
+// at once. This repair only extends an active quota-owned deadline; it never
+// shortens a later deadline or touches cooldowns owned by other subsystems.
+func (a *app) enforceQuotaReleaseStagger() {
+	rows, err := a.db.Query(`SELECT id, rate_limit_window, rate_limit_reset_at,
+		quota_5h_reset_at, quota_7d_reset_at
+		FROM accounts
+		WHERE deleted_at IS NULL
+		AND rate_limit_reason IN ('429_cooling', 'quota_exhausted')
+		AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at > ` + nowSQL)
+	if err != nil {
+		logDatabaseWriteError("read legacy quota release deadlines", err)
+		return
+	}
+	repairs := make([]quotaReleaseRepair, 0)
+	for rows.Next() {
+		var accountID int64
+		var window string
+		var rateLimitRaw, fiveHourRaw, sevenDayRaw any
+		if err := rows.Scan(&accountID, &window, &rateLimitRaw, &fiveHourRaw, &sevenDayRaw); err != nil {
+			logDatabaseWriteError("scan legacy quota release deadline", err)
+			continue
+		}
+		rateLimitReset, valid := databaseQuotaTime(rateLimitRaw)
+		if !valid {
+			continue
+		}
+		fiveHourReset, hasFiveHour := databaseQuotaTime(fiveHourRaw)
+		sevenDayReset, hasSevenDay := databaseQuotaTime(sevenDayRaw)
+		if window == "" {
+			switch {
+			case hasSevenDay && absDuration(rateLimitReset.Sub(sevenDayReset)) <= time.Second:
+				window = "7d"
+			case hasFiveHour && absDuration(rateLimitReset.Sub(fiveHourReset)) <= time.Second:
+				window = "5h"
+			}
+		}
+		quotaReset := time.Time{}
+		switch window {
+		case "5h":
+			if hasFiveHour {
+				quotaReset = fiveHourReset
+			}
+		case "7d":
+			if hasSevenDay {
+				quotaReset = sevenDayReset
+			}
+		}
+		if quotaReset.IsZero() {
+			continue
+		}
+		target := staggeredAccountQuotaRelease(accountID, quotaReset)
+		if !target.After(rateLimitReset) {
+			continue
+		}
+		repairs = append(repairs, quotaReleaseRepair{
+			accountID:      accountID,
+			window:         window,
+			rateLimitReset: target,
+			quotaReset:     quotaReset,
+		})
+	}
+	if err := rows.Close(); err != nil {
+		logDatabaseWriteError("close legacy quota release rows", err)
+	}
+	if err := rows.Err(); err != nil {
+		logDatabaseWriteError("iterate legacy quota release deadlines", err)
+	}
+	for _, repair := range repairs {
+		stamp := repair.rateLimitReset.Format(time.RFC3339Nano)
+		message := fmt.Sprintf("上游 %s 配额窗口已满，额度于 %s 刷新，错峰等待至 %s",
+			repair.window,
+			repair.quotaReset.Local().Format("01/02 15:04"),
+			repair.rateLimitReset.Local().Format("01/02 15:04"))
+		_, err := a.db.Exec(`UPDATE accounts SET
+			rate_limit_reset_at = ?, rate_limit_window = ?, rate_limit_reason = 'quota_exhausted',
+			rate_limit_downweight_until = CASE
+				WHEN rate_limit_downweight_until IS NULL OR rate_limit_downweight_until < ? THEN ?
+				ELSE rate_limit_downweight_until
+			END,
+			error_message = CASE WHEN auth_error = '' THEN ? ELSE error_message END, updated_at = `+nowSQL+`
+			WHERE id = ? AND deleted_at IS NULL
+			AND rate_limit_reason IN ('429_cooling', 'quota_exhausted')
+			AND (rate_limit_window = ? OR rate_limit_window = '')
+			AND rate_limit_reset_at IS NOT NULL AND rate_limit_reset_at < ?`,
+			stamp, repair.window, stamp, stamp, message, repair.accountID, repair.window, stamp)
+		logDatabaseWriteError("stagger legacy quota release deadline", err)
+	}
 }
 
 // nextAccountQuotaReset resolves when the penalty should lift. When the
@@ -666,6 +779,7 @@ func (a *app) startAccountRateLimitSweeper() func() {
 		defer wait.Done()
 		ticker := time.NewTicker(accountRateLimitSweepInterval)
 		defer ticker.Stop()
+		a.enforceQuotaReleaseStagger()
 		a.sweepAccountRateLimitState()
 		for {
 			select {
