@@ -183,7 +183,7 @@ func TestOAuthGatewayUsesGroupDistilledCompatibilityMode(t *testing.T) {
 		"access_token": "oauth-token", "account_uuid": "account-uuid",
 	})
 
-	body := []byte(`{"unknown":{"drop":true},"model":"claude-fable-5","system":"Keep this system prompt.","max_tokens":64,"temperature":999,"top_p":999,"top_k":-1,"thinking":{"type":"enabled","budget_tokens":1024},"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"unknown":{"drop":true},"model":"claude-fable-5","system":"Keep this system prompt.","max_tokens":64,"temperature":999,"top_p":999,"top_k":-1,"thinking":{"type":"adaptive","display":"summarized"},"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"request-signed-thinking"},{"type":"text","text":"working"}]},{"role":"user","content":"continue"}]}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+key.Key)
 	request.Header.Set("Content-Type", "application/json")
@@ -214,6 +214,12 @@ func TestOAuthGatewayUsesGroupDistilledCompatibilityMode(t *testing.T) {
 	thinking, _ := got.Body["thinking"].(map[string]any)
 	if thinking["type"] != "adaptive" {
 		t.Fatalf("distilled adaptive thinking=%#v", got.Body["thinking"])
+	}
+	if thinking["display"] != "summarized" {
+		t.Fatalf("distilled thinking display=%#v", got.Body["thinking"])
+	}
+	if gjson.GetBytes(encodedBody, "messages.1.content.0.signature").String() != "request-signed-thinking" {
+		t.Fatalf("distilled request lost thinking signature: %s", encodedBody)
 	}
 	if stops, _ := got.Body["stop_sequences"].([]any); len(stops) != 1 || stops[0] != "END" {
 		t.Fatalf("distilled stop sequences=%#v", got.Body["stop_sequences"])

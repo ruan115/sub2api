@@ -519,7 +519,28 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			continue
 		}
 		response = retryGatewayCompatibility400(client, upstreamRequest, response, prepared, started)
-		if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+		var oauthRefreshHandled bool
+		response, account, prepared, oauthRefreshHandled, requestErr = a.retryGatewayRevokedOAuth(
+			r, client, upstreamURL, body, envelope.Model, countTokens, key, account, prepared, response,
+		)
+		if requestErr != nil {
+			queueRelease()
+			releaseAccount()
+			if recordGatewayContextFailure(w, r, requestErr) {
+				return
+			}
+			if !prepared.Passthrough {
+				message := "Upstream request failed"
+				if countTokens {
+					message = "Request failed"
+				}
+				writeAnthropicGatewayError(w, http.StatusBadGateway, "upstream_error", message)
+				return
+			}
+			lastDispatchError = requestErr
+			continue
+		}
+		if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 			if response.StatusCode == http.StatusTooManyRequests {
 				_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
 			}
@@ -530,7 +551,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 			response.Body.Close()
 			releaseAccount()
-			if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+			if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 				a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 			}
 			lastFailure = &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}
@@ -654,7 +675,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		if gatewayResponseStatus(w) != 0 {
 			// A previous attempt already sent the status line (stream heartbeat),
 			// so the only way left to report the failure is an SSE error event.
-			_, errorType, message := sub2CompatibilityError(lastFailure.status)
+			_, errorType, message := sub2CompatibilityErrorWithBody(lastFailure.status, lastFailure.body)
 			flusher, _ := w.(http.Flusher)
 			writeGatewaySSEError(w, flusher, errorType, message)
 			return
@@ -776,6 +797,12 @@ func validateGatewayAccountCredential(account gatewayAccount) error {
 }
 
 func writeSub2CompatibilityError(w http.ResponseWriter, upstreamStatus int, body []byte, countTokens bool) {
+	if upstreamStatus == http.StatusUnauthorized {
+		if message, ok := gatewayOAuthRefreshCompatibilityMessage(body); ok {
+			writeAnthropicGatewayError(w, http.StatusBadGateway, "upstream_error", message)
+			return
+		}
+	}
 	if countTokens {
 		message := "Upstream request failed"
 		switch upstreamStatus {
@@ -793,8 +820,17 @@ func writeSub2CompatibilityError(w http.ResponseWriter, upstreamStatus int, body
 		_, _ = w.Write(body)
 		return
 	}
-	status, errorType, message := sub2CompatibilityError(upstreamStatus)
+	status, errorType, message := sub2CompatibilityErrorWithBody(upstreamStatus, body)
 	writeAnthropicGatewayError(w, status, errorType, message)
+}
+
+func sub2CompatibilityErrorWithBody(upstreamStatus int, body []byte) (int, string, string) {
+	if upstreamStatus == http.StatusUnauthorized {
+		if message, ok := gatewayOAuthRefreshCompatibilityMessage(body); ok {
+			return http.StatusBadGateway, "upstream_error", message
+		}
+	}
+	return sub2CompatibilityError(upstreamStatus)
 }
 
 func sub2CompatibilityError(upstreamStatus int) (int, string, string) {

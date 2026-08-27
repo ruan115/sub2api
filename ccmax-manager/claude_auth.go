@@ -768,6 +768,14 @@ func (a *app) markAccountReauth(accountID int64, reason string) {
 }
 
 func (a *app) markAccountReauthIfRefreshTokenCurrent(accountID int64, reason, expectedRefreshToken string, conditional bool) bool {
+	return a.markAccountReauthIfCurrent(accountID, reason, expectedRefreshToken, "", conditional)
+}
+
+func (a *app) markAccountReauthIfCredentialsCurrent(accountID int64, reason, expectedCredentials string) bool {
+	return a.markAccountReauthIfCurrent(accountID, reason, "", expectedCredentials, true)
+}
+
+func (a *app) markAccountReauthIfCurrent(accountID int64, reason, expectedRefreshToken, expectedCredentials string, conditional bool) bool {
 	reason = strings.TrimSpace(reason)
 	if len(reason) > 500 {
 		reason = reason[:500]
@@ -784,8 +792,13 @@ func (a *app) markAccountReauthIfRefreshTokenCurrent(accountID int64, reason, ex
 	query := `UPDATE accounts SET ` + accumulateAccountSurvivalSQL + `, auth_status = 'reauth_required', auth_error = ?, auth_checked_at = ` + nowSQL + `, invalidated_at = COALESCE(invalidated_at, ` + nowSQL + `), error_message = ?, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END, updated_at = ` + nowSQL + ` WHERE id = ?`
 	args := []any{reason, reason, accountID}
 	if conditional {
-		query += ` AND COALESCE(json_extract(credentials_json, '$.refresh_token'), '') = ?`
-		args = append(args, expectedRefreshToken)
+		if expectedCredentials != "" {
+			query += ` AND credentials_json = ?`
+			args = append(args, expectedCredentials)
+		} else {
+			query += ` AND COALESCE(json_extract(credentials_json, '$.refresh_token'), '') = ?`
+			args = append(args, expectedRefreshToken)
+		}
 	}
 	result, err := tx.Exec(query, args...)
 	if err != nil {

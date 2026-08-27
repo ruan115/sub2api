@@ -222,7 +222,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 	}
 	if input.NormalRequestMode {
 		var err error
-		body, err = normalizeCCMaxDistilledRequestBody(body, model)
+		body, err = normalizeCCMaxDistilledRequestBody(body, model, input.CountTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -354,7 +354,7 @@ func applyCCMaxFieldPassthrough(body []byte, input CCMaxCompatibilityInput) []by
 	return body
 }
 
-func normalizeCCMaxDistilledRequestBody(body []byte, model string) ([]byte, error) {
+func normalizeCCMaxDistilledRequestBody(body []byte, model string, countTokens bool) ([]byte, error) {
 	var request ccmaxDistilledClaudeRequest
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, fmt.Errorf("invalid Anthropic message request: %w", err)
@@ -363,7 +363,9 @@ func normalizeCCMaxDistilledRequestBody(body []byte, model string) ([]byte, erro
 		request.Temperature = nil
 		request.TopP = nil
 		request.TopK = nil
-		request.Thinking = nil
+		if countTokens {
+			request.Thinking = nil
+		}
 	}
 	normalized, err := json.Marshal(request)
 	if err != nil {
@@ -384,14 +386,15 @@ func applyCCMaxDistilledFableControls(body []byte, adaptiveThinking bool) []byte
 		}
 	}
 	if adaptiveThinking {
-		if next, err := sjson.SetRawBytes(body, "thinking", []byte(`{"type":"adaptive"}`)); err == nil {
-			body = next
-		}
-		if !gjson.GetBytes(body, "context_management").Exists() {
-			const contextManagement = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
-			if next, err := sjson.SetRawBytes(body, "context_management", []byte(contextManagement)); err == nil {
+		if thinking := gjson.GetBytes(body, "thinking"); thinking.IsObject() {
+			if next, err := sjson.SetBytes(body, "thinking.type", "adaptive"); err == nil {
 				body = next
 			}
+			if next, err := sjson.DeleteBytes(body, "thinking.budget_tokens"); err == nil {
+				body = next
+			}
+		} else if next, err := sjson.SetRawBytes(body, "thinking", []byte(`{"type":"adaptive"}`)); err == nil {
+			body = next
 		}
 	}
 	return body

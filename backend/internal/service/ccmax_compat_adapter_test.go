@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -244,6 +245,63 @@ func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurfac
 	require.Contains(t, getHeaderRaw(prepared.Headers, "anthropic-beta"), "claude-code-20250219")
 }
 
+func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistory(t *testing.T) {
+	signature := strings.Repeat("signed-history-", 154)
+	body, err := json.Marshal(map[string]any{
+		"model":      "claude-fable-5",
+		"max_tokens": 23333,
+		"stream":     false,
+		"thinking": map[string]any{
+			"type":    "adaptive",
+			"display": "summarized",
+		},
+		"output_config": map[string]any{"effort": "xhigh"},
+		"metadata": map[string]any{
+			"user_id": `{"device_id":"device","account_uuid":"account","session_id":"11111111-1111-4111-8111-111111111111"}`,
+		},
+		"system": []any{
+			map[string]any{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.220; cc_entrypoint=cli; cch=00000;"},
+			map[string]any{"type": "text", "text": claudeCodeSystemPrompt, "cache_control": map[string]any{"type": "ephemeral"}},
+			map[string]any{"type": "text", "text": "Keep the client system exactly.", "cache_control": map[string]any{"type": "ephemeral"}},
+		},
+		"tools": []any{
+			map[string]any{"name": "read.file", "description": "Read a file", "input_schema": map[string]any{"type": "object"}},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "Use the tool."}}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "", "signature": signature},
+				map[string]any{"type": "tool_use", "id": "toolu_1", "name": "read.file", "input": map[string]any{"path": "/tmp/a"}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, ClientHeaders: http.Header{
+			"User-Agent":     {"Go-http-client/1.1"},
+			"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24"},
+		},
+		Model: "claude-fable-5", OAuth: true, AccessToken: "token",
+		NormalRequestMode: true, AnthropicBetaPassthrough: true,
+	})
+	require.NoError(t, err)
+	require.True(t, prepared.ClaudeCode)
+	require.False(t, prepared.Mimic)
+	require.Equal(t, "adaptive", gjson.GetBytes(prepared.Body, "thinking.type").String())
+	require.Equal(t, "summarized", gjson.GetBytes(prepared.Body, "thinking.display").String())
+	require.Equal(t, signature, gjson.GetBytes(prepared.Body, "messages.1.content.0.signature").String())
+	require.Equal(t, "thinking", gjson.GetBytes(prepared.Body, "messages.1.content.0.type").String())
+	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "messages.1.content.1.name").String())
+	require.Equal(t, "read.file", gjson.GetBytes(prepared.Body, "tools.0.name").String())
+	require.Equal(t, "xhigh", gjson.GetBytes(prepared.Body, "output_config.effort").String())
+	require.False(t, gjson.GetBytes(prepared.Body, "context_management").Exists())
+	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
+}
+
 func TestPrepareCCMaxCompatibilityRequestNormalModePreservesExplicitCacheTTL(t *testing.T) {
 	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"one hour","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"default","cache_control":{"type":"ephemeral"}}],"max_tokens":64,"tools":[{"name":"read_file","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
@@ -277,12 +335,13 @@ func TestNormalizeEphemeralCacheControlTTLOrderUsesAnthropicProcessingOrder(t *t
 }
 
 func TestPrepareCCMaxCompatibilityCountTokensOrdersToolTTLBeforeMessage1h(t *testing.T) {
-	body := []byte(`{"model":"claude-fable-5","tools":[{"name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
+	body := []byte(`{"model":"claude-fable-5","thinking":{"type":"adaptive","display":"summarized"},"tools":[{"name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
 		Body: body, Model: "claude-fable-5", OAuth: true, CountTokens: true,
 		AccessToken: "token", NormalRequestMode: true,
 	})
 	require.NoError(t, err)
+	require.False(t, gjson.GetBytes(prepared.Body, "thinking").Exists())
 	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "tools.0.cache_control.ttl").String())
 	require.Equal(t, "1h", gjson.GetBytes(prepared.Body, "messages.0.content.0.cache_control.ttl").String())
 }

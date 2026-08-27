@@ -345,21 +345,28 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 		return gatewayHedgeOutcome{err: err}
 	}
 	response = retryGatewayCompatibility400(client, upstreamRequest, response, prepared, started)
+	var oauthRefreshHandled bool
+	response, account, prepared, oauthRefreshHandled, err = a.retryGatewayRevokedOAuth(
+		r, client, upstreamURL, body, model, false, key, account, prepared, response,
+	)
+	if err != nil {
+		return gatewayHedgeOutcome{err: err}
+	}
 	queueRelease()
 	queueRelease = func() {}
-	if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+	if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 		a.captureGatewayUpstreamState(account.ID, key.GroupID, model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), response)
 	}
 	if retryableGatewayStatus(response.StatusCode) {
 		failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
-		if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+		if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 			a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 		}
 		return gatewayHedgeOutcome{failure: &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}}
 	}
 	if response.StatusCode >= 400 {
 		failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
-		if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+		if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 			a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 		}
 		return gatewayHedgeOutcome{terminal: &gatewayHedgeTerminal{status: response.StatusCode, body: failureBody, accountID: account.ID}}
