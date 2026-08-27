@@ -28,6 +28,51 @@ type gatewayDispatchDemand struct {
 	Oversized     bool
 }
 
+type smoothColdStartConfig struct {
+	Enabled bool
+	RPM     int
+	TPM     int64
+}
+
+func smoothColdStartFromExtra(raw string) smoothColdStartConfig {
+	extra := decodeObject(raw)
+	enabled, _ := extra["smooth_cold_start_enabled"].(bool)
+	rpm, tpm := normalizeSmoothColdStartLimits(int(intFromJSON(extra["smooth_cold_start_rpm"])), intFromJSON(extra["smooth_cold_start_tpm"]))
+	return smoothColdStartConfig{Enabled: enabled, RPM: rpm, TPM: tpm}
+}
+
+func normalizeSmoothColdStartLimits(rpm int, tpm int64) (int, int64) {
+	if rpm < 1 {
+		rpm = defaultSmoothColdStartRPM
+	}
+	if tpm < 1 {
+		tpm = defaultSmoothColdStartTPM
+	}
+	return rpm, tpm
+}
+
+func smoothColdStartPacing(rpm int) (int, int) {
+	rpm, _ = normalizeSmoothColdStartLimits(rpm, defaultSmoothColdStartTPM)
+	if rpm <= 60 {
+		return 1, max(1, 60/rpm)
+	}
+	return (rpm + 59) / 60, 1
+}
+
+func minPositiveInt(current, limit int) int {
+	if current <= 0 || (limit > 0 && limit < current) {
+		return limit
+	}
+	return current
+}
+
+func minPositiveInt64(current, limit int64) int64 {
+	if current <= 0 || (limit > 0 && limit < current) {
+		return limit
+	}
+	return current
+}
+
 func estimateGatewayDispatchDemand(body []byte, countTokens bool) gatewayDispatchDemand {
 	if countTokens || len(body) == 0 {
 		return gatewayDispatchDemand{}
@@ -190,7 +235,7 @@ type accountITPMReservationStatus struct {
 	Exclusive bool
 }
 
-func (store *localITPMReservationStore) reserve(accountID int64, leaseID string, estimated, current, softLimit, hardLimit int64, sticky, exclusive bool, inflight int) (bool, int64) {
+func (store *localITPMReservationStore) reserve(accountID int64, leaseID string, estimated, current, softLimit, hardLimit int64, sticky, exclusive, strictHard bool, inflight int) (bool, int64) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.accounts == nil {
@@ -215,7 +260,14 @@ func (store *localITPMReservationStore) reserve(accountID int64, leaseID string,
 	if hasExclusive {
 		return false, reserved
 	}
-	if exclusive {
+	if strictHard {
+		if hardLimit > 0 && current+reserved+estimated > hardLimit {
+			return false, reserved
+		}
+		if exclusive && (inflight > 0 || reserved > 0) {
+			return false, reserved
+		}
+	} else if exclusive {
 		if inflight > 0 || reserved > 0 || (hardLimit > 0 && current >= hardLimit) {
 			return false, reserved
 		}
@@ -323,12 +375,12 @@ func (a *app) reserveGatewayITPM(account *gatewayAccount, demand gatewayDispatch
 	if a.redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		allowed, _, err = a.redis.reserveAccountITPM(ctx, account.ID, leaseID, demand.EstimatedITPM, current, account.ITPMSoftLimit, account.ITPMHardLimit, sticky, demand.Oversized, inflight, gatewayITPMSmallRequest, gatewayITPMReservationTTL)
+		allowed, _, err = a.redis.reserveAccountITPM(ctx, account.ID, leaseID, demand.EstimatedITPM, current, account.ITPMSoftLimit, account.ITPMHardLimit, sticky, demand.Oversized, account.ITPMStrictHard, inflight, gatewayITPMSmallRequest, gatewayITPMReservationTTL)
 		if err != nil {
 			return false, err
 		}
 	} else {
-		allowed, _ = a.localITPMReservations.reserve(account.ID, leaseID, demand.EstimatedITPM, current, account.ITPMSoftLimit, account.ITPMHardLimit, sticky, demand.Oversized, inflight)
+		allowed, _ = a.localITPMReservations.reserve(account.ID, leaseID, demand.EstimatedITPM, current, account.ITPMSoftLimit, account.ITPMHardLimit, sticky, demand.Oversized, account.ITPMStrictHard, inflight)
 	}
 	if !allowed {
 		return false, nil

@@ -8,6 +8,7 @@ type accountViewConfig struct {
 }
 
 var accountViewColumnOrder = []string{
+	"account",
 	"status",
 	"subscription",
 	"quota",
@@ -38,7 +39,7 @@ func defaultAccountView(role string) accountViewConfig {
 		}
 	}
 	return accountViewConfig{
-		Columns: []string{"status", "subscription", "quota", "requests", "tpm"},
+		Columns: []string{"account", "status", "subscription", "quota", "requests", "tpm"},
 		Blocks:  []string{"filtered_accounts", "tokens", "itpm", "cache_read", "otpm", "throughput"},
 	}
 }
@@ -88,6 +89,9 @@ func accountViewHas(values []string, target string) bool {
 
 func accountForRestrictedView(item account, view accountViewConfig) map[string]any {
 	result := map[string]any{"id": item.ID}
+	if accountViewHas(view.Columns, "account") {
+		result["name"] = item.Name
+	}
 	if accountViewHas(view.Columns, "status") {
 		result["status"] = "active"
 		result["dispatch_status"] = "normal"

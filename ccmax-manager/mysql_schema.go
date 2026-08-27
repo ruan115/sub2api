@@ -28,9 +28,13 @@ func (a *app) migrateMySQL() error {
 			rpm_strategy VARCHAR(32) NOT NULL DEFAULT 'fixed',
 			rpm_sticky_buffer INT NOT NULL DEFAULT 0,
 			dispatch_mode VARCHAR(32) NOT NULL DEFAULT '',
+			capacity_enabled TINYINT(1) NOT NULL DEFAULT 1,
 			dispatch_pacing VARCHAR(32) NOT NULL DEFAULT '',
 			pacing_concurrency INT NOT NULL DEFAULT 0,
 			pacing_interval_seconds INT NOT NULL DEFAULT 0,
+			smooth_cold_start_enabled TINYINT(1) NOT NULL DEFAULT 0,
+			smooth_cold_start_rpm INT NOT NULL DEFAULT 8,
+			smooth_cold_start_tpm BIGINT NOT NULL DEFAULT 100000,
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			deleted_at DATETIME(3) NULL
@@ -188,6 +192,8 @@ func (a *app) migrateMySQL() error {
 			quota_5h_threshold_percent INT NOT NULL DEFAULT 80,
 			quota_7d_utilization DECIMAL(10,4) NOT NULL DEFAULT 0,
 			quota_7d_reset_at DATETIME(3) NULL,
+			quota_7d_threshold_enabled TINYINT(1) NOT NULL DEFAULT 0,
+			quota_7d_threshold_percent INT NOT NULL DEFAULT 80,
 			quota_sampled_at DATETIME(3) NULL,
 			subscription_type VARCHAR(64) NOT NULL DEFAULT '',
 			rate_limit_tier VARCHAR(128) NOT NULL DEFAULT '',
@@ -630,10 +636,22 @@ func (a *app) migrateMySQL() error {
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "dispatch_pacing", "VARCHAR(32) NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "capacity_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "pacing_concurrency", "INT NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "pacing_interval_seconds", "INT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "smooth_cold_start_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "smooth_cold_start_rpm", "INT NOT NULL DEFAULT 8"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "smooth_cold_start_tpm", "BIGINT NOT NULL DEFAULT 100000"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "gateway_error_logs", "itpm_snapshot", "BIGINT NOT NULL DEFAULT -1"); err != nil {
@@ -666,6 +684,15 @@ func (a *app) migrateMySQL() error {
 	if _, err := a.db.Exec(`UPDATE accounts SET quota_5h_threshold_percent = 80 WHERE quota_5h_threshold_percent < 1 OR quota_5h_threshold_percent > 100`); err != nil {
 		return fmt.Errorf("normalise MySQL account 5h threshold: %w", err)
 	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_7d_threshold_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "accounts", "quota_7d_threshold_percent", "INT NOT NULL DEFAULT 80"); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET quota_7d_threshold_percent = 80 WHERE quota_7d_threshold_percent < 1 OR quota_7d_threshold_percent > 100`); err != nil {
+		return fmt.Errorf("normalise MySQL account 7d threshold: %w", err)
+	}
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "reauthorized_at", "DATETIME(3) NULL"); err != nil {
 		return err
 	}
@@ -685,6 +712,7 @@ func (a *app) migrateMySQL() error {
 		{"dispatch_sessions", "idx_dispatch_sessions_expiry", "`expires_at`"},
 		{"account_model_cooldowns", "idx_account_model_cooldowns_expiry", "`reset_at`, `account_id`, `model`"},
 		{"accounts", "idx_accounts_quota_5h_threshold", "`quota_5h_threshold_enabled`, `quota_5h_utilization`"},
+		{"accounts", "idx_accounts_quota_7d_threshold", "`quota_7d_threshold_enabled`, `quota_7d_utilization`"},
 	} {
 		if err := ensureMySQLIndex(a.db.DB, index.table, index.name, index.columns); err != nil {
 			return err

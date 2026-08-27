@@ -160,7 +160,7 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 		if err := a.persistAccountQuota(accountID, quota, true); err != nil {
 			return accountQuota{}, err
 		}
-		if err := a.enforceAccountFiveHourThreshold(accountID, quota.FiveHour, rateLimitPolicy{}); err != nil {
+		if err := a.enforceAccountQuotaThresholds(accountID, quota.FiveHour, quota.SevenDay, rateLimitPolicy{}); err != nil {
 			return accountQuota{}, err
 		}
 		return quota, nil
@@ -217,14 +217,20 @@ func (a *app) persistAccountQuota(accountID int64, quota accountQuota, active bo
 	return tx.Commit()
 }
 
-func (a *app) enforceStoredAccountFiveHourThreshold(accountID int64, policy rateLimitPolicy) error {
-	var window quotaWindow
-	var reset sql.NullString
-	if err := a.db.QueryRow(`SELECT quota_5h_utilization, quota_5h_reset_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&window.Utilization, &reset); err != nil {
+func (a *app) enforceStoredAccountQuotaThresholds(accountID int64, policy rateLimitPolicy) error {
+	var fiveHour, sevenDay quotaWindow
+	var fiveHourReset, sevenDayReset sql.NullString
+	if err := a.db.QueryRow(`SELECT quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+		Scan(&fiveHour.Utilization, &fiveHourReset, &sevenDay.Utilization, &sevenDayReset); err != nil {
 		return err
 	}
-	window.ResetsAt = nullText(reset)
-	return a.enforceAccountFiveHourThreshold(accountID, window, policy)
+	fiveHour.ResetsAt = nullText(fiveHourReset)
+	sevenDay.ResetsAt = nullText(sevenDayReset)
+	return a.enforceAccountQuotaThresholds(accountID, fiveHour, sevenDay, policy)
+}
+
+func (a *app) enforceStoredAccountFiveHourThreshold(accountID int64, policy rateLimitPolicy) error {
+	return a.enforceStoredAccountQuotaThresholds(accountID, policy)
 }
 
 func (a *app) accountFiveHourThresholdReleaseDeadline(accountID int64, resetAt time.Time, policy rateLimitPolicy) (time.Time, error) {
@@ -266,10 +272,13 @@ func (a *app) accountFiveHourThresholdReleaseDeadline(accountID int64, resetAt t
 	return deadline, nil
 }
 
-func (a *app) clearAccountFiveHourThresholdCooldown(accountID int64) error {
+func (a *app) clearAccountQuotaThresholdCooldown(accountID int64) error {
 	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = NULL, rate_limit_window = '',
 		rate_limit_reason = CASE WHEN rate_limit_downweight_until > `+nowSQL+` THEN '429_backoff' ELSE '' END,
-		quota_refreshed_at = CASE WHEN quota_5h_reset_at IS NOT NULL AND quota_5h_reset_at <= `+nowSQL+` THEN quota_5h_reset_at ELSE quota_refreshed_at END,
+		quota_refreshed_at = CASE
+			WHEN rate_limit_window = '7d' AND quota_7d_reset_at IS NOT NULL AND quota_7d_reset_at <= `+nowSQL+` THEN quota_7d_reset_at
+			WHEN quota_5h_reset_at IS NOT NULL AND quota_5h_reset_at <= `+nowSQL+` THEN quota_5h_reset_at
+			ELSE quota_refreshed_at END,
 		error_message = CASE WHEN auth_error = '' THEN '' ELSE error_message END,
 		updated_at = `+nowSQL+`
 		WHERE id = ? AND deleted_at IS NULL AND rate_limit_reason = 'quota_threshold'`, accountID)
@@ -277,36 +286,69 @@ func (a *app) clearAccountFiveHourThresholdCooldown(accountID int64) error {
 }
 
 func (a *app) enforceAccountFiveHourThreshold(accountID int64, window quotaWindow, policy rateLimitPolicy) error {
-	var enabled int
-	var threshold int
+	var sevenDay quotaWindow
+	var reset sql.NullString
+	if err := a.db.QueryRow(`SELECT quota_7d_utilization, quota_7d_reset_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+		Scan(&sevenDay.Utilization, &reset); err != nil {
+		return err
+	}
+	sevenDay.ResetsAt = nullText(reset)
+	return a.enforceAccountQuotaThresholds(accountID, window, sevenDay, policy)
+}
+
+func (a *app) enforceAccountQuotaThresholds(accountID int64, fiveHour, sevenDay quotaWindow, policy rateLimitPolicy) error {
+	var fiveHourEnabled, fiveHourThreshold, sevenDayEnabled, sevenDayThreshold int
 	var existingReason string
 	var existingReset sql.NullString
-	if err := a.db.QueryRow(`SELECT quota_5h_threshold_enabled, quota_5h_threshold_percent, rate_limit_reason, rate_limit_reset_at
-		FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&enabled, &threshold, &existingReason, &existingReset); err != nil {
+	if err := a.db.QueryRow(`SELECT quota_5h_threshold_enabled, quota_5h_threshold_percent,
+		quota_7d_threshold_enabled, quota_7d_threshold_percent, rate_limit_reason, rate_limit_reset_at
+		FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+		Scan(&fiveHourEnabled, &fiveHourThreshold, &sevenDayEnabled, &sevenDayThreshold, &existingReason, &existingReset); err != nil {
 		return err
-	}
-	if enabled != 1 || window.Utilization < float64(threshold) {
-		return a.clearAccountFiveHourThresholdCooldown(accountID)
 	}
 	now := time.Now().UTC()
-	resetAt, valid := parseQuotaResetTime(window.ResetsAt)
-	if !valid || !resetAt.After(now) {
-		return a.clearAccountFiveHourThresholdCooldown(accountID)
+	type thresholdCandidate struct {
+		window      string
+		utilization float64
+		threshold   int
+		eligibleAt  time.Time
 	}
-	eligibleAt, err := a.accountFiveHourThresholdReleaseDeadline(accountID, resetAt, policy)
-	if err != nil {
-		return err
+	candidates := make([]thresholdCandidate, 0, 2)
+	if fiveHourEnabled == 1 && fiveHour.Utilization >= float64(fiveHourThreshold) {
+		if resetAt, valid := parseQuotaResetTime(fiveHour.ResetsAt); valid && resetAt.After(now) {
+			eligibleAt, err := a.accountFiveHourThresholdReleaseDeadline(accountID, resetAt, policy)
+			if err != nil {
+				return err
+			}
+			candidates = append(candidates, thresholdCandidate{"5h", fiveHour.Utilization, fiveHourThreshold, eligibleAt})
+		}
+	}
+	if sevenDayEnabled == 1 && sevenDay.Utilization >= float64(sevenDayThreshold) {
+		if resetAt, valid := parseQuotaResetTime(sevenDay.ResetsAt); valid && resetAt.After(now) {
+			candidates = append(candidates, thresholdCandidate{"7d", sevenDay.Utilization, sevenDayThreshold, resetAt.UTC()})
+		}
+	}
+	if len(candidates) == 0 {
+		return a.clearAccountQuotaThresholdCooldown(accountID)
 	}
 	if existingReset.Valid {
 		if current, ok := parseQuotaResetTime(existingReset.String); ok && current.After(now) && existingReason != "quota_threshold" {
 			return nil
 		}
 	}
-	message := fmt.Sprintf("5h 使用率 %.1f%% 已达到账户阈值 %d%%，提前冷却至 %s", window.Utilization, threshold, eligibleAt.Local().Format("01/02 15:04"))
-	_, err = a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = '5h', rate_limit_reason = 'quota_threshold',
+	selected := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.eligibleAt.After(selected.eligibleAt) {
+			selected = candidate
+		}
+	}
+	message := fmt.Sprintf("%s 使用率 %.1f%% 已达到账户阈值 %d%%，提前冷却至 %s", selected.window, selected.utilization, selected.threshold, selected.eligibleAt.Local().Format("01/02 15:04"))
+	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, rate_limit_window = ?, rate_limit_reason = 'quota_threshold',
 		quota_refreshed_at = NULL, error_message = ?, updated_at = `+nowSQL+`
-		WHERE id = ? AND deleted_at IS NULL AND quota_5h_threshold_enabled = 1
-		AND quota_5h_utilization >= quota_5h_threshold_percent`, eligibleAt.Format(time.RFC3339Nano), message, accountID)
+		WHERE id = ? AND deleted_at IS NULL AND (
+			(quota_5h_threshold_enabled = 1 AND quota_5h_utilization >= quota_5h_threshold_percent) OR
+			(quota_7d_threshold_enabled = 1 AND quota_7d_utilization >= quota_7d_threshold_percent))`,
+		selected.eligibleAt.Format(time.RFC3339Nano), selected.window, message, accountID)
 	return err
 }
 
@@ -404,11 +446,29 @@ func (a *app) captureAccountUpstreamStateWithPolicy(accountID int64, response *h
 		logDatabaseWriteError("record valid upstream account", err)
 	}
 	if quota, ok := quotaFromHeaders(response.Header); ok {
+		fiveHourPresent := strings.TrimSpace(response.Header.Get("anthropic-ratelimit-unified-5h-utilization")) != "" || quota.FiveHour.ResetsAt != ""
+		sevenDayPresent := strings.TrimSpace(response.Header.Get("anthropic-ratelimit-unified-7d-utilization")) != "" || quota.SevenDay.ResetsAt != ""
+		if !fiveHourPresent || !sevenDayPresent {
+			var storedFiveHour, storedSevenDay quotaWindow
+			var storedFiveHourReset, storedSevenDayReset sql.NullString
+			if err := a.db.QueryRow(`SELECT quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at
+				FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+				Scan(&storedFiveHour.Utilization, &storedFiveHourReset, &storedSevenDay.Utilization, &storedSevenDayReset); err == nil {
+				storedFiveHour.ResetsAt = nullText(storedFiveHourReset)
+				storedSevenDay.ResetsAt = nullText(storedSevenDayReset)
+				if !fiveHourPresent {
+					quota.FiveHour = storedFiveHour
+				}
+				if !sevenDayPresent {
+					quota.SevenDay = storedSevenDay
+				}
+			}
+		}
 		if err := a.persistAccountQuota(accountID, quota, false); err != nil {
 			logDatabaseWriteError("record account quota headers", err)
-		} else if strings.TrimSpace(response.Header.Get("anthropic-ratelimit-unified-5h-utilization")) != "" && quota.FiveHour.ResetsAt != "" {
-			if err := a.enforceAccountFiveHourThreshold(accountID, quota.FiveHour, policy); err != nil {
-				logDatabaseWriteError("enforce account 5h quota threshold", err)
+		} else if (fiveHourPresent && quota.FiveHour.ResetsAt != "") || (sevenDayPresent && quota.SevenDay.ResetsAt != "") {
+			if err := a.enforceAccountQuotaThresholds(accountID, quota.FiveHour, quota.SevenDay, policy); err != nil {
+				logDatabaseWriteError("enforce account quota thresholds", err)
 			}
 		}
 	}

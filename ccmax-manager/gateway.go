@@ -106,6 +106,7 @@ type gatewayAccount struct {
 	ITPMWindowSeconds int
 	ITPMSoftLimit     int64
 	ITPMHardLimit     int64
+	ITPMStrictHard    bool
 }
 
 type messageEnvelope struct {
@@ -2075,11 +2076,12 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		`+temporaryRPM+` AS temporary_rpm_limit,
 		a.consecutive_429, `+weightTier+` AS weight_tier,
 		COALESCE(a.itpm_remaining, -1) AS itpm_remaining,
-		COALESCE(ds.id, 0), COALESCE(ds.rpm_limit, 0), COALESCE(ds.tpm_limit, 0), COALESCE(ds.itpm_limit, 0), COALESCE(ds.concurrency_limit, 0), COALESCE(ds.rpm_strategy, ''), COALESCE(ds.rpm_sticky_buffer, 0), COALESCE(ds.dispatch_mode, ''),
+		COALESCE(ds.id, 0), COALESCE(ds.rpm_limit, 0), COALESCE(ds.tpm_limit, 0), COALESCE(ds.itpm_limit, 0), COALESCE(ds.concurrency_limit, 0), COALESCE(ds.rpm_strategy, ''), COALESCE(ds.rpm_sticky_buffer, 0), COALESCE(ds.dispatch_mode, ''), COALESCE(ds.capacity_enabled, 1),
 		CASE WHEN ds.tpm_limit > 0 THEN COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) ELSE 0 END AS current_tpm,
 		0 AS current_itpm,
 		COALESCE(ds.itpm_protection_enabled, 1), COALESCE(ds.itpm_window_seconds, 60), COALESCE(ds.itpm_soft_limit, 100000), COALESCE(ds.itpm_hard_limit, 150000),
 		COALESCE(ds.dispatch_pacing, ''), COALESCE(ds.pacing_concurrency, 0), COALESCE(ds.pacing_interval_seconds, 0),
+		COALESCE(ds.smooth_cold_start_enabled, 0), COALESCE(ds.smooth_cold_start_rpm, 8), COALESCE(ds.smooth_cold_start_tpm, 100000),
 		CASE WHEN EXISTS (SELECT 1 FROM account_model_cooldowns mc WHERE mc.account_id = a.id AND mc.model = ? AND mc.reset_at > `+nowSQL+`) THEN 1 ELSE 0 END AS model_cooldown
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
 		LEFT JOIN groups g ON g.id = ag.group_id
@@ -2090,47 +2092,52 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		return gatewayAccount{}, err
 	}
 	type candidate struct {
-		account         gatewayAccount
-		groupPriority   int
-		accountPriority int
-		lastUsed        string
-		rpm             int
-		inflight        int
-		temporaryRPM    int
-		consecutive429  int
-		weightTier      int
-		itpmRemaining   int64
-		strategyID      int64
-		strategyRPM     int
-		strategyTPM     int64
-		strategyITPM    int64
-		strategyConc    int
-		strategyRPMMode string
-		strategyBuffer  int
-		strategyMode    string
-		tpm             int64
-		itpm            int64
-		itpmProtection  bool
-		itpmWindow      int
-		pacing          string
-		pacingN         int
-		pacingInterval  int
-		itpmSoft        int64
-		itpmHard        int64
-		modelCooldown   int
+		account          gatewayAccount
+		groupPriority    int
+		accountPriority  int
+		lastUsed         string
+		rpm              int
+		inflight         int
+		temporaryRPM     int
+		consecutive429   int
+		weightTier       int
+		itpmRemaining    int64
+		strategyID       int64
+		strategyRPM      int
+		strategyTPM      int64
+		strategyITPM     int64
+		strategyConc     int
+		strategyRPMMode  string
+		strategyBuffer   int
+		strategyMode     string
+		strategyCapacity bool
+		tpm              int64
+		itpm             int64
+		itpmProtection   bool
+		itpmWindow       int
+		pacing           string
+		pacingN          int
+		pacingInterval   int
+		itpmSoft         int64
+		itpmHard         int64
+		smoothEnabled    bool
+		smoothRPM        int
+		smoothTPM        int64
+		modelCooldown    int
 	}
 	candidates := []candidate{}
 	for rows.Next() {
 		var item candidate
-		var itpmProtection int
-		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.consecutive429, &item.weightTier, &item.itpmRemaining, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyITPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &item.tpm, &item.itpm, &itpmProtection, &item.itpmWindow, &item.itpmSoft, &item.itpmHard, &item.pacing, &item.pacingN, &item.pacingInterval, &item.modelCooldown); err != nil {
+		var itpmProtection, strategyCapacity, strategySmoothEnabled int
+		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.consecutive429, &item.weightTier, &item.itpmRemaining, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyITPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &strategyCapacity, &item.tpm, &item.itpm, &itpmProtection, &item.itpmWindow, &item.itpmSoft, &item.itpmHard, &item.pacing, &item.pacingN, &item.pacingInterval, &strategySmoothEnabled, &item.smoothRPM, &item.smoothTPM, &item.modelCooldown); err != nil {
 			rows.Close()
 			return gatewayAccount{}, err
 		}
+		item.strategyCapacity = strategyCapacity == 1
 		item.itpmProtection = itpmProtection == 1
 		item.itpmProtection, item.itpmWindow, item.itpmSoft, item.itpmHard = normalizeStrategyITPMConfig(item.itpmProtection, item.itpmWindow, item.itpmSoft, item.itpmHard, item.strategyITPM)
 		// A bound strategy overrides the account's own limits where it sets them.
-		if item.strategyID > 0 {
+		if item.strategyID > 0 && item.strategyCapacity {
 			if item.strategyConc > 0 && item.strategyConc < item.account.Concurrency {
 				item.account.Concurrency = item.strategyConc
 			}
@@ -2139,6 +2146,33 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 				item.account.RPMStrategy = item.strategyRPMMode
 				item.account.StickyBuffer = item.strategyBuffer
 			}
+		} else if item.strategyID > 0 {
+			item.strategyTPM = 0
+			item.strategyMode = ""
+			item.pacing = ""
+			item.pacingN = 0
+			item.pacingInterval = 0
+		}
+		accountSmooth := smoothColdStartFromExtra(item.account.ExtraJSON)
+		if accountSmooth.Enabled {
+			item.smoothEnabled = true
+			item.smoothRPM = accountSmooth.RPM
+			item.smoothTPM = accountSmooth.TPM
+		} else {
+			item.smoothEnabled = strategySmoothEnabled == 1
+		}
+		if item.smoothEnabled {
+			item.smoothRPM, item.smoothTPM = normalizeSmoothColdStartLimits(item.smoothRPM, item.smoothTPM)
+			item.account.BaseRPM = minPositiveInt(item.account.BaseRPM, item.smoothRPM)
+			item.account.RPMStrategy = "fixed"
+			item.account.StickyBuffer = 0
+			item.pacing = "interval"
+			item.pacingN, item.pacingInterval = smoothColdStartPacing(item.smoothRPM)
+			item.itpmProtection = true
+			item.itpmWindow = defaultStrategyITPMWindowSeconds
+			item.itpmHard = minPositiveInt64(item.itpmHard, item.smoothTPM)
+			item.itpmSoft = item.itpmHard
+			item.account.ITPMStrictHard = true
 		}
 		candidates = append(candidates, item)
 	}
@@ -2297,11 +2331,15 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 				continue
 			}
 			sticky := stickyID == candidate.account.ID
-			if candidate.itpmProtection && effective.Oversized && candidate.itpm >= candidate.itpmHard {
+			if candidate.itpmProtection && candidate.account.ITPMStrictHard {
+				if (effective.EstimatedITPM > 0 && candidate.itpm+effective.EstimatedITPM > candidate.itpmHard) || (effective.EstimatedITPM == 0 && candidate.itpm >= candidate.itpmHard) {
+					diagnostics.ITPMBlocked++
+					continue
+				}
+			} else if candidate.itpmProtection && effective.Oversized && candidate.itpm >= candidate.itpmHard {
 				diagnostics.ITPMBlocked++
 				continue
-			}
-			if candidate.itpmProtection && effective.EstimatedITPM > 0 && !effective.Oversized {
+			} else if candidate.itpmProtection && effective.EstimatedITPM > 0 && !effective.Oversized {
 				softLimit, hardLimit := candidate.itpmSoft, candidate.itpmHard
 				projected := candidate.itpm + effective.EstimatedITPM
 				if candidate.itpm >= hardLimit || projected > hardLimit || (projected > softLimit && !sticky && effective.EstimatedITPM > gatewayITPMSmallRequest) {
@@ -2437,6 +2475,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		selected.ITPMWindowSeconds = selectedCandidate.itpmWindow
 		selected.ITPMSoftLimit = selectedCandidate.itpmSoft
 		selected.ITPMHardLimit = selectedCandidate.itpmHard
+		selected.ITPMStrictHard = selectedCandidate.account.ITPMStrictHard
 		reserveDemand := demand
 		if selected.ID == stickyID {
 			reserveDemand = stickyDemand
@@ -2521,7 +2560,7 @@ func gatewayCandidateOlder(candidateLastUsed, selectedLastUsed string) bool {
 // The group toggle wins outright; otherwise a strategy that governs how many
 // accounts are in play opts the group in automatically.
 func (a *app) gatewayShouldQueue(key gatewayKey) bool {
-	return key.CapacityQueueEnabled || a.groupQueuesWhenFull(key.GroupID)
+	return key.CapacityQueueEnabled || a.groupQueuesWhenFull(key.GroupID) || a.groupUsesDispatchPacing(key.GroupID)
 }
 
 // dispatchModeReservesRPM reports whether a mode needs its RPM counted inside
@@ -2557,7 +2596,7 @@ func (a *app) groupHasDispatchMode(groupID string, modes []string) bool {
 		JOIN accounts a ON a.id = ag.account_id
 		LEFT JOIN groups g ON g.id = ag.group_id
 		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
-		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL AND ds.dispatch_mode IN (`+placeholders+`)
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL AND COALESCE(ds.capacity_enabled, 1) = 1 AND ds.dispatch_mode IN (`+placeholders+`)
 		LIMIT 1)`, args...).Scan(&found)
 	return err == nil && found > 0
 }
@@ -2573,7 +2612,11 @@ func (a *app) groupUsesDispatchPacing(groupID string) bool {
 		JOIN accounts a ON a.id = ag.account_id
 		LEFT JOIN groups g ON g.id = ag.group_id
 		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
-		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL AND COALESCE(ds.dispatch_pacing, '') != ''
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL AND (
+			(COALESCE(ds.capacity_enabled, 1) = 1 AND COALESCE(ds.dispatch_pacing, '') != '')
+			OR COALESCE(ds.smooth_cold_start_enabled, 0) = 1
+			OR a.extra_json LIKE '%"smooth_cold_start_enabled":true%'
+		)
 		LIMIT 1)`, groupID).Scan(&found)
 	return err == nil && found > 0
 }

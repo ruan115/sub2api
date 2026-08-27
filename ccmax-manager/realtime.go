@@ -35,6 +35,8 @@ type accountRealtimeLoad struct {
 	baseEligible         bool
 	itpmLegacyLimit      int64
 	itpmReservationIsBig bool
+	extraJSON            string
+	smooth               smoothColdStartConfig
 }
 
 type realtimeLoad struct {
@@ -94,17 +96,17 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')
 		GROUP BY account_id
 	)
-	SELECT a.id, a.name, a.base_rpm, COALESCE(rr.rpm, 0), COALESCE(rt.tpm, 0), 0, COALESCE(rt.cache_read_tpm, 0), COALESCE(rt.otpm, 0), COALESCE(ai.requests, 0), a.concurrency,
+	SELECT a.id, a.name, a.extra_json, a.base_rpm, COALESCE(rr.rpm, 0), COALESCE(rt.tpm, 0), 0, COALESCE(rt.cache_read_tpm, 0), COALESCE(rt.otpm, 0), COALESCE(ai.requests, 0), a.concurrency,
 		COALESCE((SELECT MIN(ds.concurrency_limit)
 			FROM account_groups capacity_ag
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
 			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
-			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.concurrency_limit > 0), 0),
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.capacity_enabled = 1 AND ds.concurrency_limit > 0), 0),
 		COALESCE((SELECT MIN(ds.rpm_limit)
 			FROM account_groups capacity_ag
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
 			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
-			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.rpm_limit > 0), 0),
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.capacity_enabled = 1 AND ds.rpm_limit > 0), 0),
 		COALESCE((SELECT MAX(ds.itpm_protection_enabled)
 			FROM account_groups capacity_ag
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
@@ -130,6 +132,21 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
 			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
 			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 0),
+		COALESCE((SELECT MAX(ds.smooth_cold_start_enabled)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 0),
+		COALESCE((SELECT MIN(ds.smooth_cold_start_rpm)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.smooth_cold_start_enabled = 1), 8),
+		COALESCE((SELECT MIN(ds.smooth_cold_start_tpm)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.smooth_cold_start_enabled = 1), 100000),
 		CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN 1 ELSE 0 END,
 		CASE WHEN a.rate_limit_downweight_until IS NOT NULL AND a.rate_limit_downweight_until > ` + nowSQL + `
 			THEN COALESCE((SELECT rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > ` + nowSQL + `), 0)
@@ -141,7 +158,7 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	WHERE ` + strings.Join(where, " AND ") + `
 	ORDER BY COALESCE(rr.rpm, 0) DESC, COALESCE(ai.requests, 0) DESC, a.priority, a.id`
 
-	queryArgs := append([]any{groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID}, args...)
+	queryArgs := append([]any{groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID}, args...)
 	rows, err := a.db.Query(query, queryArgs...)
 	if err != nil {
 		writeDBError(w, err)
@@ -156,13 +173,25 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	itpmWindows := map[int64]int{}
 	for rows.Next() {
 		var item accountRealtimeLoad
-		var eligible, strategyConcurrency, strategyRPM, itpmProtection int
-		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.ITPM, &item.CacheReadTPM, &item.OTPM, &item.Inflight, &item.Concurrency, &strategyConcurrency, &strategyRPM, &itpmProtection, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.itpmLegacyLimit, &eligible, &item.TemporaryRPM); err != nil {
+		var eligible, strategyConcurrency, strategyRPM, itpmProtection, strategySmoothEnabled, strategySmoothRPM int
+		var strategySmoothTPM int64
+		if err := rows.Scan(&item.AccountID, &item.Name, &item.extraJSON, &item.BaseRPM, &item.RPM, &item.TPM, &item.ITPM, &item.CacheReadTPM, &item.OTPM, &item.Inflight, &item.Concurrency, &strategyConcurrency, &strategyRPM, &itpmProtection, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.itpmLegacyLimit, &strategySmoothEnabled, &strategySmoothRPM, &strategySmoothTPM, &eligible, &item.TemporaryRPM); err != nil {
 			writeDBError(w, err)
 			return
 		}
 		item.ITPMProtection = itpmProtection == 1
 		item.ITPMProtection, item.ITPMWindowSeconds, item.ITPMSoftLimit, item.ITPMHardLimit = normalizeStrategyITPMConfig(item.ITPMProtection, item.ITPMWindowSeconds, item.ITPMSoftLimit, item.ITPMHardLimit, item.itpmLegacyLimit)
+		item.smooth = smoothColdStartFromExtra(item.extraJSON)
+		if !item.smooth.Enabled && strategySmoothEnabled == 1 {
+			item.smooth = smoothColdStartConfig{Enabled: true, RPM: strategySmoothRPM, TPM: strategySmoothTPM}
+		}
+		if item.smooth.Enabled {
+			item.smooth.RPM, item.smooth.TPM = normalizeSmoothColdStartLimits(item.smooth.RPM, item.smooth.TPM)
+			item.ITPMProtection = true
+			item.ITPMWindowSeconds = defaultStrategyITPMWindowSeconds
+			item.ITPMHardLimit = minPositiveInt64(item.ITPMHardLimit, item.smooth.TPM)
+			item.ITPMSoftLimit = item.ITPMHardLimit
+		}
 		item.baseEligible = eligible == 1
 		itpmWindows[item.AccountID] = item.ITPMWindowSeconds
 		item.EffectiveRPM = item.BaseRPM
@@ -171,6 +200,9 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		// does not force an override and therefore falls back to the account.
 		if strategyRPM > 0 {
 			item.EffectiveRPM = strategyRPM
+		}
+		if item.smooth.Enabled {
+			item.EffectiveRPM = minPositiveInt(item.EffectiveRPM, item.smooth.RPM)
 		}
 		if strategyConcurrency > 0 && (item.Concurrency <= 0 || strategyConcurrency < item.Concurrency) {
 			item.Concurrency = strategyConcurrency

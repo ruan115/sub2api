@@ -12,23 +12,23 @@ import (
 func TestLocalITPMReservationZones(t *testing.T) {
 	var store localITPMReservationStore
 
-	allowed, _ := store.reserve(1, "normal", 5_000, 90_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, false, false, 0)
+	allowed, _ := store.reserve(1, "normal", 5_000, 90_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, false, false, false, 0)
 	if !allowed {
 		t.Fatal("request below the soft ITPM limit was rejected")
 	}
 	store.release(1, "normal")
 
-	allowed, _ = store.reserve(1, "soft-large", gatewayITPMSmallRequest+1, 95_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, false, false, 0)
+	allowed, _ = store.reserve(1, "soft-large", gatewayITPMSmallRequest+1, 95_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, false, false, false, 0)
 	if allowed {
 		t.Fatal("non-sticky large request was accepted in the soft zone")
 	}
-	allowed, _ = store.reserve(1, "soft-sticky", gatewayITPMSmallRequest+1, 95_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, true, false, 0)
+	allowed, _ = store.reserve(1, "soft-sticky", gatewayITPMSmallRequest+1, 95_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, true, false, false, 0)
 	if !allowed {
 		t.Fatal("sticky request was rejected in the soft zone")
 	}
 	store.release(1, "soft-sticky")
 
-	allowed, _ = store.reserve(1, "hard", 5_001, 145_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, true, false, 0)
+	allowed, _ = store.reserve(1, "hard", 5_001, 145_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, true, false, false, 0)
 	if allowed {
 		t.Fatal("request crossing the hard ITPM limit was accepted")
 	}
@@ -37,11 +37,11 @@ func TestLocalITPMReservationZones(t *testing.T) {
 func TestLocalITPMExclusiveReservationAndCacheReadSettlement(t *testing.T) {
 	app := &app{}
 	store := &app.localITPMReservations
-	allowed, _ := store.reserve(9, "large", 120_000, 20_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, false, true, 0)
+	allowed, _ := store.reserve(9, "large", 120_000, 20_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, false, true, false, 0)
 	if !allowed {
 		t.Fatal("idle account rejected its exclusive large request")
 	}
-	allowed, _ = store.reserve(9, "parallel", 1, 20_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, true, false, 0)
+	allowed, _ = store.reserve(9, "parallel", 1, 20_000, gatewayITPMSoftLimit, gatewayITPMHardLimit, true, false, false, 0)
 	if allowed {
 		t.Fatal("exclusive request did not reduce account concurrency to one")
 	}
@@ -121,9 +121,21 @@ func TestOversizedDispatchChoosesIdleLowestITPMAccount(t *testing.T) {
 
 func TestLocalITPMExclusiveReservationRejectsAccountAtHardLimit(t *testing.T) {
 	var store localITPMReservationStore
-	allowed, _ := store.reserve(1, "hard-exclusive", 110_000, 150_000, 100_000, 150_000, false, true, 0)
+	allowed, _ := store.reserve(1, "hard-exclusive", 110_000, 150_000, 100_000, 150_000, false, true, false, 0)
 	if allowed {
 		t.Fatal("oversized request was reserved on an account already at the hard ITPM limit")
+	}
+}
+
+func TestLocalITPMStrictHardRejectsFirstOversizedRequest(t *testing.T) {
+	var store localITPMReservationStore
+	allowed, _ := store.reserve(1, "strict-over", 100_001, 0, 100_000, 100_000, false, true, true, 0)
+	if allowed {
+		t.Fatal("strict smooth limit accepted a first request above its hard cap")
+	}
+	allowed, _ = store.reserve(1, "strict-at", 100_000, 0, 100_000, 100_000, false, false, true, 0)
+	if !allowed {
+		t.Fatal("strict smooth limit rejected a request exactly at its hard cap")
 	}
 }
 

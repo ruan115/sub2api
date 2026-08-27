@@ -146,6 +146,121 @@ func TestDispatchStrategyPacingValidationAndPersistence(t *testing.T) {
 	}
 }
 
+func TestSmoothColdStartSpreadsRPMAndStrictlyCapsUncachedInput(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "smooth-cold-start", "rpm_limit": 30, "rpm_strategy": "fixed",
+		"capacity_enabled":          true,
+		"smooth_cold_start_enabled": true,
+		"smooth_cold_start_rpm":     8,
+		"smooth_cold_start_tpm":     100_000,
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	created := createGatewayTestAccount(t, a, handler, "smooth-account", "https://smooth.example.test", 0, nil, map[string]any{"access_token": "token"})
+
+	selected, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 50_000})
+	if err != nil {
+		t.Fatalf("first smooth admission failed: %v", err)
+	}
+	if selected.BaseRPM != 8 || selected.RPMStrategy != "fixed" || selected.StickyBuffer != 0 || !selected.ITPMStrictHard || selected.ITPMHardLimit != 100_000 {
+		t.Fatalf("effective smooth account = %+v", selected)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	a.releaseGatewayITPM(selected)
+
+	_, err = a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 1})
+	if !errors.Is(err, errNoGatewayAccountCapacity) || !gatewayPacingBlocked(err) {
+		t.Fatalf("second request inside the seven-second interval error=%v, want pacing block", err)
+	}
+
+	aged := time.Now().UTC().Add(-8 * time.Second).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE account_rpm_events SET created_at = ? WHERE account_id = ?`, aged, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 100_001, Oversized: true})
+	if !errors.Is(err, errNoGatewayAccountCapacity) {
+		t.Fatalf("request above strict smooth ITPM cap error=%v, want capacity error", err)
+	}
+
+	selected, err = a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 100_000})
+	if err != nil {
+		t.Fatalf("request at strict smooth ITPM cap failed: %v", err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	a.releaseGatewayITPM(selected)
+}
+
+func TestAccountSmoothColdStartOverridesStrategySetting(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "account-smooth", "rpm_limit": 20, "rpm_strategy": "fixed",
+		"smooth_cold_start_enabled": false,
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	createGatewayTestAccount(t, a, handler, "account-smooth", "https://account-smooth.example.test", 0, map[string]any{
+		"smooth_cold_start_enabled": true,
+		"smooth_cold_start_rpm":     6,
+		"smooth_cold_start_tpm":     90_000,
+	}, map[string]any{"access_token": "token"})
+
+	selected, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.releaseGatewayAccount(selected.ID)
+	defer a.releaseGatewayITPM(selected)
+	if selected.BaseRPM != 6 || selected.ITPMHardLimit != 90_000 || !selected.ITPMStrictHard {
+		t.Fatalf("account smooth override did not apply: %+v", selected)
+	}
+}
+
+func TestDisabledStrategyCapacityKeepsAccountLimits(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "capacity-off", "rpm_limit": 1, "tpm_limit": 1, "concurrency_limit": 1,
+		"rpm_strategy": "fixed", "dispatch_mode": "concentrated", "capacity_enabled": false,
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	createGatewayTestAccount(t, a, handler, "capacity-off", "https://capacity-off.example.test", 0, nil, map[string]any{"access_token": "token"})
+
+	first, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, gatewayDispatchDemand{EstimatedITPM: 1})
+	if err != nil {
+		t.Fatalf("disabled strategy capacity still limited the account: %v", err)
+	}
+	defer a.releaseGatewayAccount(first.ID)
+	defer a.releaseGatewayITPM(first)
+	defer a.releaseGatewayAccount(second.ID)
+	defer a.releaseGatewayITPM(second)
+	if first.BaseRPM != 100 || first.Concurrency != 10 {
+		t.Fatalf("strategy capacity leaked into account: %+v", first)
+	}
+}
+
 // The load snapshot answers "how much concurrent volume was the account
 // carrying when it hit 429": tokens and requests in the 60s window, the
 // ITPM-relevant uncached input, and the in-flight count.

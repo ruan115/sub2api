@@ -76,6 +76,79 @@ func TestAccountFiveHourThresholdCoolingLifecycle(t *testing.T) {
 	}
 }
 
+func TestAccountSevenDayThresholdCoolingLifecycle(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	result, err := a.db.Exec(`INSERT INTO accounts (name, quota_5h_threshold_enabled, quota_5h_threshold_percent, quota_7d_threshold_enabled, quota_7d_threshold_percent) VALUES ('seven-day-threshold-account', 1, 80, 1, 60)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	if _, err := a.db.Exec(`INSERT INTO account_groups (account_id, group_id) VALUES (?, 'a')`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	fiveHourReset := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	sevenDayReset := time.Now().UTC().Add(4 * 24 * time.Hour).Truncate(time.Second)
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", formatQuotaHeaderUtilization(85))
+	headers.Set("anthropic-ratelimit-unified-5h-reset", formatQuotaHeaderReset(fiveHourReset))
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", formatQuotaHeaderUtilization(60))
+	headers.Set("anthropic-ratelimit-unified-7d-reset", formatQuotaHeaderReset(sevenDayReset))
+	a.captureAccountUpstreamStateWithPolicy(accountID, &http.Response{StatusCode: http.StatusOK, Header: headers}, rateLimitPolicy{FiveHourStaggerSet: true, FiveHourStaggerEnabled: false})
+
+	var reason, window string
+	var cooldown sql.NullString
+	if err := a.db.QueryRow(`SELECT rate_limit_reason, rate_limit_window, rate_limit_reset_at FROM accounts WHERE id = ?`, accountID).Scan(&reason, &window, &cooldown); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "quota_threshold" || window != "7d" || !cooldown.Valid || cooldown.String != sevenDayReset.Format(time.RFC3339Nano) {
+		t.Fatalf("combined threshold reason/window/reset = %q/%q/%v", reason, window, cooldown)
+	}
+
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", formatQuotaHeaderUtilization(20))
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", formatQuotaHeaderUtilization(20))
+	a.captureAccountUpstreamStateWithPolicy(accountID, &http.Response{StatusCode: http.StatusOK, Header: headers}, rateLimitPolicy{})
+	if err := a.db.QueryRow(`SELECT rate_limit_reason, rate_limit_window, rate_limit_reset_at FROM accounts WHERE id = ?`, accountID).Scan(&reason, &window, &cooldown); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" || window != "" || cooldown.Valid {
+		t.Fatalf("released seven-day threshold state = %q/%q/%v", reason, window, cooldown)
+	}
+}
+
+func TestPartialQuotaHeadersPreserveSevenDayThresholdState(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	sevenDayReset := time.Now().UTC().Add(3 * 24 * time.Hour).Truncate(time.Second)
+	result, err := a.db.Exec(`INSERT INTO accounts (name, quota_7d_utilization, quota_7d_reset_at, quota_7d_threshold_enabled, quota_7d_threshold_percent) VALUES ('partial-header-account', 70, ?, 1, 60)`, sevenDayReset.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	fiveHourReset := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", formatQuotaHeaderUtilization(20))
+	headers.Set("anthropic-ratelimit-unified-5h-reset", formatQuotaHeaderReset(fiveHourReset))
+	a.captureAccountUpstreamStateWithPolicy(accountID, &http.Response{StatusCode: http.StatusOK, Header: headers}, rateLimitPolicy{})
+
+	var utilization float64
+	var reason, window string
+	if err := a.db.QueryRow(`SELECT quota_7d_utilization, rate_limit_reason, rate_limit_window FROM accounts WHERE id = ?`, accountID).Scan(&utilization, &reason, &window); err != nil {
+		t.Fatal(err)
+	}
+	if utilization != 70 || reason != "quota_threshold" || window != "7d" {
+		t.Fatalf("partial 5h headers reset 7d state: utilization=%v reason=%q window=%q", utilization, reason, window)
+	}
+}
+
 func formatQuotaHeaderUtilization(percent float64) string {
 	return strconv.FormatFloat(percent/100, 'f', -1, 64)
 }
@@ -218,5 +291,57 @@ func TestAccountFiveHourThresholdBatchUpdate(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid batch threshold status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAccountSevenDayThresholdPersistsAndFilters(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+	payload := map[string]any{
+		"name": "seven-day-api-account", "platform": "anthropic", "auth_type": "oauth",
+		"extra": map[string]any{}, "status": "active", "schedulable": false,
+		"concurrency": 1, "priority": 10, "rate_multiplier": 1, "group_ids": []string{"a"},
+		"quota_7d_threshold_enabled": true, "quota_7d_threshold_percent": 64,
+	}
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", payload, http.StatusCreated, &created)
+	if !created.Quota7DThresholdEnabled || created.Quota7DThresholdPercent != 64 {
+		t.Fatalf("created 7d threshold settings = %+v", created)
+	}
+	delete(payload, "quota_7d_threshold_enabled")
+	delete(payload, "quota_7d_threshold_percent")
+	payload["notes"] = "legacy update"
+	var updated account
+	putJSON(t, handler, http.MethodPut, "/api/accounts/"+strconv.FormatInt(created.ID, 10), payload, http.StatusOK, &updated)
+	if !updated.Quota7DThresholdEnabled || updated.Quota7DThresholdPercent != 64 {
+		t.Fatalf("legacy update reset 7d threshold settings: %+v", updated)
+	}
+	if _, err := a.db.Exec(`UPDATE accounts SET quota_7d_utilization = 64 WHERE id = ?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO accounts (name, quota_7d_utilization, quota_7d_threshold_enabled, quota_7d_threshold_percent) VALUES ('seven-day-disabled', 64, 0, 64)`); err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Items []account `json:"items"`
+		Total int64     `json:"total"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/accounts?paginated=1&quota_7d_utilization=64&quota_7d_threshold=reached", nil, nil, "", http.StatusOK, &page)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != created.ID {
+		t.Fatalf("7d reached threshold page = %+v", page)
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/accounts?paginated=1&quota_7d_threshold=disabled", nil, nil, "", http.StatusOK, &page)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Name != "seven-day-disabled" {
+		t.Fatalf("7d disabled threshold page = %+v", page)
+	}
+	var summary accountSummary
+	requestJSON(t, handler, http.MethodGet, "/api/accounts/summary?quota_7d_utilization=64&quota_7d_threshold=reached", nil, nil, "", http.StatusOK, &summary)
+	if summary.Accounts != 1 {
+		t.Fatalf("7d filtered summary = %+v", summary)
 	}
 }

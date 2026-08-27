@@ -1728,8 +1728,8 @@ func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
 	if len(accounts) != 1 || int64(accounts[0]["id"].(float64)) != accountA.ID {
 		t.Fatalf("scoped accounts=%+v", accounts)
 	}
-	if _, leaked := accounts[0]["name"]; leaked {
-		t.Fatalf("ordinary account view leaked account identity: %+v", accounts[0])
+	if accounts[0]["name"] != accountA.Name {
+		t.Fatalf("ordinary account view missing configured account name: %+v", accounts[0])
 	}
 	if _, leaked := accounts[0]["group_ids"]; leaked {
 		t.Fatalf("ordinary account view leaked group membership: %+v", accounts[0])

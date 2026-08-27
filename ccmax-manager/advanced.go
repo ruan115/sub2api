@@ -35,9 +35,13 @@ func (a *app) migrateAdvancedFeatures() error {
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
 			dispatch_mode TEXT NOT NULL DEFAULT '' CHECK (dispatch_mode IN (` + dispatchModeCheckList + `)),
+			capacity_enabled INTEGER NOT NULL DEFAULT 1,
 			dispatch_pacing TEXT NOT NULL DEFAULT '' CHECK (dispatch_pacing IN ('', 'interval', 'completion')),
 			pacing_concurrency INTEGER NOT NULL DEFAULT 0 CHECK (pacing_concurrency >= 0),
 			pacing_interval_seconds INTEGER NOT NULL DEFAULT 0 CHECK (pacing_interval_seconds BETWEEN 0 AND 3600),
+			smooth_cold_start_enabled INTEGER NOT NULL DEFAULT 0,
+			smooth_cold_start_rpm INTEGER NOT NULL DEFAULT 8 CHECK (smooth_cold_start_rpm BETWEEN 1 AND 10000),
+			smooth_cold_start_tpm INTEGER NOT NULL DEFAULT 100000 CHECK (smooth_cold_start_tpm > 0),
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			updated_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			deleted_at TEXT
@@ -54,9 +58,13 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"itpm_window_seconds", "INTEGER NOT NULL DEFAULT 60 CHECK (itpm_window_seconds BETWEEN 1 AND 3600)"},
 		{"itpm_soft_limit", "INTEGER NOT NULL DEFAULT 100000 CHECK (itpm_soft_limit > 0)"},
 		{"itpm_hard_limit", "INTEGER NOT NULL DEFAULT 150000 CHECK (itpm_hard_limit > itpm_soft_limit)"},
+		{"capacity_enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"dispatch_pacing", "TEXT NOT NULL DEFAULT '' CHECK (dispatch_pacing IN ('', 'interval', 'completion'))"},
 		{"pacing_concurrency", "INTEGER NOT NULL DEFAULT 0 CHECK (pacing_concurrency >= 0)"},
 		{"pacing_interval_seconds", "INTEGER NOT NULL DEFAULT 0 CHECK (pacing_interval_seconds BETWEEN 0 AND 3600)"},
+		{"smooth_cold_start_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"smooth_cold_start_rpm", "INTEGER NOT NULL DEFAULT 8 CHECK (smooth_cold_start_rpm BETWEEN 1 AND 10000)"},
+		{"smooth_cold_start_tpm", "INTEGER NOT NULL DEFAULT 100000 CHECK (smooth_cold_start_tpm > 0)"},
 	} {
 		if err := addColumnIfMissing(a.db, "dispatch_strategies", column.name, column.definition); err != nil {
 			return err
@@ -364,6 +372,8 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"quota_5h_threshold_percent", "INTEGER NOT NULL DEFAULT 80 CHECK (quota_5h_threshold_percent BETWEEN 1 AND 100)"},
 		{"quota_7d_utilization", "REAL NOT NULL DEFAULT 0"},
 		{"quota_7d_reset_at", "TEXT"},
+		{"quota_7d_threshold_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"quota_7d_threshold_percent", "INTEGER NOT NULL DEFAULT 80 CHECK (quota_7d_threshold_percent BETWEEN 1 AND 100)"},
 		{"quota_sampled_at", "TEXT"},
 		{"subscription_type", "TEXT NOT NULL DEFAULT ''"},
 		{"rate_limit_tier", "TEXT NOT NULL DEFAULT ''"},
@@ -401,6 +411,9 @@ func (a *app) migrateAdvancedFeatures() error {
 	}
 	if _, err := a.db.Exec(`CREATE INDEX IF NOT EXISTS idx_accounts_quota_5h_threshold ON accounts(quota_5h_threshold_enabled, quota_5h_utilization)`); err != nil {
 		return fmt.Errorf("index account 5h threshold: %w", err)
+	}
+	if _, err := a.db.Exec(`CREATE INDEX IF NOT EXISTS idx_accounts_quota_7d_threshold ON accounts(quota_7d_threshold_enabled, quota_7d_utilization)`); err != nil {
+		return fmt.Errorf("index account 7d threshold: %w", err)
 	}
 	priceColumns := []struct{ name, definition string }{
 		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
@@ -500,15 +513,19 @@ func (a *app) migrateDispatchStrategyModes() error {
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
 			dispatch_mode TEXT NOT NULL DEFAULT '' CHECK (dispatch_mode IN (` + dispatchModeCheckList + `)),
+			capacity_enabled INTEGER NOT NULL DEFAULT 1,
 			dispatch_pacing TEXT NOT NULL DEFAULT '' CHECK (dispatch_pacing IN ('', 'interval', 'completion')),
 			pacing_concurrency INTEGER NOT NULL DEFAULT 0 CHECK (pacing_concurrency >= 0),
 			pacing_interval_seconds INTEGER NOT NULL DEFAULT 0 CHECK (pacing_interval_seconds BETWEEN 0 AND 3600),
+			smooth_cold_start_enabled INTEGER NOT NULL DEFAULT 0,
+			smooth_cold_start_rpm INTEGER NOT NULL DEFAULT 8 CHECK (smooth_cold_start_rpm BETWEEN 1 AND 10000),
+			smooth_cold_start_tpm INTEGER NOT NULL DEFAULT 100000 CHECK (smooth_cold_start_tpm > 0),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
 		)`,
-		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, created_at, updated_at, deleted_at)
-		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, created_at, updated_at, deleted_at FROM dispatch_strategies`,
+		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, capacity_enabled, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, smooth_cold_start_enabled, smooth_cold_start_rpm, smooth_cold_start_tpm, created_at, updated_at, deleted_at)
+		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, capacity_enabled, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, smooth_cold_start_enabled, smooth_cold_start_rpm, smooth_cold_start_tpm, created_at, updated_at, deleted_at FROM dispatch_strategies`,
 		`DROP TABLE dispatch_strategies`,
 		`ALTER TABLE dispatch_strategies_migrated RENAME TO dispatch_strategies`,
 	}

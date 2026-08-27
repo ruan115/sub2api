@@ -215,6 +215,8 @@ type account struct {
 	Quota5HThresholdPercent int            `json:"quota_5h_threshold_percent"`
 	Quota7D                 float64        `json:"quota_7d_utilization"`
 	Quota7DResetAt          string         `json:"quota_7d_reset_at"`
+	Quota7DThresholdEnabled bool           `json:"quota_7d_threshold_enabled"`
+	Quota7DThresholdPercent int            `json:"quota_7d_threshold_percent"`
 	QuotaSampledAt          string         `json:"quota_sampled_at"`
 	SubscriptionType        string         `json:"subscription_type"`
 	RateLimitTier           string         `json:"rate_limit_tier"`
@@ -263,6 +265,8 @@ type accountInput struct {
 	AccountPrice            float64         `json:"account_price"`
 	Quota5HThresholdEnabled *bool           `json:"quota_5h_threshold_enabled"`
 	Quota5HThresholdPercent *int            `json:"quota_5h_threshold_percent"`
+	Quota7DThresholdEnabled *bool           `json:"quota_7d_threshold_enabled"`
+	Quota7DThresholdPercent *int            `json:"quota_7d_threshold_percent"`
 	// StrategyID binds the account to a dispatch strategy. nil keeps the
 	// current binding (old clients), 0 clears it, >0 sets it.
 	StrategyID *int64 `json:"strategy_id"`
@@ -291,6 +295,8 @@ type accountBatchUpdateInput struct {
 	GroupIDs                *[]string `json:"group_ids"`
 	Quota5HThresholdEnabled *bool     `json:"quota_5h_threshold_enabled"`
 	Quota5HThresholdPercent *int      `json:"quota_5h_threshold_percent"`
+	Quota7DThresholdEnabled *bool     `json:"quota_7d_threshold_enabled"`
+	Quota7DThresholdPercent *int      `json:"quota_7d_threshold_percent"`
 }
 
 type purpose struct {
@@ -637,6 +643,8 @@ func (a *app) migrate() error {
 			quota_refreshed_at TEXT,
 			quota_5h_threshold_enabled INTEGER NOT NULL DEFAULT 0,
 			quota_5h_threshold_percent INTEGER NOT NULL DEFAULT 80 CHECK (quota_5h_threshold_percent BETWEEN 1 AND 100),
+			quota_7d_threshold_enabled INTEGER NOT NULL DEFAULT 0,
+			quota_7d_threshold_percent INTEGER NOT NULL DEFAULT 80 CHECK (quota_7d_threshold_percent BETWEEN 1 AND 100),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
@@ -1134,6 +1142,13 @@ func intPointerValue(value *int, fallback int) int {
 	return *value
 }
 
+func int64PointerValue(value *int64, fallback int64) int64 {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
 // resolveStrategyBinding validates a strategy_id input. It returns the SQL
 // value to store (nil = unbound) and an error when the strategy is missing.
 func (a *app) resolveStrategyBinding(id *int64) (any, error) {
@@ -1584,7 +1599,7 @@ const accountSelectBase = `SELECT a.id, a.name, a.platform, a.auth_type, a.crede
 	a.auto_proxy, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.strategy_id,
 	a.auth_status, a.auth_error, a.auth_checked_at, a.token_expires_at,
 	a.quota_5h_utilization, a.quota_5h_reset_at, a.quota_5h_threshold_enabled, a.quota_5h_threshold_percent,
-	a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_sampled_at,
+	a.quota_7d_utilization, a.quota_7d_reset_at, a.quota_7d_threshold_enabled, a.quota_7d_threshold_percent, a.quota_sampled_at,
 	a.subscription_type, a.rate_limit_tier, a.account_price, a.onboarded_at, a.reauthorized_at, a.reauthorization_count, a.invalidated_at, a.archived_at, a.survival_seconds_total, COALESCE(px.status, archived_px.status, ''), `
 
 const accountUsageSummaryFields = `COALESCE(aut.request_count, 0), COALESCE(aut.input_tokens, 0),
@@ -1599,17 +1614,18 @@ const accountListSelect = accountSelect
 
 func scanAccount(row scanner, reveal bool) (account, error) {
 	var item account
-	var schedulable, autoProxy, quota5HThresholdEnabled int
+	var schedulable, autoProxy, quota5HThresholdEnabled, quota7DThresholdEnabled int
 	var proxyPoolID, proxyID, strategyID sql.NullInt64
 	var lastUsed, expires, rateLimit, last429, downweightUntil, quotaRefreshed, authChecked, tokenExpires, quota5HReset, quota7DReset, quotaSampled, onboarded, reauthorized, invalidated, archived sql.NullString
 	var credentialsJSON, extraJSON string
-	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &quota5HThresholdEnabled, &item.Quota5HThresholdPercent, &item.Quota7D, &quota7DReset, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &reauthorized, &item.ReauthorizationCount, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
+	err := row.Scan(&item.ID, &item.Name, &item.Platform, &item.AuthType, &item.CredentialHint, &item.SourceSKHint, &item.HasCredentials, &item.Status, &schedulable, &item.Concurrency, &item.Priority, &item.RateMultiplier, &item.Notes, &item.ErrorMessage, &lastUsed, &expires, &rateLimit, &item.RateLimitWindow, &item.RateLimitReason, &item.Consecutive429, &last429, &downweightUntil, &quotaRefreshed, &item.CreatedAt, &item.UpdatedAt, &credentialsJSON, &extraJSON, &proxyPoolID, &item.ProxyPoolName, &proxyID, &item.ProxyName, &item.ProxyHint, &item.ProxyIP, &autoProxy, &item.BaseRPM, &item.RPMStrategy, &item.RPMStickyBuffer, &item.UserMsgQueueMode, &strategyID, &item.AuthStatus, &item.AuthError, &authChecked, &tokenExpires, &item.Quota5H, &quota5HReset, &quota5HThresholdEnabled, &item.Quota5HThresholdPercent, &item.Quota7D, &quota7DReset, &quota7DThresholdEnabled, &item.Quota7DThresholdPercent, &quotaSampled, &item.SubscriptionType, &item.RateLimitTier, &item.AccountPrice, &onboarded, &reauthorized, &item.ReauthorizationCount, &invalidated, &archived, &item.SurvivalTotal, &item.ProxyStatus, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalBilledCost, &item.TotalActualCost)
 	if err != nil {
 		return item, err
 	}
 	item.Schedulable = schedulable == 1
 	item.AutoProxy = autoProxy == 1
 	item.Quota5HThresholdEnabled = quota5HThresholdEnabled == 1
+	item.Quota7DThresholdEnabled = quota7DThresholdEnabled == 1
 	item.ProxyPoolID = nullIntPointer(proxyPoolID)
 	item.ProxyID = nullIntPointer(proxyID)
 	item.StrategyID = nullIntPointer(strategyID)
@@ -1667,6 +1683,25 @@ func accountQuotaFilterConditions(r *http.Request, alias string) ([]string, []an
 		conditions = append(conditions, alias+".quota_5h_threshold_enabled = 1 AND "+alias+".quota_5h_utilization >= "+alias+".quota_5h_threshold_percent")
 	default:
 		return nil, nil, errors.New("quota_5h_threshold must be enabled, disabled, or reached")
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("quota_7d_utilization")); raw != "" {
+		utilization, err := strconv.ParseFloat(raw, 64)
+		if err != nil || utilization < 0 || utilization > 100 {
+			return nil, nil, errors.New("quota_7d_utilization must be between 0 and 100")
+		}
+		conditions = append(conditions, alias+".quota_7d_utilization = ?")
+		args = append(args, utilization)
+	}
+	switch status := strings.TrimSpace(r.URL.Query().Get("quota_7d_threshold")); status {
+	case "":
+	case "enabled":
+		conditions = append(conditions, alias+".quota_7d_threshold_enabled = 1")
+	case "disabled":
+		conditions = append(conditions, alias+".quota_7d_threshold_enabled = 0")
+	case "reached":
+		conditions = append(conditions, alias+".quota_7d_threshold_enabled = 1 AND "+alias+".quota_7d_utilization >= "+alias+".quota_7d_threshold_percent")
+	default:
+		return nil, nil, errors.New("quota_7d_threshold must be enabled, disabled, or reached")
 	}
 	return conditions, args, nil
 }
@@ -1927,7 +1962,7 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, account_price, quota_5h_threshold_enabled, quota_5h_threshold_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, strategyValue, input.AccountPrice, boolInt(boolPointerValue(input.Quota5HThresholdEnabled, false)), intPointerValue(input.Quota5HThresholdPercent, 80))
+	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, account_price, quota_5h_threshold_enabled, quota_5h_threshold_percent, quota_7d_threshold_enabled, quota_7d_threshold_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, strategyValue, input.AccountPrice, boolInt(boolPointerValue(input.Quota5HThresholdEnabled, false)), intPointerValue(input.Quota5HThresholdPercent, 80), boolInt(boolPointerValue(input.Quota7DThresholdEnabled, false)), intPointerValue(input.Quota7DThresholdPercent, 80))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2066,12 +2101,18 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var quota5HThresholdEnabled, quota5HThresholdPercent any
+	var quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent any
 	if input.Quota5HThresholdEnabled != nil {
 		quota5HThresholdEnabled = boolInt(*input.Quota5HThresholdEnabled)
 	}
 	if input.Quota5HThresholdPercent != nil {
 		quota5HThresholdPercent = *input.Quota5HThresholdPercent
+	}
+	if input.Quota7DThresholdEnabled != nil {
+		quota7DThresholdEnabled = boolInt(*input.Quota7DThresholdEnabled)
+	}
+	if input.Quota7DThresholdPercent != nil {
+		quota7DThresholdPercent = *input.Quota7DThresholdPercent
 	}
 	result, err := tx.Exec(`UPDATE accounts SET name = ?, platform = ?, auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, extra_json = ?, status = ?, schedulable = ?, concurrency = ?, priority = ?, rate_multiplier = ?, notes = ?, error_message = ?, expires_at = NULLIF(?, ''), rate_limit_reset_at = NULLIF(?, ''),
 		rate_limit_window = CASE WHEN NULLIF(?, '') IS NULL THEN '' ELSE rate_limit_window END,
@@ -2079,13 +2120,13 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		consecutive_429 = CASE WHEN NULLIF(?, '') IS NULL THEN 0 ELSE consecutive_429 END,
 		last_429_at = CASE WHEN NULLIF(?, '') IS NULL THEN NULL ELSE last_429_at END,
 		proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?,
-		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), quota_7d_threshold_enabled = COALESCE(?, quota_7d_threshold_enabled), quota_7d_threshold_percent = COALESCE(?, quota_7d_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt,
 		// Clearing the cooldown field is the administrator's manual recovery, so
 		// the automatic 429 bookkeeping has to go with it. Otherwise the account
 		// keeps its strikes and the next single 429 re-parks it.
 		input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt,
-		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, id, leaseOwner)
+		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent, id, leaseOwner)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2135,7 +2176,7 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	if err := a.enforceStoredAccountFiveHourThreshold(id, rateLimitPolicy{}); err != nil {
+	if err := a.enforceStoredAccountQuotaThresholds(id, rateLimitPolicy{}); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -2185,6 +2226,9 @@ func normalizeAccountInput(input *accountInput, existingCredentials, existingExt
 	if input.Quota5HThresholdPercent != nil && (*input.Quota5HThresholdPercent < 1 || *input.Quota5HThresholdPercent > 100) {
 		return "", "", errors.New("5h quota threshold must be between 1 and 100")
 	}
+	if input.Quota7DThresholdPercent != nil && (*input.Quota7DThresholdPercent < 1 || *input.Quota7DThresholdPercent > 100) {
+		return "", "", errors.New("7d quota threshold must be between 1 and 100")
+	}
 	if input.Status != "active" && input.Status != "error" && input.Status != "disabled" {
 		return "", "", errors.New("invalid account status")
 	}
@@ -2209,12 +2253,35 @@ func normalizeAccountInput(input *accountInput, existingCredentials, existingExt
 		return "", "", fmt.Errorf("extra: %w", err)
 	}
 	extra := decodeObject(extraJSON)
+	if err := validateSmoothColdStartExtra(extra); err != nil {
+		return "", "", err
+	}
 	extra["base_rpm"] = input.BaseRPM
 	extra["rpm_strategy"] = input.RPMStrategy
 	extra["rpm_sticky_buffer"] = input.RPMStickyBuffer
 	extra["user_msg_queue_mode"] = input.UserMsgQueueMode
 	normalizedExtra, _ := json.Marshal(extra)
 	return credentialsJSON, string(normalizedExtra), nil
+}
+
+func validateSmoothColdStartExtra(extra map[string]any) error {
+	if value, exists := extra["smooth_cold_start_enabled"]; exists {
+		if _, ok := value.(bool); !ok {
+			return errors.New("smooth cold start enabled must be a boolean")
+		}
+	}
+	if value, exists := extra["smooth_cold_start_rpm"]; exists {
+		rpm := intFromJSON(value)
+		if rpm < 1 || rpm > 10000 {
+			return errors.New("smooth cold start RPM must be between 1 and 10000")
+		}
+	}
+	if value, exists := extra["smooth_cold_start_tpm"]; exists {
+		if intFromJSON(value) < 1 {
+			return errors.New("smooth cold start TPM must be greater than zero")
+		}
+	}
+	return nil
 }
 
 func normalizeJSONObject(raw json.RawMessage, fallback string) (string, error) {
@@ -2667,6 +2734,12 @@ func (a *app) handleAccountBatchUpdate(w http.ResponseWriter, r *http.Request) {
 	if input.Quota5HThresholdPercent != nil {
 		appendUpdate("quota_5h_threshold_percent", *input.Quota5HThresholdPercent)
 	}
+	if input.Quota7DThresholdEnabled != nil {
+		appendUpdate("quota_7d_threshold_enabled", boolInt(*input.Quota7DThresholdEnabled))
+	}
+	if input.Quota7DThresholdPercent != nil {
+		appendUpdate("quota_7d_threshold_percent", *input.Quota7DThresholdPercent)
+	}
 	setParts = append(setParts, "updated_at = "+nowSQL)
 	accountIDs := make([]any, 0, len(accounts))
 	for _, item := range accounts {
@@ -2721,10 +2794,10 @@ func (a *app) handleAccountBatchUpdate(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	if input.Quota5HThresholdEnabled != nil || input.Quota5HThresholdPercent != nil {
+	if input.Quota5HThresholdEnabled != nil || input.Quota5HThresholdPercent != nil || input.Quota7DThresholdEnabled != nil || input.Quota7DThresholdPercent != nil {
 		for _, item := range accounts {
-			if err := a.enforceStoredAccountFiveHourThreshold(item.id, rateLimitPolicy{}); err != nil {
-				logDatabaseWriteError("enforce batch account 5h quota threshold", err)
+			if err := a.enforceStoredAccountQuotaThresholds(item.id, rateLimitPolicy{}); err != nil {
+				logDatabaseWriteError("enforce batch account quota thresholds", err)
 			}
 		}
 	}
@@ -2732,7 +2805,7 @@ func (a *app) handleAccountBatchUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func normalizeAccountBatchUpdate(input *accountBatchUpdateInput) error {
-	if input.Concurrency == nil && input.Priority == nil && input.RateMultiplier == nil && input.AccountPrice == nil && input.BaseRPM == nil && input.RPMStrategy == nil && input.RPMStickyBuffer == nil && input.UserMsgQueueMode == nil && input.StrategyID == nil && input.GroupIDs == nil && input.Quota5HThresholdEnabled == nil && input.Quota5HThresholdPercent == nil {
+	if input.Concurrency == nil && input.Priority == nil && input.RateMultiplier == nil && input.AccountPrice == nil && input.BaseRPM == nil && input.RPMStrategy == nil && input.RPMStickyBuffer == nil && input.UserMsgQueueMode == nil && input.StrategyID == nil && input.GroupIDs == nil && input.Quota5HThresholdEnabled == nil && input.Quota5HThresholdPercent == nil && input.Quota7DThresholdEnabled == nil && input.Quota7DThresholdPercent == nil {
 		return errors.New("select at least one field to update")
 	}
 	if input.Concurrency != nil && *input.Concurrency <= 0 {
@@ -2752,6 +2825,9 @@ func normalizeAccountBatchUpdate(input *accountBatchUpdateInput) error {
 	}
 	if input.Quota5HThresholdPercent != nil && (*input.Quota5HThresholdPercent < 1 || *input.Quota5HThresholdPercent > 100) {
 		return errors.New("5h quota threshold must be between 1 and 100")
+	}
+	if input.Quota7DThresholdPercent != nil && (*input.Quota7DThresholdPercent < 1 || *input.Quota7DThresholdPercent > 100) {
+		return errors.New("7d quota threshold must be between 1 and 100")
 	}
 	if input.RPMStrategy != nil {
 		value := strings.TrimSpace(*input.RPMStrategy)

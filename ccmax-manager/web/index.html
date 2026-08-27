@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
+    <meta name="asset-version" content="__ASSET_VERSION__" />
     <title>CCMAX Control</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/lib/choices.min.css?v=__ASSET_VERSION__" />
@@ -297,8 +298,30 @@
                   aria-label="精确 5h 使用率" /><b>%</b></span
             ></label>
             <label class="threshold-status-filter"
-              ><span>提前冷却</span
+              ><span>5h 提前冷却</span
               ><select id="account-quota-threshold-filter" aria-label="按 5h 提前冷却状态筛选">
+                <option value="">全部</option>
+                <option value="enabled">已开启</option>
+                <option value="disabled">未开启</option>
+                <option value="reached">已达到阈值</option>
+              </select></label
+            >
+            <label class="quota-utilization-filter"
+              ><span>7d 使用率 =</span
+              ><span class="percent-input"
+                ><input
+                  id="account-7d-utilization"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.01"
+                  inputmode="decimal"
+                  placeholder="不限"
+                  aria-label="精确 7d 使用率" /><b>%</b></span
+            ></label>
+            <label class="threshold-status-filter"
+              ><span>7d 提前冷却</span
+              ><select id="account-7d-quota-threshold-filter" aria-label="按 7d 提前冷却状态筛选">
                 <option value="">全部</option>
                 <option value="enabled">已开启</option>
                 <option value="disabled">未开启</option>
@@ -527,6 +550,8 @@
               <label><span>调度策略</span><select id="batch-strategy"><option value="">跟随分组</option></select><small>绑定后该账号的限流与算法优先使用策略配置</small></label>
               <label class="toggle-field"><span>启用提前冷却</span><input type="checkbox" id="batch-quota-threshold-enabled" /><i></i></label>
               <label class="quota-threshold-value-field"><span>5h 使用率阈值</span><span class="percent-input"><input id="batch-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 5h 刷新时间，并沿用所属分组的刷新错峰配置</small></label>
+              <label class="toggle-field"><span>启用 7d 提前冷却</span><input type="checkbox" id="batch-7d-quota-threshold-enabled" /><i></i></label>
+              <label class="quota-threshold-value-field"><span>7d 使用率阈值</span><span class="percent-input"><input id="batch-7d-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 7d 刷新时间</small></label>
               <fieldset class="group-picker" id="batch-group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
               <div class="span-2 batch-auth-actions"><button class="button primary write-action" id="batch-auth-submit" type="submit"><i data-lucide="key-round"></i><span>开始批量授权</span></button></div>
             </form>
@@ -1404,6 +1429,22 @@
             ><small>单独绑定时优先于分组策略</small></label
           >
           <div class="form-section span-2">
+            <strong>平缓冷启动</strong><span>按固定间隔放量并限制未缓存输入峰值</span>
+          </div>
+          <label class="toggle-field span-2"
+            ><span>启用账号级平缓冷启动</span
+            ><input type="checkbox" id="account-smooth-cold-start" /><i></i
+            ><small>开启时覆盖策略中的平缓参数；关闭时继续跟随绑定策略</small></label
+          ><label
+            ><span>平缓 RPM</span
+            ><input id="account-smooth-cold-start-rpm" type="number" min="1" max="10000" value="8"
+            /><small>8 RPM 会自动按约每 7 秒放行 1 个请求，60 秒滑窗仍严格不超过 8</small></label
+          ><label
+            ><span>未缓存输入上限</span
+            ><input id="account-smooth-cold-start-tpm" type="number" min="1" value="100000"
+            /><small>最近 60 秒 input + cache_creation 与在途预留不得超过该值；cache_read 不计入</small></label
+          >
+          <div class="form-section span-2">
             <strong>5h 配额保护</strong><span>达到账号阈值后提前停止调度</span>
           </div>
           <label class="toggle-field"
@@ -1421,6 +1462,25 @@
                 value="80"
                 required /><b>%</b></span
             ><small>达到阈值即冷却至 5h 刷新时间，并沿用所属分组的刷新错峰配置</small></label
+          >
+          <div class="form-section span-2">
+            <strong>7d 配额保护</strong><span>达到账号阈值后提前停止调度</span>
+          </div>
+          <label class="toggle-field"
+            ><span>启用 7d 提前冷却</span
+            ><input type="checkbox" id="account-7d-quota-threshold-enabled" /><i></i></label
+          ><label class="quota-threshold-value-field"
+            ><span>7d 使用率阈值</span
+            ><span class="percent-input"
+              ><input
+                id="account-7d-quota-threshold-percent"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                value="80"
+                required /><b>%</b></span
+            ><small>达到阈值即冷却至 7d 刷新时间</small></label
           >
           <div class="form-section span-2">
             <strong>请求处理</strong
@@ -1539,6 +1599,19 @@
             <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="quota_5h_threshold_percent" /><span>5h 使用率阈值</span></label>
             <span class="percent-input"><input class="batch-edit-value" id="batch-edit-quota-threshold-percent" type="number" min="1" max="100" step="1" /><b>%</b></span>
             <small data-batch-edit-hint="quota_5h_threshold_percent"></small>
+          </div>
+          <div class="form-section span-2">
+            <strong>7d 配额保护</strong><span>达到账号阈值后提前停止调度</span>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="quota_7d_threshold_enabled" /><span>7d 提前冷却</span></label>
+            <select class="batch-edit-value" id="batch-edit-7d-quota-threshold-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+            <small data-batch-edit-hint="quota_7d_threshold_enabled"></small>
+          </div>
+          <div class="batch-edit-field">
+            <label class="batch-edit-apply"><input type="checkbox" data-batch-edit-apply="quota_7d_threshold_percent" /><span>7d 使用率阈值</span></label>
+            <span class="percent-input"><input class="batch-edit-value" id="batch-edit-7d-quota-threshold-percent" type="number" min="1" max="100" step="1" /><b>%</b></span>
+            <small data-batch-edit-hint="quota_7d_threshold_percent"></small>
           </div>
           <div class="form-section span-2">
             <strong>共有配置</strong><span>这些字段可以由多个账号使用相同配置</span>
@@ -2193,6 +2266,12 @@
           <div class="form-section span-2">
             <strong>调度容量</strong><span>RPM、TPM、并发与分配算法</span>
           </div>
+          <label class="toggle-field span-2" title="关闭后忽略该策略的容量和调度算法配置">
+            <span>启用调度容量</span>
+            <input id="strategy-capacity-enabled" type="checkbox" checked />
+            <i aria-hidden="true"></i>
+            <small>关闭后不应用策略 RPM、TPM、并发、调度算法和处理节奏；账号自身限制与 ITPM 峰值保护不受影响</small>
+          </label>
           <label
             ><span>RPM 限制</span
             ><input
@@ -2264,6 +2343,24 @@
               min="0"
               max="3600"
               value="0" /><small>仅按秒间隔模式生效，1-3600</small></label
+          >
+          <div class="form-section span-2">
+            <strong>平缓冷启动</strong><span>防止新账号在一分钟开始时瞬间打满并触发 429</span>
+          </div>
+          <label class="toggle-field span-2">
+            <span>启用平缓冷启动</span>
+            <input id="strategy-smooth-cold-start" type="checkbox" />
+            <i aria-hidden="true"></i>
+            <small>开启后自动覆盖手工处理节奏；账号单独开启时优先使用账号参数</small>
+          </label>
+          <label
+            ><span>平缓 RPM</span
+            ><input id="strategy-smooth-cold-start-rpm" type="number" min="1" max="10000" value="8"
+            /><small>8 RPM 自动换算为约每 7 秒放行 1 个请求，并保留 60 秒硬上限</small></label
+          ><label
+            ><span>未缓存输入上限</span
+            ><input id="strategy-smooth-cold-start-tpm" type="number" min="1" value="100000"
+            /><small>严格限制 input + cache_creation（含在途预留）；缓存读不占用该上限</small></label
           >
         </div>
         <footer class="modal-actions">
@@ -2527,6 +2624,7 @@
           </fieldset>
           <fieldset class="page-picker account-view-picker" id="user-account-columns">
             <legend>账号池表头</legend>
+            <label><input type="checkbox" name="user-account-column" value="account" /><span>账号</span></label>
             <label><input type="checkbox" name="user-account-column" value="status" /><span>账号状态</span></label>
             <label><input type="checkbox" name="user-account-column" value="subscription" /><span>订阅类型</span></label>
             <label><input type="checkbox" name="user-account-column" value="quota" /><span>用量窗口</span></label>
@@ -2904,7 +3002,6 @@
     <div id="account-action-menu" class="account-action-popover" role="menu" hidden></div>
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
     <script src="/lib/choices.min.js?v=__ASSET_VERSION__" defer></script>
-    <script src="/lib/chart.umd.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/lib/lucide.min.js?v=__ASSET_VERSION__" defer></script>
     <script src="/app.js?v=__ASSET_VERSION__" defer></script>
   </body>

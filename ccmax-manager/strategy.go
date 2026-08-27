@@ -31,6 +31,8 @@ const (
 	defaultStrategyITPMWindowSeconds           = 60
 	defaultStrategyITPMSoftLimit         int64 = 100_000
 	defaultStrategyITPMHardLimit         int64 = 150_000
+	defaultSmoothColdStartRPM                  = 8
+	defaultSmoothColdStartTPM            int64 = 100_000
 	minStrategyITPMWindowSeconds               = 1
 	maxStrategyITPMWindowSeconds               = 3600
 )
@@ -48,46 +50,54 @@ func validDispatchMode(mode string) bool {
 // accounts bind to one strategy; an account-level binding overrides the
 // group-level one. Zero limits mean "not limited by this strategy".
 type dispatchStrategy struct {
-	ID                    int64  `json:"id"`
-	Name                  string `json:"name"`
-	Description           string `json:"description"`
-	RPMLimit              int    `json:"rpm_limit"`
-	TPMLimit              int64  `json:"tpm_limit"`
-	ITPMLimit             int64  `json:"itpm_limit"`
-	ITPMProtectionEnabled bool   `json:"itpm_protection_enabled"`
-	ITPMWindowSeconds     int    `json:"itpm_window_seconds"`
-	ITPMSoftLimit         int64  `json:"itpm_soft_limit"`
-	ITPMHardLimit         int64  `json:"itpm_hard_limit"`
-	ConcurrencyLimit      int    `json:"concurrency_limit"`
-	RPMStrategy           string `json:"rpm_strategy"`
-	RPMStickyBuffer       int    `json:"rpm_sticky_buffer"`
-	DispatchMode          string `json:"dispatch_mode"`
-	DispatchPacing        string `json:"dispatch_pacing"`
-	PacingConcurrency     int    `json:"pacing_concurrency"`
-	PacingIntervalSeconds int    `json:"pacing_interval_seconds"`
-	BoundGroups           int    `json:"bound_groups"`
-	BoundAccounts         int    `json:"bound_accounts"`
-	CreatedAt             string `json:"created_at"`
-	UpdatedAt             string `json:"updated_at"`
+	ID                     int64  `json:"id"`
+	Name                   string `json:"name"`
+	Description            string `json:"description"`
+	RPMLimit               int    `json:"rpm_limit"`
+	TPMLimit               int64  `json:"tpm_limit"`
+	ITPMLimit              int64  `json:"itpm_limit"`
+	ITPMProtectionEnabled  bool   `json:"itpm_protection_enabled"`
+	ITPMWindowSeconds      int    `json:"itpm_window_seconds"`
+	ITPMSoftLimit          int64  `json:"itpm_soft_limit"`
+	ITPMHardLimit          int64  `json:"itpm_hard_limit"`
+	ConcurrencyLimit       int    `json:"concurrency_limit"`
+	RPMStrategy            string `json:"rpm_strategy"`
+	RPMStickyBuffer        int    `json:"rpm_sticky_buffer"`
+	DispatchMode           string `json:"dispatch_mode"`
+	CapacityEnabled        bool   `json:"capacity_enabled"`
+	DispatchPacing         string `json:"dispatch_pacing"`
+	PacingConcurrency      int    `json:"pacing_concurrency"`
+	PacingIntervalSeconds  int    `json:"pacing_interval_seconds"`
+	SmoothColdStartEnabled bool   `json:"smooth_cold_start_enabled"`
+	SmoothColdStartRPM     int    `json:"smooth_cold_start_rpm"`
+	SmoothColdStartTPM     int64  `json:"smooth_cold_start_tpm"`
+	BoundGroups            int    `json:"bound_groups"`
+	BoundAccounts          int    `json:"bound_accounts"`
+	CreatedAt              string `json:"created_at"`
+	UpdatedAt              string `json:"updated_at"`
 }
 
 type dispatchStrategyInput struct {
-	Name                  string `json:"name"`
-	Description           string `json:"description"`
-	RPMLimit              int    `json:"rpm_limit"`
-	TPMLimit              int64  `json:"tpm_limit"`
-	ITPMLimit             int64  `json:"itpm_limit"`
-	ITPMProtectionEnabled *bool  `json:"itpm_protection_enabled"`
-	ITPMWindowSeconds     *int   `json:"itpm_window_seconds"`
-	ITPMSoftLimit         *int64 `json:"itpm_soft_limit"`
-	ITPMHardLimit         *int64 `json:"itpm_hard_limit"`
-	ConcurrencyLimit      int    `json:"concurrency_limit"`
-	RPMStrategy           string `json:"rpm_strategy"`
-	RPMStickyBuffer       int    `json:"rpm_sticky_buffer"`
-	DispatchMode          string `json:"dispatch_mode"`
-	DispatchPacing        string `json:"dispatch_pacing"`
-	PacingConcurrency     int    `json:"pacing_concurrency"`
-	PacingIntervalSeconds int    `json:"pacing_interval_seconds"`
+	Name                   string `json:"name"`
+	Description            string `json:"description"`
+	RPMLimit               int    `json:"rpm_limit"`
+	TPMLimit               int64  `json:"tpm_limit"`
+	ITPMLimit              int64  `json:"itpm_limit"`
+	ITPMProtectionEnabled  *bool  `json:"itpm_protection_enabled"`
+	ITPMWindowSeconds      *int   `json:"itpm_window_seconds"`
+	ITPMSoftLimit          *int64 `json:"itpm_soft_limit"`
+	ITPMHardLimit          *int64 `json:"itpm_hard_limit"`
+	ConcurrencyLimit       int    `json:"concurrency_limit"`
+	RPMStrategy            string `json:"rpm_strategy"`
+	RPMStickyBuffer        int    `json:"rpm_sticky_buffer"`
+	DispatchMode           string `json:"dispatch_mode"`
+	CapacityEnabled        *bool  `json:"capacity_enabled"`
+	DispatchPacing         string `json:"dispatch_pacing"`
+	PacingConcurrency      int    `json:"pacing_concurrency"`
+	PacingIntervalSeconds  int    `json:"pacing_interval_seconds"`
+	SmoothColdStartEnabled *bool  `json:"smooth_cold_start_enabled"`
+	SmoothColdStartRPM     *int   `json:"smooth_cold_start_rpm"`
+	SmoothColdStartTPM     *int64 `json:"smooth_cold_start_tpm"`
 }
 
 func (input *dispatchStrategyInput) validate() error {
@@ -118,6 +128,12 @@ func (input *dispatchStrategyInput) validate() error {
 	}
 	if !validDispatchMode(input.DispatchMode) {
 		return errors.New("invalid strategy dispatch mode")
+	}
+	if input.SmoothColdStartRPM != nil && (*input.SmoothColdStartRPM < 1 || *input.SmoothColdStartRPM > 10000) {
+		return errors.New("smooth cold start RPM must be between 1 and 10000")
+	}
+	if input.SmoothColdStartTPM != nil && *input.SmoothColdStartTPM < 1 {
+		return errors.New("smooth cold start TPM must be greater than zero")
 	}
 	switch input.DispatchPacing {
 	case "":
@@ -198,7 +214,7 @@ func optionalInt64(value *int64) any {
 	return *value
 }
 
-const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.itpm_protection_enabled, s.itpm_window_seconds, s.itpm_soft_limit, s.itpm_hard_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode, s.dispatch_pacing, s.pacing_concurrency, s.pacing_interval_seconds,
+const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.itpm_protection_enabled, s.itpm_window_seconds, s.itpm_soft_limit, s.itpm_hard_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode, s.capacity_enabled, s.dispatch_pacing, s.pacing_concurrency, s.pacing_interval_seconds, s.smooth_cold_start_enabled, s.smooth_cold_start_rpm, s.smooth_cold_start_tpm,
 	(SELECT COUNT(*) FROM groups g WHERE g.strategy_id = s.id) AS bound_groups,
 	(SELECT COUNT(DISTINCT a.id) FROM accounts a
 		LEFT JOIN account_groups ag ON ag.account_id = a.id
@@ -210,9 +226,11 @@ const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit,
 
 func scanDispatchStrategy(rows *sql.Rows) (dispatchStrategy, error) {
 	var item dispatchStrategy
-	var itpmProtectionEnabled int
-	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &itpmProtectionEnabled, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.DispatchPacing, &item.PacingConcurrency, &item.PacingIntervalSeconds, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
+	var itpmProtectionEnabled, capacityEnabled, smoothColdStartEnabled int
+	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &itpmProtectionEnabled, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &capacityEnabled, &item.DispatchPacing, &item.PacingConcurrency, &item.PacingIntervalSeconds, &smoothColdStartEnabled, &item.SmoothColdStartRPM, &item.SmoothColdStartTPM, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
 	item.ITPMProtectionEnabled = itpmProtectionEnabled == 1
+	item.CapacityEnabled = capacityEnabled == 1
+	item.SmoothColdStartEnabled = smoothColdStartEnabled == 1
 	return item, err
 }
 
@@ -256,8 +274,12 @@ func (a *app) handleStrategyCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, dispatch_pacing, pacing_concurrency, pacing_interval_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, boolInt(itpmProtectionEnabled), itpmWindowSeconds, itpmSoftLimit, itpmHardLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, input.DispatchPacing, input.PacingConcurrency, input.PacingIntervalSeconds)
+	capacityEnabled := boolPointerValue(input.CapacityEnabled, true)
+	smoothColdStartEnabled := boolPointerValue(input.SmoothColdStartEnabled, false)
+	smoothColdStartRPM := intPointerValue(input.SmoothColdStartRPM, defaultSmoothColdStartRPM)
+	smoothColdStartTPM := int64PointerValue(input.SmoothColdStartTPM, defaultSmoothColdStartTPM)
+	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, capacity_enabled, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, smooth_cold_start_enabled, smooth_cold_start_rpm, smooth_cold_start_tpm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, boolInt(itpmProtectionEnabled), itpmWindowSeconds, itpmSoftLimit, itpmHardLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, boolInt(capacityEnabled), input.DispatchPacing, input.PacingConcurrency, input.PacingIntervalSeconds, boolInt(smoothColdStartEnabled), smoothColdStartRPM, smoothColdStartTPM)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -302,10 +324,12 @@ func (a *app) handleStrategyUpdate(w http.ResponseWriter, r *http.Request) {
 	result, err := a.db.Exec(`UPDATE dispatch_strategies SET name = ?, description = ?, rpm_limit = ?, tpm_limit = ?, itpm_limit = ?,
 		itpm_protection_enabled = COALESCE(?, itpm_protection_enabled), itpm_window_seconds = COALESCE(?, itpm_window_seconds),
 		itpm_soft_limit = COALESCE(?, itpm_soft_limit), itpm_hard_limit = COALESCE(?, itpm_hard_limit),
-		concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, dispatch_pacing = ?, pacing_concurrency = ?, pacing_interval_seconds = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
+		concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, capacity_enabled = COALESCE(?, capacity_enabled), dispatch_pacing = ?, pacing_concurrency = ?, pacing_interval_seconds = ?,
+		smooth_cold_start_enabled = COALESCE(?, smooth_cold_start_enabled), smooth_cold_start_rpm = COALESCE(?, smooth_cold_start_rpm), smooth_cold_start_tpm = COALESCE(?, smooth_cold_start_tpm), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
 		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit,
 		optionalBoolInt(input.ITPMProtectionEnabled), optionalInt(input.ITPMWindowSeconds), optionalInt64(input.ITPMSoftLimit), optionalInt64(input.ITPMHardLimit),
-		input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, input.DispatchPacing, input.PacingConcurrency, input.PacingIntervalSeconds, id)
+		input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, optionalBoolInt(input.CapacityEnabled), input.DispatchPacing, input.PacingConcurrency, input.PacingIntervalSeconds,
+		optionalBoolInt(input.SmoothColdStartEnabled), optionalInt(input.SmoothColdStartRPM), optionalInt64(input.SmoothColdStartTPM), id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -363,6 +387,8 @@ type strategyAccountObservation struct {
 	Concurrency    int      `json:"concurrency"`
 	Direct         bool     `json:"direct_binding"`
 	temporaryRPM   int
+	extraJSON      string
+	smooth         smoothColdStartConfig
 	// Dispatch is "unavailable", "pending" (待调度, held back by a concentrated
 	// strategy) or "active".
 	Dispatch string `json:"dispatch"`
@@ -392,7 +418,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 	result := []strategyObservation{}
 	for _, strategy := range strategies {
 		observation := strategyObservation{dispatchStrategy: strategy, Accounts: []strategyAccountObservation{}}
-		rows, err := a.db.Query(`SELECT a.id, a.name, a.status, a.base_rpm, a.concurrency,
+		rows, err := a.db.Query(`SELECT a.id, a.name, a.status, a.base_rpm, a.concurrency, a.extra_json,
 			COALESCE((SELECT GROUP_CONCAT(ag2.group_id, ',') FROM account_groups ag2 WHERE ag2.account_id = a.id), '') AS group_ids,
 			CASE WHEN `+accountStatePredicate("a", "normal")+` THEN 1 ELSE 0 END AS alive,
 			a.strategy_id IS NOT NULL AS direct_binding,
@@ -418,7 +444,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			var item strategyAccountObservation
 			var alive, direct, temporaryRPM int
 			var groupIDs string
-			if err := rows.Scan(&item.AccountID, &item.Name, &item.Status, &item.BaseRPM, &item.Concurrency, &groupIDs, &alive, &direct, &item.RPM, &item.TPM, &item.CacheReadTPM, &item.Inflight, &temporaryRPM); err != nil {
+			if err := rows.Scan(&item.AccountID, &item.Name, &item.Status, &item.BaseRPM, &item.Concurrency, &item.extraJSON, &groupIDs, &alive, &direct, &item.RPM, &item.TPM, &item.CacheReadTPM, &item.Inflight, &temporaryRPM); err != nil {
 				rows.Close()
 				writeDBError(w, err)
 				return
@@ -427,6 +453,10 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			item.Direct = direct == 1
 			item.GroupIDs = splitErrorGroupIDs(groupIDs)
 			item.temporaryRPM = temporaryRPM
+			item.smooth = smoothColdStartFromExtra(item.extraJSON)
+			if !item.smooth.Enabled && strategy.SmoothColdStartEnabled {
+				item.smooth = smoothColdStartConfig{Enabled: true, RPM: strategy.SmoothColdStartRPM, TPM: strategy.SmoothColdStartTPM}
+			}
 			observation.Accounts = append(observation.Accounts, item)
 		}
 		if err := rows.Err(); err != nil {
@@ -439,7 +469,11 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 		accountIDs := make([]int64, 0, len(observation.Accounts))
 		for _, item := range observation.Accounts {
 			accountIDs = append(accountIDs, item.AccountID)
-			itpmWindows[item.AccountID] = strategy.ITPMWindowSeconds
+			if item.smooth.Enabled {
+				itpmWindows[item.AccountID] = defaultStrategyITPMWindowSeconds
+			} else {
+				itpmWindows[item.AccountID] = strategy.ITPMWindowSeconds
+			}
 		}
 		itpmUsage, err := loadAccountITPMUsage(a.db, itpmWindows)
 		if err != nil {
@@ -451,14 +485,20 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			writeDBError(w, err)
 			return
 		}
-		_, _, softLimit, _ := normalizeStrategyITPMConfig(strategy.ITPMProtectionEnabled, strategy.ITPMWindowSeconds, strategy.ITPMSoftLimit, strategy.ITPMHardLimit, strategy.ITPMLimit)
 		for index := range observation.Accounts {
 			item := &observation.Accounts[index]
 			item.ITPM = itpmUsage[item.AccountID]
 			reservation := reservations[item.AccountID]
 			item.ITPMReserved = reservation.Tokens
 			item.ITPMLoad = item.ITPM + item.ITPMReserved
-			item.ITPMRestricted = strategy.ITPMProtectionEnabled && (reservation.Exclusive || item.ITPMLoad >= softLimit)
+			itpmProtection, _, softLimit, hardLimit := normalizeStrategyITPMConfig(strategy.ITPMProtectionEnabled, strategy.ITPMWindowSeconds, strategy.ITPMSoftLimit, strategy.ITPMHardLimit, strategy.ITPMLimit)
+			if item.smooth.Enabled {
+				_, smoothTPM := normalizeSmoothColdStartLimits(item.smooth.RPM, item.smooth.TPM)
+				itpmProtection = true
+				hardLimit = minPositiveInt64(hardLimit, smoothTPM)
+				softLimit = hardLimit
+			}
+			item.ITPMRestricted = itpmProtection && (reservation.Exclusive || item.ITPMLoad >= softLimit)
 			// Under a concentrated strategy an idle account is deliberately held
 			// back, which is different from being unable to serve.
 			switch {
@@ -467,7 +507,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			case item.ITPMRestricted:
 				item.Dispatch = "itpm_restricted"
 				observation.AccountsITPMRestricted++
-			case strategy.DispatchMode == "concentrated" && item.RPM == 0:
+			case strategy.CapacityEnabled && strategy.DispatchMode == "concentrated" && item.RPM == 0:
 				item.Dispatch = "pending"
 				observation.AccountsPending++
 			default:
@@ -478,8 +518,11 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			}
 			if item.Alive && !item.ITPMRestricted {
 				effectiveRPM := item.BaseRPM
-				if strategy.RPMLimit > 0 {
+				if strategy.CapacityEnabled && strategy.RPMLimit > 0 {
 					effectiveRPM = strategy.RPMLimit
+				}
+				if item.smooth.Enabled {
+					effectiveRPM = minPositiveInt(effectiveRPM, item.smooth.RPM)
 				}
 				if item.temporaryRPM > 0 && (effectiveRPM <= 0 || item.temporaryRPM < effectiveRPM) {
 					effectiveRPM = item.temporaryRPM

@@ -171,7 +171,7 @@ func TestRealtimeCapacityTracksStrategyITPMWindowAndReservations(t *testing.T) {
 	if _, err := a.db.Exec(`UPDATE usage_logs SET created_at = ? WHERE request_id = ?`, time.Now().UTC().Add(-45*time.Second).Format(time.RFC3339Nano), "itpm-expired-usage"); err != nil {
 		t.Fatal(err)
 	}
-	allowed, _ := a.localITPMReservations.reserve(reserved.ID, "reserved-load", 100, 0, 100, 150, false, false, 0)
+	allowed, _ := a.localITPMReservations.reserve(reserved.ID, "reserved-load", 100, 0, 100, 150, false, false, false, 0)
 	if !allowed {
 		t.Fatal("failed to create in-flight ITPM reservation")
 	}

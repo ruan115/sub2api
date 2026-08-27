@@ -43,10 +43,13 @@ const state = {
   accountStatus: "",
   account5HUtilization: "",
   accountQuotaThreshold: "",
+  account7DUtilization: "",
+  account7DQuotaThreshold: "",
   deadStatus: "pending",
   deadSearch: "",
   accountsLoadedAt: 0,
   accountsLoading: null,
+  accountLoadSequence: 0,
   deadAccountsLoading: null,
   accountAutoRefresh: true,
   breakdown: "group",
@@ -65,6 +68,8 @@ const state = {
   strategyAccountMode: "bind",
   strategyAccountID: "",
   strategyAccountGroup: "",
+  viewLoadedAt: {},
+  viewLoading: {},
 };
 
 const viewMeta = {
@@ -99,7 +104,7 @@ const rolePageDefaults = {
   user: ["accounts", "access"],
 };
 const restrictedAccountViewDefault = {
-  columns: ["status", "subscription", "quota", "requests", "tpm"],
+  columns: ["account", "status", "subscription", "quota", "requests", "tpm"],
   blocks: [
     "filtered_accounts",
     "tokens",
@@ -172,6 +177,21 @@ const accountColumnWidthsStorageKey = "ccmax.accounts.column-widths";
 const tableFreezeStorageKey = "ccmax.table-freeze.v1";
 const accountAutoRefreshInterval = 30000;
 const realtimeRefreshInterval = 5000;
+const viewDataTTL = {
+  overview: 30000,
+  accounts: 15000,
+  dead: 30000,
+  proxies: 60000,
+  access: 30000,
+  pricing: 60000,
+  billing: 30000,
+  audit: 30000,
+  daily: 60000,
+  authorization: 30000,
+  errors: 30000,
+  strategies: 5000,
+  onboarding: 60000,
+};
 const paginationTables = {
   accounts: { body: "accounts-body", size: 20, render: renderAccounts },
   dead: { body: "dead-accounts-body", size: 20, render: renderDeadAccounts },
@@ -227,7 +247,7 @@ function renderPagination(key, total, page, pageSize, totalPages) {
       <button type="button" data-pagination-go="${key}" title="跳转" aria-label="跳转到指定页"><i data-lucide="arrow-right-to-line"></i></button>
       <button type="button" data-pagination-key="${key}" data-page-step="1" title="下一页" aria-label="下一页" ${page >= totalPages ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>
     </div>`;
-  refreshIcons();
+  refreshIcons(footer);
   window.requestAnimationFrame(() => applyTableFreeze(key));
 }
 
@@ -281,7 +301,6 @@ function openTableFreezeDialog(key) {
   $("#table-freeze-bottom").value = Number(setting.bottom || 0);
   $("#table-freeze-title").textContent = `固定表格行 · ${key}`;
   showInitializedDialog("#table-freeze-dialog");
-  refreshIcons();
 }
 function paginatedItems(key, items) {
   const config = paginationTables[key];
@@ -351,30 +370,34 @@ async function goToPaginationPage(key, value) {
   else paginationTables[key].render();
 }
 
-function refreshIcons() {
+function refreshIcons(root = document) {
   if (window.lucide)
     window.lucide.createIcons({
       attrs: { "aria-hidden": "true", "stroke-width": 1.8 },
+      root,
     });
+}
+function initializeChoices(root = document) {
+  if (!window.Choices) return;
+  $$(`select[data-choice]`, root).forEach((select) => {
+    if (uiChoices.has(select.id)) return;
+    uiChoices.set(
+      select.id,
+      new window.Choices(select, {
+        searchEnabled: false,
+        itemSelectText: "",
+        shouldSort: false,
+        allowHTML: false,
+      }),
+    );
+  });
 }
 function initUIComponents() {
   $$(".icon-button[data-close-dialog]").forEach((button) => {
     button.innerHTML = '<i data-lucide="x"></i>';
   });
-  if (window.Choices)
-    $$("select[data-choice]").forEach((select) => {
-      if (!uiChoices.has(select.id))
-        uiChoices.set(
-          select.id,
-          new window.Choices(select, {
-            searchEnabled: false,
-            itemSelectText: "",
-            shouldSort: false,
-            allowHTML: false,
-          }),
-        );
-    });
-  refreshIcons();
+  initializeChoices($("#login-screen"));
+  refreshIcons($("#login-screen"));
   initializeResizableTable();
 }
 
@@ -460,6 +483,8 @@ function resetDialogViewport(dialog) {
 function showInitializedDialog(selector) {
   const dialog = $(selector);
   resetDialogViewport(dialog);
+  initializeChoices(dialog);
+  refreshIcons(dialog);
   dialog.showModal();
   const reset = () => resetDialogViewport(dialog);
   requestAnimationFrame(() => {
@@ -478,7 +503,7 @@ function setSidebarCollapsed(collapsed) {
   button.setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
   button.title = collapsed ? "展开侧栏" : "收起侧栏";
   button.innerHTML = `<i data-lucide="${collapsed ? "panel-left-open" : "panel-left-close"}"></i>`;
-  refreshIcons();
+  refreshIcons(button);
 }
 function initializeSidebar() {
   let collapsed = false;
@@ -491,6 +516,7 @@ function initializeSidebar() {
 }
 function setChoiceValue(selector, value) {
   const element = $(selector);
+  initializeChoices(element.parentElement || element);
   element.value = value;
   uiChoices.get(element.id)?.setChoiceByValue(String(value));
 }
@@ -721,6 +747,8 @@ async function boot() {
 
 function configureRole() {
   state.selectedAccountIDs.clear();
+  state.viewLoadedAt = {};
+  state.viewLoading = {};
   $("#app-shell").dataset.role = state.me.role;
   document.body.classList.toggle("ordinary-user", state.me.role === "user");
   $("#identity-name").textContent = state.me.name || state.me.username;
@@ -746,7 +774,7 @@ function configureRole() {
   const initial =
     $$(".nav-item[data-view]").find((node) => !node.hidden)?.dataset.view ||
     "access";
-  setView(initial);
+  setView(initial, { load: false });
 }
 
 function configureAccountView() {
@@ -781,36 +809,103 @@ function configureAccountView() {
   $("#realtime-load-strip").hidden = !realtimeVisible;
 }
 
-async function loadCore() {
+async function loadOverview() {
+  if (!canView("overview")) return;
+  state.dashboard = await api("/api/dashboard");
+  state.purposes = state.dashboard.purposes;
+  state.groups = state.dashboard.groups;
+  if (state.groups.length) hydrateGroupControls();
+  populateSelects();
+  renderDashboard();
+}
+
+const viewLoaders = {
+  overview: loadOverview,
+  accounts: loadAccountPage,
+  dead: loadDeadPage,
+  proxies: loadProxyInventory,
+  access: loadAccessInventory,
+  pricing: loadPricingInventory,
+  billing: loadBillingView,
+  audit: loadActiveAudit,
+  daily: loadDaily,
+  authorization: () => Promise.all([loadAuthorization(), loadDeauthMonitor()]),
+  errors: loadErrors,
+  strategies: loadStrategies,
+  onboarding: async () => {
+    if (!state.proxyPools.length) await loadProxyInventory();
+    await ensureStrategiesLoaded();
+    fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value);
+  },
+};
+
+function invalidateView(view) {
+  delete state.viewLoadedAt[view];
+}
+
+async function loadViewOnDemand(view, { force = false } = {}) {
+  if (!canView(view)) return;
+  const loader = viewLoaders[view];
+  if (!loader) return;
+  const ttl = viewDataTTL[view] || 30000;
+  if (
+    !force &&
+    state.viewLoadedAt[view] &&
+    Date.now() - state.viewLoadedAt[view] < ttl
+  )
+    return;
+  if (state.viewLoading[view]) {
+    if (!force) return state.viewLoading[view];
+    const activeLoad = state.viewLoading[view];
+    await activeLoad;
+    if (state.viewLoading[view] === activeLoad) delete state.viewLoading[view];
+    return loadViewOnDemand(view, { force: true });
+  }
+  const panel = $(`#view-${view}`);
+  panel?.setAttribute("aria-busy", "true");
+  const loading = (async () => {
+    await loader();
+    state.viewLoadedAt[view] = Date.now();
+  })();
+  state.viewLoading[view] = loading;
+  try {
+    return await loading;
+  } finally {
+    if (state.viewLoading[view] === loading) delete state.viewLoading[view];
+    panel?.removeAttribute("aria-busy");
+  }
+}
+
+async function loadCore({ forceView = true, forceMetadata = true } = {}) {
   $("#connection-status").textContent = "同步中";
   try {
     const health = await api("/api/health");
     $("#database-engine").textContent = String(
       health.database || "database",
     ).toUpperCase();
-    if (canView("overview")) {
-      state.dashboard = await api("/api/dashboard");
-      state.purposes = state.dashboard.purposes;
-      state.groups = state.dashboard.groups;
-      renderDashboard();
-    } else if (
+    if (
+      state.view !== "overview" &&
       ["accounts", "dead", "onboarding", "billing", "access", "errors"].some(
         (page) => canView(page),
-      )
+      ) &&
+      (forceMetadata || !state.groups.length)
     ) {
       state.groups = await api("/api/groups");
     }
     if (state.groups.length) hydrateGroupControls();
-    if (canView("billing") && !canView("overview"))
+    if (
+      state.view !== "overview" &&
+      canView("billing") &&
+      !state.purposes.length
+    )
       state.purposes = await api("/api/purposes");
     populateSelects();
-    if (state.view === "accounts") await loadAccountPage();
-    if (state.view === "dead") await loadDeadPage();
-    if (state.view === "proxies") await loadProxyInventory();
-    if (state.view === "pricing") await loadPricingInventory();
-    if (state.view === "access") await loadAccessInventory();
+    await loadViewOnDemand(state.view, { force: forceView });
+    if (forceMetadata && state.view !== "overview") invalidateView("overview");
     $("#connection-status").textContent = "运行正常";
-    refreshIcons();
+    refreshIcons($("#sidebar"));
+    refreshIcons($(".topbar"));
+    refreshIcons($(`#view-${state.view}`));
   } catch (error) {
     $("#connection-status").textContent = "连接异常";
     toast(error.message, "error");
@@ -819,8 +914,8 @@ async function loadCore() {
 
 async function loadAccountPage() {
   if (!canView("accounts")) return;
-  if (state.accountsLoading) return state.accountsLoading;
-  state.accountsLoading = (async () => {
+  const loadSequence = ++state.accountLoadSequence;
+  const loading = (async () => {
     const params = new URLSearchParams({
       ...paginationParams("accounts"),
       paginated: "1",
@@ -834,7 +929,19 @@ async function loadAccountPage() {
       params.set("quota_5h_utilization", state.account5HUtilization);
     if (state.accountQuotaThreshold)
       params.set("quota_5h_threshold", state.accountQuotaThreshold);
+    if (state.account7DUtilization !== "")
+      params.set("quota_7d_utilization", state.account7DUtilization);
+    if (state.account7DQuotaThreshold)
+      params.set("quota_7d_threshold", state.account7DQuotaThreshold);
+    const companionLoads = Promise.allSettled([
+      loadAccountSummary(loadSequence),
+      loadRealtime(),
+    ]);
     const payload = await api(`/api/accounts?${params}`);
+    if (loadSequence !== state.accountLoadSequence) {
+      await companionLoads;
+      return;
+    }
     state.accounts = payload.items;
     state.accountStatusCounts = payload.status_counts || {};
     setServerPagination("accounts", payload);
@@ -844,12 +951,13 @@ async function loadAccountPage() {
     );
     state.accountsLoadedAt = performance.now();
     renderAccounts();
-    await Promise.all([loadAccountSummary(), loadRealtime()]);
+    await companionLoads;
   })();
+  state.accountsLoading = loading;
   try {
-    return await state.accountsLoading;
+    return await loading;
   } finally {
-    state.accountsLoading = null;
+    if (state.accountsLoading === loading) state.accountsLoading = null;
   }
 }
 
@@ -1081,8 +1189,9 @@ async function loadBillingView() {
   }
 }
 
-async function loadAccountSummary() {
+async function loadAccountSummary(expectedLoadSequence = null) {
   if (!canView("accounts")) return;
+  const requestedGroup = state.accountGroup;
   const params = new URLSearchParams();
   if (state.accountSearch) params.set("search", state.accountSearch);
   if (state.accountGroup) params.set("group_id", state.accountGroup);
@@ -1091,10 +1200,21 @@ async function loadAccountSummary() {
     params.set("quota_5h_utilization", state.account5HUtilization);
   if (state.accountQuotaThreshold)
     params.set("quota_5h_threshold", state.accountQuotaThreshold);
+  if (state.account7DUtilization !== "")
+    params.set("quota_7d_utilization", state.account7DUtilization);
+  if (state.account7DQuotaThreshold)
+    params.set("quota_7d_threshold", state.account7DQuotaThreshold);
   if ($("#account-from").value) params.set("from", $("#account-from").value);
   if ($("#account-to").value) params.set("to", $("#account-to").value);
   try {
-    state.accountSummary = await api(`/api/accounts/summary?${params}`);
+    const summary = await api(`/api/accounts/summary?${params}`);
+    if (
+      requestedGroup !== state.accountGroup ||
+      (expectedLoadSequence !== null &&
+        expectedLoadSequence !== state.accountLoadSequence)
+    )
+      return;
+    state.accountSummary = summary;
     renderAccountSummary();
   } catch (error) {
     toast(error.message, "error");
@@ -1219,6 +1339,28 @@ async function loadErrors() {
 
 let insightChart = null;
 let insightTimelineChart = null;
+let chartLibraryLoading = null;
+
+function ensureChartLibrary() {
+  if (window.Chart) return Promise.resolve(window.Chart);
+  if (chartLibraryLoading) return chartLibraryLoading;
+  chartLibraryLoading = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    const version = document
+      .querySelector('meta[name="asset-version"]')
+      ?.getAttribute("content");
+    script.src = `/lib/chart.umd.min.js${version ? `?v=${encodeURIComponent(version)}` : ""}`;
+    script.async = true;
+    script.onload = () => resolve(window.Chart);
+    script.onerror = () => reject(new Error("图表组件加载失败"));
+    document.head.append(script);
+  }).catch((error) => {
+    chartLibraryLoading = null;
+    throw error;
+  });
+  return chartLibraryLoading;
+}
+
 async function loadErrorInsights() {
   const source = $("#error-source").value;
   $("#error-insight-panel").hidden = Boolean(source && source !== "gateway");
@@ -1232,7 +1374,10 @@ async function loadErrorInsights() {
   if ($("#error-from").value) params.set("from", $("#error-from").value);
   if ($("#error-to").value) params.set("to", $("#error-to").value);
   try {
-    const data = await api(`/api/error-insights?${params}`);
+    const dataPromise = api(`/api/error-insights?${params}`);
+    const chartPromise = ensureChartLibrary().catch(() => null);
+    const data = await dataPromise;
+    await chartPromise;
     renderErrorInsights(data);
   } catch (error) {
     toast(error.message, "error");
@@ -1473,7 +1618,8 @@ function renderStrategies() {
     })
     .join("");
   renderStrategyAccordion(strategies);
-  refreshIcons();
+  refreshIcons($("#strategy-cards"));
+  refreshIcons($("#strategy-accordion"));
 }
 
 function strategyAccountCandidates(strategyID, mode) {
@@ -1544,7 +1690,7 @@ function renderStrategyAccountList() {
         })
         .join("")
     : '<div class="empty-state compact"><strong>没有可选择账号</strong></div>';
-  refreshIcons();
+  refreshIcons($("#strategy-account-list"));
 }
 
 async function openStrategyAccountDialog(strategyID, mode) {
@@ -1719,16 +1865,63 @@ function openStrategy(item = null) {
   $("#strategy-rpm-mode").value = item?.rpm_strategy || "fixed";
   $("#strategy-buffer").value = item?.rpm_sticky_buffer ?? 0;
   $("#strategy-dispatch-mode").value = item?.dispatch_mode || "";
+  $("#strategy-capacity-enabled").checked = item?.capacity_enabled ?? true;
   $("#strategy-dispatch-pacing").value = item?.dispatch_pacing || "";
   $("#strategy-pacing-concurrency").value = item?.pacing_concurrency ?? 0;
   $("#strategy-pacing-interval").value = item?.pacing_interval_seconds ?? 0;
+  $("#strategy-smooth-cold-start").checked =
+    item?.smooth_cold_start_enabled ?? false;
+  $("#strategy-smooth-cold-start-rpm").value =
+    item?.smooth_cold_start_rpm ?? 8;
+  $("#strategy-smooth-cold-start-tpm").value =
+    item?.smooth_cold_start_tpm ?? 100000;
   syncRPMBufferControl(
     "#strategy-rpm-mode",
     "#strategy-buffer",
     "#strategy-buffer-hint",
   );
   syncStrategyITPMControls();
+  syncStrategyCapacityControls();
   showInitializedDialog("#strategy-dialog");
+}
+
+function syncStrategyCapacityControls() {
+  const capacityEnabled = $("#strategy-capacity-enabled").checked;
+  const smoothEnabled = $("#strategy-smooth-cold-start").checked;
+  [
+    "#strategy-rpm",
+    "#strategy-tpm",
+    "#strategy-concurrency",
+    "#strategy-rpm-mode",
+    "#strategy-buffer",
+    "#strategy-dispatch-mode",
+    "#strategy-dispatch-pacing",
+    "#strategy-pacing-concurrency",
+    "#strategy-pacing-interval",
+  ].forEach((selector) => {
+    $(selector).disabled = !capacityEnabled;
+  });
+  if (capacityEnabled) {
+    syncRPMBufferControl(
+      "#strategy-rpm-mode",
+      "#strategy-buffer",
+      "#strategy-buffer-hint",
+    );
+  }
+  ["#strategy-smooth-cold-start-rpm", "#strategy-smooth-cold-start-tpm"].forEach(
+    (selector) => {
+      $(selector).disabled = !smoothEnabled;
+    },
+  );
+  if (smoothEnabled) {
+    [
+      "#strategy-dispatch-pacing",
+      "#strategy-pacing-concurrency",
+      "#strategy-pacing-interval",
+    ].forEach((selector) => {
+      $(selector).disabled = true;
+    });
+  }
 }
 
 function syncStrategyITPMControls() {
@@ -2152,7 +2345,7 @@ function openAccountActionMenu(trigger, item) {
     <button type="button" role="menuitem" class="danger" data-delete-account="${item.id}"><i data-lucide="trash-2"></i><span>删除账号</span></button>`;
   menu.hidden = false;
   trigger.setAttribute("aria-expanded", "true");
-  refreshIcons();
+  refreshIcons(menu);
   const rect = trigger.getBoundingClientRect();
   const margin = 8;
   const menuRect = menu.getBoundingClientRect();
@@ -2231,6 +2424,7 @@ function renderAccounts() {
           ? `${subscription} · ${item.rate_limit_tier}`
           : subscription;
         const cells = {
+          account: `<td><span class="row-title" title="${escapeHTML(item.name || "—")}">${escapeHTML(item.name || "—")}</span></td>`,
           status: '<td><span class="pill ok">正常</span></td>',
           subscription: `<td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td>`,
           quota: `<td>${accountUsageCell(item, false)}</td>`,
@@ -2267,7 +2461,7 @@ function renderAccounts() {
     })
     .join("");
   syncAccountSelection();
-  refreshIcons();
+  refreshIcons($("#accounts-body"));
 }
 
 function selectedAccountIDs() {
@@ -2346,7 +2540,7 @@ function renderDeadAccounts() {
     })
     .join("");
   syncDeadSelection();
-  refreshIcons();
+  refreshIcons($("#dead-accounts-body"));
 }
 
 function deadAccountMatchesSearch(item) {
@@ -2759,7 +2953,7 @@ function renderProxies() {
 		? "释放的代理会保留在这里。"
 		: "批量导入或配置代理 API。";
 	syncProxySelection(selected);
-  refreshIcons();
+  refreshIcons($("#view-proxies"));
 }
 
 function filteredProxies() {
@@ -2828,7 +3022,7 @@ function renderAccess() {
   balanceSummary.hidden = state.me.role !== "user";
   if (!balanceSummary.hidden)
     balanceSummary.textContent = `可支配余额 ${state.me.balance == null ? "不限" : money(state.me.balance)}`;
-  refreshIcons();
+  refreshIcons($("#view-access"));
 }
 
 function renderPriceTable() {
@@ -2839,7 +3033,7 @@ function renderPriceTable() {
         `<tr><td><span class="row-title mono">${escapeHTML(item.model)}</span>${item.model === "*" ? '<span class="row-subtitle">默认回退价格</span>' : ""}</td><td><span class="pill ${item.source === "remote" ? "ok" : ""}">${item.source === "remote" ? "自动同步" : "手动覆盖"}</span></td><td class="num mono">${money(item.input_per_million)}</td><td class="num mono">${money(item.output_per_million)}</td><td class="num mono">${money(item.cache_creation_per_million)}</td><td class="num mono">${money(item.cache_read_per_million)}</td><td class="mono">${dateTime(item.updated_at)}</td><td class="actions">${isAdmin() ? `<span class="row-actions"><button data-edit-price="${item.id}" title="编辑价格"><i data-lucide="square-pen"></i></button>${item.model === "*" ? "" : `<button class="danger" data-delete-price="${item.id}" title="删除价格"><i data-lucide="trash-2"></i></button>`}</span>` : ""}</td></tr>`,
     )
     .join("");
-  refreshIcons();
+  refreshIcons($("#prices-body"));
 }
 function renderPriceSync() {
   const item = state.pricingSync;
@@ -2877,7 +3071,7 @@ function renderAudit() {
         `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title truncate-cell" title="${escapeHTML(item.actor_username || "系统")}">${escapeHTML(item.actor_username || "系统")}</span><span class="row-subtitle">${roleName(item.actor_role)}</span></td><td><span class="row-title truncate-cell" title="${escapeHTML(names[item.action] || item.action)}">${escapeHTML(names[item.action] || item.action)}</span><span class="row-subtitle mono truncate-cell" title="${escapeHTML(`${item.method} ${item.path}`)}">${escapeHTML(item.method)} ${escapeHTML(item.path)}</span></td><td><span class="pill">${escapeHTML(item.target_type)}</span> <span class="mono">${escapeHTML(item.target_id || "—")}</span></td><td><span class="pill ${item.status_code < 400 ? "ok" : "error"}">HTTP ${item.status_code}</span></td><td class="mono truncate-cell" title="${escapeHTML(item.client_ip || "—")}">${escapeHTML(item.client_ip || "—")}</td><td class="num mono">${item.duration_ms} ms</td><td class="actions"><span class="row-actions"><button type="button" data-audit-detail="operation" data-audit-id="${item.id}" title="查看完整记录" aria-label="查看完整记录"><i data-lucide="panel-right-open"></i></button></span></td></tr>`,
     )
     .join("");
-  refreshIcons();
+  refreshIcons($("#audit-body"));
 }
 
 function renderCacheAudit() {
@@ -2918,7 +3112,7 @@ function renderCacheAudit() {
       return `<tr><td class="mono">${dateTime(item.created_at)}</td><td><span class="row-title truncate-cell" title="${escapeHTML(account)}">${escapeHTML(account)}</span><span class="row-subtitle mono">${item.account_id ? `#${item.account_id}` : "—"}</span></td><td><span class="row-title mono truncate-cell" title="${escapeHTML(item.model)}">${escapeHTML(item.model || "—")}</span></td><td><span class="row-title mono truncate-cell" title="${escapeHTML(item.session_hash)}">${escapeHTML(item.session_hash)}</span></td><td><span class="pill ${tone}">${escapeHTML(segment)}</span></td><td><span class="audit-hash-flow mono" title="${escapeHTML(`${item.previous_prefix_hash || "初始"} → ${item.prefix_hash}`)}">${escapeHTML(fingerprint)}</span></td><td class="actions"><span class="row-actions"><button type="button" data-audit-detail="cache" data-audit-id="${item.id}" title="查看指纹详情" aria-label="查看指纹详情"><i data-lucide="fingerprint"></i></button></span></td></tr>`;
     })
     .join("");
-  refreshIcons();
+  refreshIcons($("#cache-audit-body"));
 }
 
 function auditDetailField(label, value, options = {}) {
@@ -2968,7 +3162,6 @@ function openAuditDetail(kind, id) {
     ].join("");
   }
   showInitializedDialog("#audit-detail-dialog");
-  refreshIcons();
 }
 function renderBilling() {
   const data = state.billing;
@@ -3102,7 +3295,7 @@ function renderBatchResults() {
         `<tr><td class="mono">${item.index}</td><td><span class="row-title">${escapeHTML(item.name || "未创建")}</span>${item.account_id ? `<span class="row-subtitle mono">#${item.account_id}</span>` : ""}</td><td>${escapeHTML(subscriptionName(item.subscription_type))}</td><td class="mono">${escapeHTML(item.proxy_ip || "—")}</td><td><span class="pill ${item.skipped ? "off" : item.success ? "ok" : "error"}">${item.updated ? "已更新" : item.skipped ? "已跳过" : item.success ? "成功" : "失败"}</span></td><td class="${item.success || item.skipped ? "" : "error-copy"}">${escapeHTML(item.error || "授权完成")}</td></tr>`,
     )
     .join("");
-  refreshIcons();
+  refreshIcons($("#batch-result-body"));
 }
 
 function populateSelects() {
@@ -3151,7 +3344,7 @@ function populateSelects() {
     .join("");
 }
 
-function setView(view) {
+function setView(view, { load = true, force = false } = {}) {
   state.view = view;
   $("#cache-audit-mode").hidden = !isManager();
   if (view === "audit") setAuditMode(state.auditMode);
@@ -3169,29 +3362,15 @@ function setView(view) {
     Boolean(action) &&
     (isAdmin() || (state.me?.role === "user" && view === "access"));
   $("#primary-action").hidden = !canAct;
-  if (view === "billing") loadBillingView();
-  if (view === "audit") loadActiveAudit();
-  if (view === "accounts") {
-    loadAccountPage();
-  }
-  if (view === "dead") loadDeadPage();
-  if (view === "proxies") loadProxyInventory();
-  if (view === "pricing") loadPricingInventory();
-  if (view === "access") loadAccessInventory();
-  if (view === "daily") loadDaily();
-  if (view === "authorization") {
-    loadAuthorization();
-    loadDeauthMonitor();
-  }
-  if (view === "errors") loadErrors();
-  if (view === "strategies") loadStrategies();
-  if (view === "onboarding") {
-    loadProxyInventory();
-    ensureStrategiesLoaded().then(() =>
-      fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value),
+  const activeView = $(`#view-${view}`);
+  initializeChoices(activeView);
+  refreshIcons($("#sidebar"));
+  refreshIcons($(".topbar"));
+  refreshIcons(activeView);
+  if (load)
+    loadViewOnDemand(view, { force }).catch((error) =>
+      toast(error.message, "error"),
     );
-  }
-  refreshIcons();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -3225,10 +3404,20 @@ function openAccount(account = null) {
   $("#account-rpm-enabled").checked = (account?.base_rpm || 0) > 0;
   $("#account-rpm-strategy").value = account?.rpm_strategy || "tiered";
   $("#account-rpm-buffer").value = account?.rpm_sticky_buffer || 0;
+  $("#account-smooth-cold-start").checked =
+    account?.extra?.smooth_cold_start_enabled === true;
+  $("#account-smooth-cold-start-rpm").value =
+    account?.extra?.smooth_cold_start_rpm ?? 8;
+  $("#account-smooth-cold-start-tpm").value =
+    account?.extra?.smooth_cold_start_tpm ?? 100000;
   $("#account-quota-threshold-enabled").checked =
     account?.quota_5h_threshold_enabled ?? false;
   $("#account-quota-threshold-percent").value =
     account?.quota_5h_threshold_percent ?? 80;
+  $("#account-7d-quota-threshold-enabled").checked =
+    account?.quota_7d_threshold_enabled ?? false;
+  $("#account-7d-quota-threshold-percent").value =
+    account?.quota_7d_threshold_percent ?? 80;
   fillStrategySelect($("#account-strategy"), account?.strategy_id);
   ensureStrategiesLoaded().then(() =>
     fillStrategySelect($("#account-strategy"), account?.strategy_id),
@@ -3288,6 +3477,7 @@ function openBatchAccountEdit() {
     ["rpm_sticky_buffer", "#batch-edit-rpm-buffer"],
     ["user_msg_queue_mode", "#batch-edit-queue-mode"],
     ["quota_5h_threshold_percent", "#batch-edit-quota-threshold-percent"],
+    ["quota_7d_threshold_percent", "#batch-edit-7d-quota-threshold-percent"],
     ["priority", "#batch-edit-priority"],
     ["rate_multiplier", "#batch-edit-rate"],
     ["account_price", "#batch-edit-price"],
@@ -3311,6 +3501,18 @@ function openBatchAccountEdit() {
     quotaThresholdEnabled.mixed
       ? "已选账号当前状态不一致"
       : `当前状态：${quotaThresholdEnabled.value ? "开启" : "关闭"}`;
+  const quota7DThresholdEnabled = batchEditCommonValue(
+    accounts,
+    "quota_7d_threshold_enabled",
+    Boolean,
+  );
+  $("#batch-edit-7d-quota-threshold-enabled").value = String(
+    quota7DThresholdEnabled.value,
+  );
+  $('[data-batch-edit-hint="quota_7d_threshold_enabled"]').textContent =
+    quota7DThresholdEnabled.mixed
+      ? "已选账号当前状态不一致"
+      : `当前状态：${quota7DThresholdEnabled.value ? "开启" : "关闭"}`;
   const strategy = batchEditCommonValue(
     accounts,
     "strategy_id",
@@ -3368,8 +3570,13 @@ function syncAccountControls() {
     "#account-rpm-buffer-hint",
   );
   if (!rpmEnabled) $("#account-rpm-buffer").disabled = true;
+  const smoothColdStartEnabled = $("#account-smooth-cold-start").checked;
+  $("#account-smooth-cold-start-rpm").disabled = !smoothColdStartEnabled;
+  $("#account-smooth-cold-start-tpm").disabled = !smoothColdStartEnabled;
   $("#account-quota-threshold-percent").disabled =
     !$("#account-quota-threshold-enabled").checked;
+  $("#account-7d-quota-threshold-percent").disabled =
+    !$("#account-7d-quota-threshold-enabled").checked;
   syncAccountAuthFields();
   stabilizeAccountDialogViewport();
 }
@@ -3672,7 +3879,6 @@ function openProxyRestore(item) {
       )
       .join("");
   showInitializedDialog("#proxy-restore-dialog");
-  refreshIcons();
 }
 function toggleAPISource() {
   $$(".api-source-field").forEach((node) => {
@@ -3809,7 +4015,6 @@ function openAccountAuth(account) {
     account.auth_type === "setup_token" ? "setup_token" : "oauth",
   );
   showInitializedDialog("#account-auth-dialog");
-  refreshIcons();
 }
 
 function findLoadedAccount(id) {
@@ -3830,7 +4035,7 @@ document.addEventListener("click", async (event) => {
     expandedStrategyID =
       expandedStrategyID === strategyID ? "" : strategyID;
     renderStrategyAccordion(state.strategies || []);
-    refreshIcons();
+    refreshIcons($("#strategy-accordion"));
     return;
   }
   if (target.dataset.accountMenu) {
@@ -3946,19 +4151,17 @@ document.addEventListener("click", async (event) => {
       toast(error.message, "error");
     }
   }
-  if (
-    target.dataset.group !== undefined &&
-    target.closest("#account-group-filter")
-  ) {
-    state.accountGroup = target.dataset.group;
+  const accountGroupButton = target.closest(
+    "#account-group-filter button[data-group]",
+  );
+  if (accountGroupButton) {
+    state.accountGroup = accountGroupButton.dataset.group;
     state.selectedAccountIDs.clear();
     resetPagination("accounts");
     $$("#account-group-filter button").forEach((node) =>
-      node.classList.toggle("active", node === target),
+      node.classList.toggle("active", node === accountGroupButton),
     );
-    loadAccountPage();
-    loadAccountSummary();
-    loadRealtime();
+    await loadAccountPage();
   }
   try {
     if (target.dataset.resetAccount429) {
@@ -4301,17 +4504,16 @@ $("#primary-action").addEventListener("click", async () => {
   if (state.view === "strategies") openStrategy();
 });
 $("#refresh-button").addEventListener("click", async () => {
-  await loadCore();
-  if (state.view === "billing") await loadBilling();
-  if (state.view === "audit") await loadAudit();
-  if (state.view === "daily") await loadDaily();
-  if (state.view === "authorization") {
-    await loadAuthorization();
-    await loadDeauthMonitor();
+  const button = $("#refresh-button");
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    invalidateView(state.view);
+    await loadCore({ forceView: true, forceMetadata: true });
+    toast("数据已刷新");
+  } finally {
+    button.disabled = false;
   }
-  if (state.view === "errors") await loadErrors();
-  if (state.view === "strategies") await loadStrategies();
-  toast("数据已刷新");
 });
 $("#refresh-accounts").addEventListener("click", async (event) => {
   const button = event.currentTarget;
@@ -4681,6 +4883,22 @@ $("#account-quota-threshold-filter").addEventListener("change", (event) => {
   resetPagination("accounts");
   loadAccountPage();
 });
+$("#account-7d-utilization").addEventListener("input", (event) => {
+  state.account7DUtilization = event.target.value;
+  state.selectedAccountIDs.clear();
+  resetPagination("accounts");
+  clearTimeout(accountQuotaFilterTimer);
+  accountQuotaFilterTimer = setTimeout(loadAccountPage, 250);
+});
+$("#account-7d-quota-threshold-filter").addEventListener(
+  "change",
+  (event) => {
+    state.account7DQuotaThreshold = event.target.value;
+    state.selectedAccountIDs.clear();
+    resetPagination("accounts");
+    loadAccountPage();
+  },
+);
 $("#account-status-tabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-account-status]");
   if (!button) return;
@@ -4797,7 +5015,12 @@ $("#account-proxy-text").addEventListener("input", () => {
 });
 $("#account-rpm-enabled").addEventListener("change", syncAccountControls);
 $("#account-rpm-strategy").addEventListener("change", syncAccountControls);
+$("#account-smooth-cold-start").addEventListener("change", syncAccountControls);
 $("#account-quota-threshold-enabled").addEventListener(
+  "change",
+  syncAccountControls,
+);
+$("#account-7d-quota-threshold-enabled").addEventListener(
   "change",
   syncAccountControls,
 );
@@ -4810,6 +5033,9 @@ $("#batch-rpm-strategy").addEventListener("change", () =>
 );
 $("#batch-quota-threshold-enabled").addEventListener("change", (event) => {
   $("#batch-quota-threshold-percent").disabled = !event.target.checked;
+});
+$("#batch-7d-quota-threshold-enabled").addEventListener("change", (event) => {
+  $("#batch-7d-quota-threshold-percent").disabled = !event.target.checked;
 });
 $("#account-auth-type").addEventListener("change", syncAccountAuthFields);
 $("#account-session-key").addEventListener("input", syncAccountAuthFields);
@@ -4932,6 +5158,12 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
         quota_5h_threshold_percent: Number(
           $("#batch-quota-threshold-percent").value || 80,
         ),
+        quota_7d_threshold_enabled: $(
+          "#batch-7d-quota-threshold-enabled",
+        ).checked,
+        quota_7d_threshold_percent: Number(
+          $("#batch-7d-quota-threshold-percent").value || 80,
+        ),
       }),
     });
     $("#batch-result-panel").hidden = false;
@@ -4970,6 +5202,7 @@ $("#batch-account-form").addEventListener("submit", async (event) => {
     ["rate_multiplier", "#batch-edit-rate"],
     ["account_price", "#batch-edit-price"],
     ["quota_5h_threshold_percent", "#batch-edit-quota-threshold-percent"],
+    ["quota_7d_threshold_percent", "#batch-edit-7d-quota-threshold-percent"],
   ];
   numberFields.forEach(([key, selector]) => {
     if (applies(key)) payload[key] = Number($(selector).value);
@@ -4981,6 +5214,9 @@ $("#batch-account-form").addEventListener("submit", async (event) => {
   if (applies("quota_5h_threshold_enabled"))
     payload.quota_5h_threshold_enabled =
       $("#batch-edit-quota-threshold-enabled").value === "true";
+  if (applies("quota_7d_threshold_enabled"))
+    payload.quota_7d_threshold_enabled =
+      $("#batch-edit-7d-quota-threshold-enabled").value === "true";
   if (applies("strategy_id")) {
     if (!state.strategiesLoaded) {
       toast("策略列表不可用，无法批量修改调度策略", "error");
@@ -5042,6 +5278,13 @@ $("#account-form").addEventListener("submit", async (event) => {
     const proxyText = $("#account-proxy-text").value.trim();
     const extra = JSON.parse($("#account-extra").value.trim() || "{}");
     extra.request_passthrough = $("#account-request-passthrough").checked;
+    extra.smooth_cold_start_enabled = $("#account-smooth-cold-start").checked;
+    extra.smooth_cold_start_rpm = Number(
+      $("#account-smooth-cold-start-rpm").value,
+    );
+    extra.smooth_cold_start_tpm = Number(
+      $("#account-smooth-cold-start-tpm").value,
+    );
     const mcpToolNames = $("#account-mcp-tool-names").value;
     if (mcpToolNames === "") delete extra.mcp_tool_names;
     else extra.mcp_tool_names = mcpToolNames === "on";
@@ -5076,6 +5319,12 @@ $("#account-form").addEventListener("submit", async (event) => {
       quota_5h_threshold_enabled: $("#account-quota-threshold-enabled").checked,
       quota_5h_threshold_percent: Number(
         $("#account-quota-threshold-percent").value,
+      ),
+      quota_7d_threshold_enabled: $(
+        "#account-7d-quota-threshold-enabled",
+      ).checked,
+      quota_7d_threshold_percent: Number(
+        $("#account-7d-quota-threshold-percent").value,
       ),
     };
     if (sessionKey) payload.session_key = sessionKey;
@@ -5261,6 +5510,14 @@ $("#strategy-itpm-protection").addEventListener(
   "change",
   syncStrategyITPMControls,
 );
+$("#strategy-capacity-enabled").addEventListener(
+  "change",
+  syncStrategyCapacityControls,
+);
+$("#strategy-smooth-cold-start").addEventListener(
+  "change",
+  syncStrategyCapacityControls,
+);
 $("#strategy-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -5281,9 +5538,17 @@ $("#strategy-form").addEventListener("submit", async (event) => {
         rpm_strategy: $("#strategy-rpm-mode").value,
         rpm_sticky_buffer: Number($("#strategy-buffer").value),
         dispatch_mode: $("#strategy-dispatch-mode").value,
+        capacity_enabled: $("#strategy-capacity-enabled").checked,
         dispatch_pacing: $("#strategy-dispatch-pacing").value,
         pacing_concurrency: Number($("#strategy-pacing-concurrency").value),
         pacing_interval_seconds: Number($("#strategy-pacing-interval").value),
+        smooth_cold_start_enabled: $("#strategy-smooth-cold-start").checked,
+        smooth_cold_start_rpm: Number(
+          $("#strategy-smooth-cold-start-rpm").value,
+        ),
+        smooth_cold_start_tpm: Number(
+          $("#strategy-smooth-cold-start-tpm").value,
+        ),
       }),
     });
     $("#strategy-dialog").close();

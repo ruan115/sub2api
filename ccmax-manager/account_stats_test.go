@@ -352,6 +352,7 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 		"concurrency": 2, "base_rpm": 15,
 		"rpm_strategy": "fixed", "rpm_sticky_buffer": 4, "strategy_id": strategy.ID,
 		"quota_5h_threshold_enabled": true, "quota_5h_threshold_percent": 72,
+		"quota_7d_threshold_enabled": true, "quota_7d_threshold_percent": 68,
 	}, http.StatusOK, &result)
 	if result.Success != 3 || result.Updated != 1 || result.Skipped != 0 || result.Failed != 0 || len(result.Items) != 3 {
 		t.Fatalf("batch result = %+v", result)
@@ -406,9 +407,9 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 		t.Fatalf("updated account proxy = %d, want original bound proxy %d", updatedProxyID, firstProxyID)
 	}
 	var rpmStrategy, extraJSON string
-	var stickyBuffer, thresholdEnabled, thresholdPercent int
+	var stickyBuffer, thresholdEnabled, thresholdPercent, threshold7DEnabled, threshold7DPercent int
 	var boundStrategy sql.NullInt64
-	if err := a.db.QueryRow(`SELECT rpm_strategy, rpm_sticky_buffer, strategy_id, extra_json, quota_5h_threshold_enabled, quota_5h_threshold_percent FROM accounts WHERE id = ?`, result.Items[1].AccountID).Scan(&rpmStrategy, &stickyBuffer, &boundStrategy, &extraJSON, &thresholdEnabled, &thresholdPercent); err != nil {
+	if err := a.db.QueryRow(`SELECT rpm_strategy, rpm_sticky_buffer, strategy_id, extra_json, quota_5h_threshold_enabled, quota_5h_threshold_percent, quota_7d_threshold_enabled, quota_7d_threshold_percent FROM accounts WHERE id = ?`, result.Items[1].AccountID).Scan(&rpmStrategy, &stickyBuffer, &boundStrategy, &extraJSON, &thresholdEnabled, &thresholdPercent, &threshold7DEnabled, &threshold7DPercent); err != nil {
 		t.Fatal(err)
 	}
 	if rpmStrategy != "fixed" || stickyBuffer != 4 || !boundStrategy.Valid || boundStrategy.Int64 != strategy.ID {
@@ -421,6 +422,9 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	if thresholdEnabled != 1 || thresholdPercent != 72 {
 		t.Fatalf("batch onboarding quota threshold = %d/%d, want 1/72", thresholdEnabled, thresholdPercent)
 	}
+	if threshold7DEnabled != 1 || threshold7DPercent != 68 {
+		t.Fatalf("batch onboarding 7d quota threshold = %d/%d, want 1/68", threshold7DEnabled, threshold7DPercent)
+	}
 	var reauthorized batchAuthorizationResponse
 	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-authorize", map[string]any{
 		"session_keys": []string{"duplicate-first"}, "proxy_pool_id": 1,
@@ -430,11 +434,14 @@ func TestBatchAuthorizationUsesExclusiveProxiesAndEmailNames(t *testing.T) {
 	if reauthorized.Updated != 1 || reauthorized.Failed != 0 {
 		t.Fatalf("threshold compatibility reauthorization = %+v", reauthorized)
 	}
-	if err := a.db.QueryRow(`SELECT quota_5h_threshold_enabled, quota_5h_threshold_percent FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&thresholdEnabled, &thresholdPercent); err != nil {
+	if err := a.db.QueryRow(`SELECT quota_5h_threshold_enabled, quota_5h_threshold_percent, quota_7d_threshold_enabled, quota_7d_threshold_percent FROM accounts WHERE id = ?`, result.Items[0].AccountID).Scan(&thresholdEnabled, &thresholdPercent, &threshold7DEnabled, &threshold7DPercent); err != nil {
 		t.Fatal(err)
 	}
 	if thresholdEnabled != 1 || thresholdPercent != 72 {
 		t.Fatalf("reauthorization without threshold fields reset config to %d/%d", thresholdEnabled, thresholdPercent)
+	}
+	if threshold7DEnabled != 1 || threshold7DPercent != 68 {
+		t.Fatalf("reauthorization without 7d threshold fields reset config to %d/%d", threshold7DEnabled, threshold7DPercent)
 	}
 }
 

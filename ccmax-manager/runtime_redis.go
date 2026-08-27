@@ -64,18 +64,22 @@ local soft_limit = tonumber(ARGV[4])
 local hard_limit = tonumber(ARGV[5])
 local sticky = tonumber(ARGV[6])
 local requested_exclusive = tonumber(ARGV[7])
-local inflight = tonumber(ARGV[8])
-local small_limit = tonumber(ARGV[9])
-local ttl_ms = tonumber(ARGV[10])
+local strict_hard = tonumber(ARGV[8])
+local inflight = tonumber(ARGV[9])
+local small_limit = tonumber(ARGV[10])
+local ttl_ms = tonumber(ARGV[11])
 
 if exclusive > 0 then
+  return -1
+end
+if strict_hard > 0 and hard_limit > 0 and current + reserved + estimate > hard_limit then
   return -1
 end
 if requested_exclusive > 0 then
   if inflight > 0 or reserved > 0 then
     return -1
   end
-else
+elseif strict_hard == 0 then
   local projected = current + reserved + estimate
   if hard_limit > 0 and (current + reserved >= hard_limit or projected > hard_limit) then
     return -1
@@ -224,13 +228,13 @@ func (runtime *redisRuntime) acquireDispatchLock(ctx context.Context, groupID st
 	}
 }
 
-func (runtime *redisRuntime) reserveAccountITPM(ctx context.Context, accountID int64, leaseID string, estimated, current, softLimit, hardLimit int64, sticky, exclusive bool, inflight int, smallLimit int64, ttl time.Duration) (bool, int64, error) {
+func (runtime *redisRuntime) reserveAccountITPM(ctx context.Context, accountID int64, leaseID string, estimated, current, softLimit, hardLimit int64, sticky, exclusive, strictHard bool, inflight int, smallLimit int64, ttl time.Duration) (bool, int64, error) {
 	if runtime == nil || runtime.client == nil || estimated <= 0 {
 		return true, 0, nil
 	}
 	prefix := redisRuntimePrefix + "account-itpm:" + strconv.FormatInt(accountID, 10)
 	result, err := redisReserveITPMScript.Run(ctx, runtime.client, []string{prefix + ":expiry", prefix + ":leases"},
-		leaseID, estimated, current, softLimit, hardLimit, boolInt(sticky), boolInt(exclusive), inflight, smallLimit, ttl.Milliseconds()).Int64()
+		leaseID, estimated, current, softLimit, hardLimit, boolInt(sticky), boolInt(exclusive), boolInt(strictHard), inflight, smallLimit, ttl.Milliseconds()).Int64()
 	if err != nil {
 		return false, 0, fmt.Errorf("reserve account ITPM: %w", err)
 	}

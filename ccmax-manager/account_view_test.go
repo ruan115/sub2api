@@ -101,8 +101,17 @@ func TestRestrictedAccountViewFiltersAndProjectsData(t *testing.T) {
 
 func TestAccountViewDefaultsMatchRestrictedUI(t *testing.T) {
 	view := normalizeAccountView("user", accountViewConfig{})
-	if !reflect.DeepEqual(view.Columns, []string{"status", "subscription", "quota", "requests", "tpm"}) {
+	if !reflect.DeepEqual(view.Columns, []string{"account", "status", "subscription", "quota", "requests", "tpm"}) {
 		t.Fatalf("default columns = %v", view.Columns)
+	}
+	projected := accountForRestrictedView(account{ID: 7, Name: "visible-account", ProxyIP: "192.0.2.1", GroupIDs: []string{"a"}}, view)
+	if projected["name"] != "visible-account" {
+		t.Fatalf("default account column missing: %+v", projected)
+	}
+	for _, forbidden := range []string{"proxy_ip", "group_ids", "credential_hint"} {
+		if _, leaked := projected[forbidden]; leaked {
+			t.Fatalf("account column leaked %q: %+v", forbidden, projected)
+		}
 	}
 	if accountViewHas(view.Blocks, "billed") || accountViewHas(view.Blocks, "actual_cost") || accountViewHas(view.Blocks, "concurrency") || accountViewHas(view.Blocks, "queue") || accountViewHas(view.Blocks, "filters") {
 		t.Fatalf("restricted defaults expose hidden blocks: %v", view.Blocks)
