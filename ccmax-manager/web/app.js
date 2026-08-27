@@ -98,6 +98,43 @@ const rolePageDefaults = {
   ],
   user: ["accounts", "access"],
 };
+const restrictedAccountViewDefault = {
+  columns: ["status", "subscription", "quota", "requests", "tpm"],
+  blocks: [
+    "filtered_accounts",
+    "tokens",
+    "itpm",
+    "cache_read",
+    "otpm",
+    "throughput",
+  ],
+};
+const adminAccountColumns = [
+  "select",
+  "id",
+  "account",
+  "status",
+  "subscription",
+  "price",
+  "billing",
+  "quota",
+  "requests",
+  "onboarded",
+  "reauthorized",
+  "reauth-count",
+  "survival",
+  "last-used",
+  "actions",
+];
+const accountRealtimeBlocks = [
+  "rpm",
+  "itpm",
+  "cache_read",
+  "otpm",
+  "throughput",
+  "concurrency",
+  "queue",
+];
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -122,6 +159,12 @@ const isManager = () =>
   state.me?.role === "admin" || state.me?.role === "readonly_admin";
 const canView = (page) =>
   state.me?.role === "admin" || state.me?.visible_pages?.includes(page);
+const hasAccountViewValue = (kind, value) =>
+  isAdmin() || (state.me?.account_view?.[kind] || []).includes(value);
+const visibleAccountColumns = () =>
+  isAdmin()
+    ? adminAccountColumns
+    : state.me?.account_view?.columns || restrictedAccountViewDefault.columns;
 const uiChoices = new Map();
 const sidebarStorageKey = "ccmax.sidebar.collapsed";
 const accountAutoRefreshStorageKey = "ccmax.accounts.auto-refresh";
@@ -349,6 +392,7 @@ function initializeResizableTable() {
     billing: 57,
     quota: 186,
     requests: 48,
+    tpm: 64,
     onboarded: 72,
     reauthorized: 78,
     "reauth-count": 58,
@@ -688,6 +732,7 @@ function configureRole() {
   $$(".write-action").forEach((node) => {
     node.hidden = !isAdmin();
   });
+  configureAccountView();
   const accountRefreshLabel = isAdmin()
     ? "检测当前页账号存活状态并刷新列表"
     : "刷新账号列表";
@@ -702,6 +747,38 @@ function configureRole() {
     $$(".nav-item[data-view]").find((node) => !node.hidden)?.dataset.view ||
     "access";
   setView(initial);
+}
+
+function configureAccountView() {
+  const restricted = !isAdmin();
+  const columns = new Set(visibleAccountColumns());
+  if (restricted) state.accountStatus = "normal";
+  $$(".accounts-table th[data-column]").forEach((header) => {
+    header.hidden = !columns.has(header.dataset.column);
+  });
+  $(".account-filters").hidden =
+    restricted && !hasAccountViewValue("blocks", "filters");
+  $("#account-status-tabs").hidden = restricted;
+  $$(".account-heading-actions > *").forEach((node) => {
+    node.hidden = restricted && node.id !== "account-list-count";
+  });
+  const realtimeIDs = {
+    rpm: "#realtime-rpm-item",
+    itpm: "#realtime-itpm-item",
+    cache_read: "#realtime-cache-read-item",
+    otpm: "#realtime-otpm-item",
+    throughput: "#realtime-throughput-item",
+    concurrency: "#realtime-concurrency-item",
+    queue: "#realtime-queue-item",
+  };
+  let realtimeVisible = isAdmin();
+  Object.entries(realtimeIDs).forEach(([block, selector]) => {
+    const visible = isAdmin() || hasAccountViewValue("blocks", block);
+    $(selector).hidden = !visible;
+    realtimeVisible ||= visible;
+  });
+  $("#realtime-load-heading").hidden = !realtimeVisible;
+  $("#realtime-load-strip").hidden = !realtimeVisible;
 }
 
 async function loadCore() {
@@ -1175,6 +1252,8 @@ function renderErrorInsights(data) {
         <td>${escapeHTML(item.account_name || `#${item.account_id}`)}</td>
         <td class="num mono">${item.rpm >= 0 ? item.rpm : "—"}</td>
         <td class="num mono">${item.tpm >= 0 ? Number(item.tpm).toLocaleString("zh-CN") : "—"}</td>
+        <td class="num mono">${item.itpm >= 0 ? Number(item.itpm).toLocaleString("zh-CN") : "—"}</td>
+        <td class="num mono">${item.inflight >= 0 ? item.inflight : "—"}</td>
         <td class="num mono">${item.total_requests >= 0 ? Number(item.total_requests).toLocaleString("zh-CN") : "—"}</td>
         <td class="error-message-cell">${escapeHTML(item.message)}</td>
       </tr>`,
@@ -1640,6 +1719,9 @@ function openStrategy(item = null) {
   $("#strategy-rpm-mode").value = item?.rpm_strategy || "fixed";
   $("#strategy-buffer").value = item?.rpm_sticky_buffer ?? 0;
   $("#strategy-dispatch-mode").value = item?.dispatch_mode || "";
+  $("#strategy-dispatch-pacing").value = item?.dispatch_pacing || "";
+  $("#strategy-pacing-concurrency").value = item?.pacing_concurrency ?? 0;
+  $("#strategy-pacing-interval").value = item?.pacing_interval_seconds ?? 0;
   syncRPMBufferControl(
     "#strategy-rpm-mode",
     "#strategy-buffer",
@@ -1931,16 +2013,25 @@ function updateSurvivalClocks() {
     node.textContent = durationClockText(minutes, minutes !== null);
   });
 }
-function accountUsageCell(item) {
+function accountUsageCell(item, includeLive = true) {
   const row = (label, value, resetAt) => {
     const used = Math.max(0, Math.min(Number(value || 0), 100));
     const resetText = resetAt ? dateTime(resetAt) : "等待刷新";
     return `<div class="usage-window-row"><b>${label}</b><span><i style="width:${used}%"></i></span><strong>${used.toFixed(0)}%</strong><small title="${escapeHTML(resetText)}">${resetText}</small></div>`;
   };
-  const load = state.realtime?.accounts?.find(
-    (entry) => entry.account_id === item.id,
+  const live = includeLive
+    ? `<div class="usage-window-row live-row" data-account-realtime="${item.id}">${accountLiveLoadInner(accountRealtimeLoad(item.id), item.base_rpm)}</div>`
+    : "";
+  return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}${live}</div>`;
+}
+function accountRealtimeLoad(accountID) {
+  return state.realtime?.accounts?.find(
+    (entry) => Number(entry.account_id) === Number(accountID),
   );
-  return `<div class="usage-window">${row("5h", item.quota_5h_utilization, item.quota_5h_reset_at)}${row("7d", item.quota_7d_utilization, item.quota_7d_reset_at)}<div class="usage-window-row live-row" data-account-realtime="${item.id}">${accountLiveLoadInner(load, item.base_rpm)}</div></div>`;
+}
+function accountTPMCell(accountID) {
+  const tpm = Number(accountRealtimeLoad(accountID)?.tpm || 0);
+  return `<strong class="mono account-tpm" data-account-tpm="${accountID}" title="最近 60 秒 Token 吞吐">${compact(tpm)}</strong>`;
 }
 function accountLiveLoadInner(load, fallbackBaseRPM = 0) {
   const rpm = Number(load?.rpm || 0);
@@ -2018,6 +2109,10 @@ function renderRealtime() {
     const account = state.accounts.find((item) => item.id === id);
     node.innerHTML = accountLiveLoadInner(loads.get(id), account?.base_rpm);
   });
+  $$('[data-account-tpm]').forEach((node) => {
+    const load = loads.get(Number(node.dataset.accountTpm));
+    node.textContent = compact(Number(load?.tpm || 0));
+  });
 }
 function closeAccountActionMenu() {
   const menu = $("#account-action-menu");
@@ -2075,24 +2170,38 @@ function openAccountActionMenu(trigger, item) {
 function renderAccountSummary() {
   const item = state.accountSummary;
   if (!item) return;
-  $("#account-summary-metrics").innerHTML = [
-    metric(
-      "FILTERED ACCOUNTS",
-      item.accounts,
-      `${item.active_accounts} 个可调度`,
-      "a",
-    ),
-    metric("BILLED", money(item.billed_cost), `${item.requests} 次请求`),
-    metric("ACTUAL COST", money(item.actual_cost), "筛选区间账号成本", "b"),
-    metric(
-      "TOKENS",
-      compact(item.input_tokens + item.output_tokens),
-      `输入 ${compact(item.input_tokens)} / 输出 ${compact(item.output_tokens)}`,
-    ),
-  ].join("");
+  const metrics = [];
+  if (hasAccountViewValue("blocks", "filtered_accounts"))
+    metrics.push(
+      metric(
+        "FILTERED ACCOUNTS",
+        item.accounts,
+        `${item.active_accounts} 个可调度`,
+        "a",
+      ),
+    );
+  if (hasAccountViewValue("blocks", "billed"))
+    metrics.push(
+      metric("BILLED", money(item.billed_cost), `${item.requests} 次请求`),
+    );
+  if (hasAccountViewValue("blocks", "actual_cost"))
+    metrics.push(
+      metric("ACTUAL COST", money(item.actual_cost), "筛选区间账号成本", "b"),
+    );
+  if (hasAccountViewValue("blocks", "tokens"))
+    metrics.push(
+      metric(
+        "TOKENS",
+        compact(Number(item.input_tokens || 0) + Number(item.output_tokens || 0)),
+        `输入 ${compact(item.input_tokens)} / 输出 ${compact(item.output_tokens)}`,
+      ),
+    );
+  $("#account-summary-metrics").innerHTML = metrics.join("");
+  $("#account-summary-metrics").hidden = metrics.length === 0;
 }
 function renderAccounts() {
   closeAccountActionMenu();
+  configureAccountView();
   const counts = state.accountStatusCounts || {};
   syncTableSortButtons("account", state.accountSort);
   $("#status-all-count").textContent = Number(counts.all || 0);
@@ -2116,6 +2225,22 @@ function renderAccounts() {
   const pageItems = paginatedItems("accounts", filtered);
   $("#accounts-body").innerHTML = pageItems
     .map((item) => {
+      if (!isAdmin()) {
+        const subscription = accountSubscriptionName(item);
+        const subscriptionTitle = item.rate_limit_tier
+          ? `${subscription} · ${item.rate_limit_tier}`
+          : subscription;
+        const cells = {
+          status: '<td><span class="pill ok">正常</span></td>',
+          subscription: `<td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td>`,
+          quota: `<td>${accountUsageCell(item, false)}</td>`,
+          requests: `<td class="num mono request-count">${Number(item.request_count || 0).toLocaleString("zh-CN")}</td>`,
+          tpm: `<td class="num">${accountTPMCell(item.id)}</td>`,
+        };
+        return `<tr>${visibleAccountColumns()
+          .map((column) => cells[column] || "")
+          .join("")}</tr>`;
+      }
       const [statusText, statusClass, statusTitle] = accountStatus(item);
       const [authText] = accountAuthStatus(item);
       const groups = item.group_ids.map((id) => groupMark(id, "pill")).join("");
@@ -3578,11 +3703,19 @@ function openUser(item = null) {
   $$('input[name="user-page"]').forEach((node) => {
     node.checked = visiblePages.includes(node.value);
   });
+  const accountView = item?.account_view || restrictedAccountViewDefault;
+  $$('input[name="user-account-column"]').forEach((node) => {
+    node.checked = (accountView.columns || []).includes(node.value);
+  });
+  $$('input[name="user-account-block"]').forEach((node) => {
+    node.checked = (accountView.blocks || []).includes(node.value);
+  });
   syncUserRole(false);
   showInitializedDialog("#user-dialog");
 }
 function syncUserRole(resetPages = false) {
   const manager = $("#user-role").value !== "user";
+  const admin = $("#user-role").value === "admin";
   $$('input[name="user-group"]').forEach((node) => {
     if (manager) node.checked = true;
     node.disabled = manager;
@@ -3592,7 +3725,15 @@ function syncUserRole(resetPages = false) {
     $$('input[name="user-page"]').forEach((node) => {
       node.checked = defaults.includes(node.value);
     });
+    $$('input[name="user-account-column"]').forEach((node) => {
+      node.checked = restrictedAccountViewDefault.columns.includes(node.value);
+    });
+    $$('input[name="user-account-block"]').forEach((node) => {
+      node.checked = restrictedAccountViewDefault.blocks.includes(node.value);
+    });
   }
+  $("#user-account-columns").hidden = admin;
+  $("#user-account-blocks").hidden = admin;
 }
 function syncKeyGroups(selected = "") {
   const owner =
@@ -5140,6 +5281,9 @@ $("#strategy-form").addEventListener("submit", async (event) => {
         rpm_strategy: $("#strategy-rpm-mode").value,
         rpm_sticky_buffer: Number($("#strategy-buffer").value),
         dispatch_mode: $("#strategy-dispatch-mode").value,
+        dispatch_pacing: $("#strategy-dispatch-pacing").value,
+        pacing_concurrency: Number($("#strategy-pacing-concurrency").value),
+        pacing_interval_seconds: Number($("#strategy-pacing-interval").value),
       }),
     });
     $("#strategy-dialog").close();
@@ -5356,6 +5500,14 @@ $("#user-form").addEventListener("submit", async (event) => {
       visible_pages: $$('input[name="user-page"]:checked').map(
         (node) => node.value,
       ),
+      account_view: {
+        columns: $$('input[name="user-account-column"]:checked').map(
+          (node) => node.value,
+        ),
+        blocks: $$('input[name="user-account-block"]:checked').map(
+          (node) => node.value,
+        ),
+      },
     };
     await api(id ? `/api/users/${id}` : "/api/users", {
       method: id ? "PUT" : "POST",

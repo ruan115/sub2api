@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -629,6 +630,23 @@ func (a *app) captureGatewayUpstreamState(accountID int64, groupID, model string
 		return
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
+		// The snapshot answers "how much concurrent volume was this account
+		// carrying when the upstream rate-limited it": requests/tokens in the
+		// sliding 60s window, ITPM-relevant uncached input, and in-flight
+		// requests at this instant. The same numbers land in
+		// gateway_error_logs for offline threshold tuning.
+		snapshot := a.accountLoadSnapshot(accountID)
+		slog.Info("ratelimit.429_snapshot",
+			"account_id", accountID,
+			"model", model,
+			"rpm_60s", snapshot.RPM,
+			"tpm_60s", snapshot.TPM,
+			"itpm_60s", snapshot.ITPM,
+			"inflight", snapshot.Inflight,
+			"unified_status", response.Header.Get("anthropic-ratelimit-unified-status"),
+			"unified_reset", response.Header.Get("anthropic-ratelimit-unified-reset"),
+			"retry_after", response.Header.Get("retry-after"),
+		)
 		downweightUntil, transient := a.captureAccount429State(accountID, policy, response)
 		if transient {
 			// The learned peak and the scheduling penalty are one policy. Keeping

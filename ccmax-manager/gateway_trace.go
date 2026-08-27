@@ -72,6 +72,7 @@ type gatewayCapacityDiagnostics struct {
 	ConcurrencyBlocked     int `json:"concurrency_blocked"`
 	TemporaryRPMBlocked    int `json:"temporary_rpm_blocked"`
 	TPMBlocked             int `json:"tpm_blocked"`
+	PacingBlocked          int `json:"pacing_blocked"`
 	ITPMBlocked            int `json:"itpm_blocked"`
 	ITPMReservationBlocked int `json:"itpm_reservation_blocked"`
 	RPMBlocked             int `json:"rpm_blocked"`

@@ -60,19 +60,134 @@ func TestStickySessionITPMDiscountKeepsWarmAccount(t *testing.T) {
 		t.Fatalf("selected account %d, want warm home %d kept by the settled-cost discount", selected.ID, home.ID)
 	}
 
-	// Without a settled cost the full estimate applies again and the projection
-	// over the hard limit moves the session away.
+	// A binding without a settled cost is assumed warm and small, so the
+	// session still stays home instead of being evicted by the raw estimate.
 	if _, err := a.db.Exec(`UPDATE dispatch_sessions SET last_input_tokens = 0, account_id = ? WHERE session_hash = ? AND api_key_id = ?`, home.ID, session, key.ID); err != nil {
 		t.Fatal(err)
 	}
 	selected, err = a.tryAcquireGatewayAccountPinned(key, session, "claude-fable-5", map[int64]bool{}, false, false, demand)
 	if err != nil {
-		t.Fatalf("undiscounted dispatch failed: %v", err)
+		t.Fatalf("unsettled sticky dispatch failed: %v", err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	a.releaseGatewayITPM(selected)
+	if selected.ID != home.ID {
+		t.Fatalf("selected account %d, want warm home %d kept by the optimistic unsettled default", selected.ID, home.ID)
+	}
+
+	// Only an account that has genuinely consumed its hard limit loses the
+	// session: real usage protects against 429 regardless of any discount.
+	if _, _, err := a.recordUsage(usageInput{
+		RequestID: "warm-home-saturated", PurposeKey: "default", GroupID: "a", AccountID: home.ID,
+		Model: "claude-fable-5", InputTokens: 40_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE dispatch_sessions SET account_id = ? WHERE session_hash = ? AND api_key_id = ?`, home.ID, session, key.ID); err != nil {
+		t.Fatal(err)
+	}
+	selected, err = a.tryAcquireGatewayAccountPinned(key, session, "claude-fable-5", map[int64]bool{}, false, false, demand)
+	if err != nil {
+		t.Fatalf("saturated-home dispatch failed: %v", err)
 	}
 	a.releaseGatewayAccount(selected.ID)
 	a.releaseGatewayITPM(selected)
 	if selected.ID != spare.ID {
-		t.Fatalf("selected account %d, want spare %d once the projection overflows the hard limit", selected.ID, spare.ID)
+		t.Fatalf("selected account %d, want spare %d once the home account consumed its hard limit", selected.ID, spare.ID)
+	}
+}
+
+// The lowest-ITPM placement for oversized requests applies to cold sessions
+// only: a warm session stays on its bound account even when another account
+// reports less input usage.
+func TestOversizedWarmSessionStaysOnBoundAccount(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := createGatewayTestAccount(t, a, handler, "oversized-home", "https://ohome.example.test", 0, nil, map[string]any{"access_token": "home"})
+	cooler := createGatewayTestAccount(t, a, handler, "oversized-cooler", "https://ocool.example.test", 0, nil, map[string]any{"access_token": "cool"})
+	for _, input := range []usageInput{
+		{RequestID: "oversized-home-load", PurposeKey: "default", GroupID: "a", AccountID: home.ID, Model: "claude-fable-5", InputTokens: 30_000},
+		{RequestID: "oversized-cooler-load", PurposeKey: "default", GroupID: "a", AccountID: cooler.ID, Model: "claude-fable-5", InputTokens: 5_000},
+	} {
+		if _, _, err := a.recordUsage(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := "oversized-warm-session"
+	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at, last_input_tokens) VALUES (?, ?, ?, ?, ?)`, session, key.ID, home.ID, expires, 2_000); err != nil {
+		t.Fatal(err)
+	}
+
+	demand := gatewayDispatchDemand{EstimatedITPM: 120_000, Oversized: true}
+	selected, err := a.tryAcquireGatewayAccountPinned(key, session, "claude-fable-5", map[int64]bool{}, false, false, demand)
+	if err != nil {
+		t.Fatalf("oversized warm dispatch failed: %v", err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	a.releaseGatewayITPM(selected)
+	if selected.ID != home.ID {
+		t.Fatalf("selected account %d, want warm home %d despite the cooler account %d", selected.ID, home.ID, cooler.ID)
+	}
+	var bound int64
+	if err := a.db.QueryRow(`SELECT account_id FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ?`, session, key.ID).Scan(&bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound != home.ID {
+		t.Fatalf("session rebound to %d, want it kept on %d", bound, home.ID)
+	}
+}
+
+func TestGatewayCachePinCoversMidSizePrompts(t *testing.T) {
+	if !gatewayRequestHoldsLargeCache(gatewayCachePinBodyBytes) {
+		t.Fatal("cache pin threshold does not cover its own boundary")
+	}
+	if gatewayRequestHoldsLargeCache(gatewayCachePinBodyBytes - 1) {
+		t.Fatal("cache pin threshold applies below the boundary")
+	}
+	// ~300KB ≈ a 100k-token prompt: previously unprotected by the 512KB bound.
+	if !gatewayRequestHoldsLargeCache(300 << 10) {
+		t.Fatal("mid-size cached prompt is not pinned to its account")
+	}
+}
+
+func TestGatewaySessionCostCapsOneOffCacheRebuild(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := createGatewayTestAccount(t, a, handler, "session-cost-home", "https://session-cost.example.test", 0, nil, map[string]any{"access_token": "home"})
+	session := "session-cost-cache-rebuild"
+	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at, last_input_tokens) VALUES (?, ?, ?, ?, 0)`, session, key.ID, home.ID, expires); err != nil {
+		t.Fatal(err)
+	}
+
+	a.updateGatewaySessionCost(session, key.ID, tokenUsage{Input: 1_200, CacheCreation: 50_000})
+	var lastInput int64
+	if err := a.db.QueryRow(`SELECT last_input_tokens FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ?`, session, key.ID).Scan(&lastInput); err != nil {
+		t.Fatal(err)
+	}
+	if lastInput != 1_200+gatewayITPMSmallRequest {
+		t.Fatalf("one-off rebuild poisoned next-turn estimate: got %d, want %d", lastInput, 1_200+gatewayITPMSmallRequest)
+	}
+
+	a.updateGatewaySessionCost(session, key.ID, tokenUsage{Input: 2_000, CacheCreation: 3_400, CacheRead: 80_000})
+	if err := a.db.QueryRow(`SELECT last_input_tokens FROM dispatch_sessions WHERE session_hash = ? AND api_key_id = ?`, session, key.ID).Scan(&lastInput); err != nil {
+		t.Fatal(err)
+	}
+	if lastInput != 5_400 {
+		t.Fatalf("steady incremental cache write was not learned exactly: got %d, want 5400", lastInput)
 	}
 }
 

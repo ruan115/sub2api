@@ -1686,10 +1686,14 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := currentUser(r)
+	restrictedView := user.Role != "admin"
 	if user.Role == "user" {
 		condition, scopeArgs := scopedAccountCondition(user, "a")
 		where += ` AND ` + condition
 		args = append(args, scopeArgs...)
+	}
+	if restrictedView {
+		where += ` AND ` + accountStatePredicate("a", "normal")
 	}
 	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupIDPattern.MatchString(groupID) {
 		where += ` AND EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`
@@ -1714,7 +1718,7 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	args = append(args, quotaArgs...)
 	baseWhere := where
 	baseArgs := append([]any(nil), args...)
-	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" {
+	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" && !restrictedView {
 		where += ` AND ` + accountStatePredicate("a", status)
 	}
 
@@ -1791,8 +1795,16 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			item.GroupIDs = visibleGroups
 		}
 	}
+	responseItems := any(items)
+	if restrictedView {
+		projected := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			projected = append(projected, accountForRestrictedView(item, user.AccountView))
+		}
+		responseItems = projected
+	}
 	if !paginated {
-		writeJSON(w, http.StatusOK, items)
+		writeJSON(w, http.StatusOK, responseItems)
 		return
 	}
 	countArgs := args[:len(args)-2]
@@ -1822,9 +1834,16 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	statusCounts["limited_7d"] = sevenDayCount
 	statusCounts["cooling_429"] = coolingCount
 	statusCounts["error"] = errorCount
+	summary := map[string]any{"total": total, "requests": summaryRequests, "billed_cost": summaryBilled, "survival_seconds": summarySurvival}
+	if restrictedView {
+		summary = map[string]any{"total": total}
+		if accountViewHas(user.AccountView.Columns, "requests") {
+			summary["requests"] = summaryRequests
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages(total, pageSize), "status_counts": statusCounts,
-		"summary": map[string]any{"total": total, "requests": summaryRequests, "billed_cost": summaryBilled, "survival_seconds": summarySurvival},
+		"items": responseItems, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages(total, pageSize), "status_counts": statusCounts,
+		"summary": summary,
 	})
 }
 

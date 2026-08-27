@@ -405,7 +405,7 @@
               </div>
               </div>
               <div class="realtime-load-strip" id="realtime-load-strip" aria-label="60 秒实时负载">
-              <div class="realtime-load-heading">
+              <div class="realtime-load-heading" id="realtime-load-heading">
                 <span class="realtime-pulse" aria-hidden="true"></span>
                 <strong>实时负载</strong>
                 <small id="realtime-updated-at" title="每 5 秒更新">等待数据</small>
@@ -416,13 +416,13 @@
               <div class="realtime-load-item" id="realtime-itpm-item" title="上游真实限流口径：未缓存输入（input + cache_creation），缓存读不计入">
                 <span>ITPM</span><strong id="realtime-itpm">0</strong><small id="realtime-itpm-window">按策略窗口 · 含在途预留</small>
               </div>
-              <div class="realtime-load-item" title="最近 60 秒缓存读取量。不计入上游 ITPM 限流，命中越多越省额度">
+              <div class="realtime-load-item" id="realtime-cache-read-item" title="最近 60 秒缓存读取量。不计入上游 ITPM 限流，命中越多越省额度">
                 <span>缓存读</span><strong id="realtime-cache-read-tpm">0</strong><small>60 秒滚动 · 不占限流</small>
               </div>
-              <div class="realtime-load-item" title="最近 60 秒输出 Token 量，对应上游独立的 OTPM 限额">
+              <div class="realtime-load-item" id="realtime-otpm-item" title="最近 60 秒输出 Token 量，对应上游独立的 OTPM 限额">
                 <span>OTPM</span><strong id="realtime-otpm">0</strong><small>60 秒滚动</small>
               </div>
-              <div class="realtime-load-item" title="最近 60 秒输入、输出及缓存 Token 总量。仅表示上下文吞吐，不是限流负载">
+              <div class="realtime-load-item" id="realtime-throughput-item" title="最近 60 秒输入、输出及缓存 Token 总量。仅表示上下文吞吐，不是限流负载">
                 <span>总吞吐</span><strong id="realtime-tpm">0</strong><small>60 秒滚动 · 非限流口径</small>
               </div>
               <div class="realtime-load-item" id="realtime-concurrency-item" title="当前在途请求数 / 当前可调度账号的并发容量">
@@ -448,6 +448,7 @@
                     <th class="num" data-column="billing" title="账号总计费"><button class="table-sort" data-account-sort="total_billed_cost">账号总计费<i data-lucide="arrow-up-down"></i></button></th>
                     <th data-column="quota" title="5h / 7d 配额窗口与最近 60 秒实时负载">用量窗口</th>
                     <th class="num" data-column="requests" title="请求数"><button class="table-sort" data-account-sort="request_count">请求数<i data-lucide="arrow-up-down"></i></button></th>
+                    <th class="num" data-column="tpm" title="最近 60 秒 Token 吞吐" hidden>TPM</th>
                     <th data-column="onboarded" title="上号时间"><button class="table-sort" data-account-sort="onboarded_at">上号时间<i data-lucide="arrow-up-down"></i></button></th>
                     <th data-column="reauthorized" title="最近成功二次授权"><button class="table-sort" data-account-sort="reauthorized_at">二次授权<i data-lucide="arrow-up-down"></i></button></th>
                     <th class="num" data-column="reauth-count" title="成功二次授权次数"><button class="table-sort" data-account-sort="reauthorization_count">授权次数<i data-lucide="arrow-up-down"></i></button></th>
@@ -693,6 +694,8 @@
                     <th>账号</th>
                     <th class="num">瞬时 RPM</th>
                     <th class="num">瞬时 TPM</th>
+                    <th class="num" title="出错瞬间 60s 窗口内的未缓存输入(input + cache_creation)">瞬时 ITPM</th>
+                    <th class="num" title="出错瞬间正在处理的请求数">在途</th>
                     <th class="num">总请求</th>
                     <th>错误信息</th>
                   </tr>
@@ -2238,6 +2241,29 @@
                 集中调度（打满一个再放行下一个，其余为待调度，全满排队）
               </option>
             </select></label
+          ><label
+            ><span>处理节奏</span
+            ><select id="strategy-dispatch-pacing">
+              <option value="">正常（突发直到 RPM 用尽）</option>
+              <option value="interval">按秒间隔（每 n 秒最多放行 n 个，摊平整分钟）</option>
+              <option value="completion">成功接续（保持 n 个在途，空一个接一个）</option>
+            </select
+            ><small>避免 RPM 预算在窗口前几秒被突发耗尽；被挡下的请求进入容量队列等待下一个空位</small></label
+          ><label
+            ><span>节奏并发 n</span
+            ><input
+              id="strategy-pacing-concurrency"
+              type="number"
+              min="0"
+              value="0" /><small>按秒间隔/成功接续模式生效，至少为 1</small></label
+          ><label
+            ><span>节奏间隔（秒）</span
+            ><input
+              id="strategy-pacing-interval"
+              type="number"
+              min="0"
+              max="3600"
+              value="0" /><small>仅按秒间隔模式生效，1-3600</small></label
           >
         </div>
         <footer class="modal-actions">
@@ -2498,6 +2524,31 @@
             <label><input type="checkbox" name="user-page" value="billing" /><span>计费中心</span></label>
             <label><input type="checkbox" name="user-page" value="audit" /><span>操作日志</span></label>
             <small>页面权限仅控制查看范围；普通用户不能修改系统配置，只读管理员不能执行任何写操作。</small>
+          </fieldset>
+          <fieldset class="page-picker account-view-picker" id="user-account-columns">
+            <legend>账号池表头</legend>
+            <label><input type="checkbox" name="user-account-column" value="status" /><span>账号状态</span></label>
+            <label><input type="checkbox" name="user-account-column" value="subscription" /><span>订阅类型</span></label>
+            <label><input type="checkbox" name="user-account-column" value="quota" /><span>用量窗口</span></label>
+            <label><input type="checkbox" name="user-account-column" value="requests" /><span>请求数</span></label>
+            <label><input type="checkbox" name="user-account-column" value="tpm" /><span>TPM</span></label>
+            <small>仅作用于普通用户和只读管理员；用量窗口只显示 5h / 7d，不包含实际 RPM。</small>
+          </fieldset>
+          <fieldset class="page-picker account-view-picker" id="user-account-blocks">
+            <legend>账号池统计块</legend>
+            <label><input type="checkbox" name="user-account-block" value="filters" /><span>搜索与筛选</span></label>
+            <label><input type="checkbox" name="user-account-block" value="filtered_accounts" /><span>账号汇总</span></label>
+            <label><input type="checkbox" name="user-account-block" value="billed" /><span>计费汇总</span></label>
+            <label><input type="checkbox" name="user-account-block" value="actual_cost" /><span>成本汇总</span></label>
+            <label><input type="checkbox" name="user-account-block" value="tokens" /><span>Token 汇总</span></label>
+            <label><input type="checkbox" name="user-account-block" value="rpm" /><span>实时 RPM</span></label>
+            <label><input type="checkbox" name="user-account-block" value="itpm" /><span>实时 ITPM</span></label>
+            <label><input type="checkbox" name="user-account-block" value="cache_read" /><span>缓存读</span></label>
+            <label><input type="checkbox" name="user-account-block" value="otpm" /><span>实时 OTPM</span></label>
+            <label><input type="checkbox" name="user-account-block" value="throughput" /><span>总吞吐</span></label>
+            <label><input type="checkbox" name="user-account-block" value="concurrency" /><span>并发容量</span></label>
+            <label><input type="checkbox" name="user-account-block" value="queue" /><span>等待队列</span></label>
+            <small>未勾选的统计字段不会返回给该用户；系统管理员始终保留完整视图。</small>
           </fieldset>
           <label
             ><span>可支配余额 USD</span

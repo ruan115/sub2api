@@ -62,6 +62,9 @@ type dispatchStrategy struct {
 	RPMStrategy           string `json:"rpm_strategy"`
 	RPMStickyBuffer       int    `json:"rpm_sticky_buffer"`
 	DispatchMode          string `json:"dispatch_mode"`
+	DispatchPacing        string `json:"dispatch_pacing"`
+	PacingConcurrency     int    `json:"pacing_concurrency"`
+	PacingIntervalSeconds int    `json:"pacing_interval_seconds"`
 	BoundGroups           int    `json:"bound_groups"`
 	BoundAccounts         int    `json:"bound_accounts"`
 	CreatedAt             string `json:"created_at"`
@@ -82,6 +85,9 @@ type dispatchStrategyInput struct {
 	RPMStrategy           string `json:"rpm_strategy"`
 	RPMStickyBuffer       int    `json:"rpm_sticky_buffer"`
 	DispatchMode          string `json:"dispatch_mode"`
+	DispatchPacing        string `json:"dispatch_pacing"`
+	PacingConcurrency     int    `json:"pacing_concurrency"`
+	PacingIntervalSeconds int    `json:"pacing_interval_seconds"`
 }
 
 func (input *dispatchStrategyInput) validate() error {
@@ -112,6 +118,28 @@ func (input *dispatchStrategyInput) validate() error {
 	}
 	if !validDispatchMode(input.DispatchMode) {
 		return errors.New("invalid strategy dispatch mode")
+	}
+	switch input.DispatchPacing {
+	case "":
+		// 正常：突发直到 RPM 用尽，保持既有行为。
+		input.PacingConcurrency = 0
+		input.PacingIntervalSeconds = 0
+	case "interval":
+		// 按秒间隔：每 pacing_interval_seconds 秒最多放行 pacing_concurrency 个新请求。
+		if input.PacingConcurrency < 1 {
+			return errors.New("pacing concurrency must be at least 1")
+		}
+		if input.PacingIntervalSeconds < 1 || input.PacingIntervalSeconds > 3600 {
+			return errors.New("pacing interval must be between 1 and 3600 seconds")
+		}
+	case "completion":
+		// 成功接续：保持 pacing_concurrency 个在途，空出一个立即接入下一个。
+		if input.PacingConcurrency < 1 {
+			return errors.New("pacing concurrency must be at least 1")
+		}
+		input.PacingIntervalSeconds = 0
+	default:
+		return errors.New("invalid strategy dispatch pacing")
 	}
 	return nil
 }
@@ -170,7 +198,7 @@ func optionalInt64(value *int64) any {
 	return *value
 }
 
-const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.itpm_protection_enabled, s.itpm_window_seconds, s.itpm_soft_limit, s.itpm_hard_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode,
+const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.itpm_protection_enabled, s.itpm_window_seconds, s.itpm_soft_limit, s.itpm_hard_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode, s.dispatch_pacing, s.pacing_concurrency, s.pacing_interval_seconds,
 	(SELECT COUNT(*) FROM groups g WHERE g.strategy_id = s.id) AS bound_groups,
 	(SELECT COUNT(DISTINCT a.id) FROM accounts a
 		LEFT JOIN account_groups ag ON ag.account_id = a.id
@@ -183,7 +211,7 @@ const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit,
 func scanDispatchStrategy(rows *sql.Rows) (dispatchStrategy, error) {
 	var item dispatchStrategy
 	var itpmProtectionEnabled int
-	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &itpmProtectionEnabled, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
+	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &itpmProtectionEnabled, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.DispatchPacing, &item.PacingConcurrency, &item.PacingIntervalSeconds, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
 	item.ITPMProtectionEnabled = itpmProtectionEnabled == 1
 	return item, err
 }
@@ -228,8 +256,8 @@ func (a *app) handleStrategyCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, boolInt(itpmProtectionEnabled), itpmWindowSeconds, itpmSoftLimit, itpmHardLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode)
+	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, dispatch_pacing, pacing_concurrency, pacing_interval_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, boolInt(itpmProtectionEnabled), itpmWindowSeconds, itpmSoftLimit, itpmHardLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, input.DispatchPacing, input.PacingConcurrency, input.PacingIntervalSeconds)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -274,10 +302,10 @@ func (a *app) handleStrategyUpdate(w http.ResponseWriter, r *http.Request) {
 	result, err := a.db.Exec(`UPDATE dispatch_strategies SET name = ?, description = ?, rpm_limit = ?, tpm_limit = ?, itpm_limit = ?,
 		itpm_protection_enabled = COALESCE(?, itpm_protection_enabled), itpm_window_seconds = COALESCE(?, itpm_window_seconds),
 		itpm_soft_limit = COALESCE(?, itpm_soft_limit), itpm_hard_limit = COALESCE(?, itpm_hard_limit),
-		concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
+		concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, dispatch_pacing = ?, pacing_concurrency = ?, pacing_interval_seconds = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
 		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit,
 		optionalBoolInt(input.ITPMProtectionEnabled), optionalInt(input.ITPMWindowSeconds), optionalInt64(input.ITPMSoftLimit), optionalInt64(input.ITPMHardLimit),
-		input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, id)
+		input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, input.DispatchPacing, input.PacingConcurrency, input.PacingIntervalSeconds, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

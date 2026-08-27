@@ -25,29 +25,31 @@ var panelPages = []string{"overview", "accounts", "dead", "onboarding", "daily",
 type authContextKey struct{}
 
 type panelUser struct {
-	ID              int64    `json:"id"`
-	Username        string   `json:"username"`
-	Name            string   `json:"name"`
-	Role            string   `json:"role"`
-	Status          string   `json:"status"`
-	AllowedGroupIDs []string `json:"allowed_group_ids"`
-	VisiblePages    []string `json:"visible_pages"`
-	Balance         *float64 `json:"balance"`
-	RPM             int      `json:"rpm_limit"`
-	CreatedAt       string   `json:"created_at"`
-	UpdatedAt       string   `json:"updated_at"`
+	ID              int64             `json:"id"`
+	Username        string            `json:"username"`
+	Name            string            `json:"name"`
+	Role            string            `json:"role"`
+	Status          string            `json:"status"`
+	AllowedGroupIDs []string          `json:"allowed_group_ids"`
+	VisiblePages    []string          `json:"visible_pages"`
+	AccountView     accountViewConfig `json:"account_view"`
+	Balance         *float64          `json:"balance"`
+	RPM             int               `json:"rpm_limit"`
+	CreatedAt       string            `json:"created_at"`
+	UpdatedAt       string            `json:"updated_at"`
 }
 
 type userInput struct {
-	Username        string   `json:"username"`
-	Name            string   `json:"name"`
-	Password        string   `json:"password"`
-	Role            string   `json:"role"`
-	Status          string   `json:"status"`
-	AllowedGroupIDs []string `json:"allowed_group_ids"`
-	VisiblePages    []string `json:"visible_pages"`
-	Balance         *float64 `json:"balance"`
-	RPM             int      `json:"rpm_limit"`
+	Username        string            `json:"username"`
+	Name            string            `json:"name"`
+	Password        string            `json:"password"`
+	Role            string            `json:"role"`
+	Status          string            `json:"status"`
+	AllowedGroupIDs []string          `json:"allowed_group_ids"`
+	VisiblePages    []string          `json:"visible_pages"`
+	AccountView     accountViewConfig `json:"account_view"`
+	Balance         *float64          `json:"balance"`
+	RPM             int               `json:"rpm_limit"`
 }
 
 type apiKeyRecord struct {
@@ -90,6 +92,7 @@ func (a *app) migrateFeatures() error {
 			role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'readonly_admin', 'user')),
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			allowed_group_ids_json TEXT NOT NULL DEFAULT '[]',
+			account_view_json TEXT NOT NULL DEFAULT '{}',
 			balance REAL,
 			rpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (rpm_limit >= 0),
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
@@ -136,6 +139,9 @@ func (a *app) migrateFeatures() error {
 		return err
 	}
 	if err := addColumnIfMissing(a.db, "users", "visible_pages_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(a.db, "users", "account_view_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(a.db, "users", "balance", "REAL"); err != nil {
@@ -367,7 +373,7 @@ func userCanAccessGroup(user panelUser, groupID string) bool {
 }
 
 func (a *app) userBySession(token string) (panelUser, error) {
-	return a.scanUser(a.db.QueryRow(`SELECT u.id, u.username, u.name, u.role, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.balance, u.rpm_limit, u.created_at, u.updated_at
+	return a.scanUser(a.db.QueryRow(`SELECT u.id, u.username, u.name, u.role, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.account_view_json, u.balance, u.rpm_limit, u.created_at, u.updated_at
 		FROM panel_sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ? AND s.expires_at > `+nowSQL+` AND u.status = 'active' AND u.deleted_at IS NULL`, hashToken(token)))
 }
@@ -383,9 +389,9 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var user panelUser
-	var passwordHash, allowed, visible string
+	var passwordHash, allowed, visible, accountView string
 	var balance sql.NullFloat64
-	err := a.db.QueryRow(`SELECT id, username, name, password_hash, role, status, allowed_group_ids_json, visible_pages_json, balance, rpm_limit, created_at, updated_at FROM users WHERE username = ? AND deleted_at IS NULL`, strings.TrimSpace(input.Username)).Scan(&user.ID, &user.Username, &user.Name, &passwordHash, &user.Role, &user.Status, &allowed, &visible, &balance, &user.RPM, &user.CreatedAt, &user.UpdatedAt)
+	err := a.db.QueryRow(`SELECT id, username, name, password_hash, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE username = ? AND deleted_at IS NULL`, strings.TrimSpace(input.Username)).Scan(&user.ID, &user.Username, &user.Name, &passwordHash, &user.Role, &user.Status, &allowed, &visible, &accountView, &balance, &user.RPM, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil || user.Status != "active" || bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(input.Password)) != nil {
 		a.recordLoginAudit(r, panelUser{}, input.Username, http.StatusUnauthorized, started)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
@@ -393,8 +399,10 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal([]byte(allowed), &user.AllowedGroupIDs)
 	_ = json.Unmarshal([]byte(visible), &user.VisiblePages)
+	_ = json.Unmarshal([]byte(accountView), &user.AccountView)
 	user.Balance = floatPointer(balance)
 	user.VisiblePages = normalizedVisiblePages(user.Role, user.VisiblePages)
+	user.AccountView = normalizeAccountView(user.Role, user.AccountView)
 	token := randomSecret(32)
 	expires := time.Now().UTC().Add(24 * time.Hour)
 	if _, err := a.db.Exec(`INSERT INTO panel_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)`, hashToken(token), user.ID, expires.Format(time.RFC3339Nano)); err != nil {
@@ -428,20 +436,22 @@ func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) scanUser(row scanner) (panelUser, error) {
 	var item panelUser
-	var allowed, visible string
+	var allowed, visible, accountView string
 	var balance sql.NullFloat64
-	err := row.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &item.Status, &allowed, &visible, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt)
 	if err == nil {
 		_ = json.Unmarshal([]byte(allowed), &item.AllowedGroupIDs)
 		_ = json.Unmarshal([]byte(visible), &item.VisiblePages)
+		_ = json.Unmarshal([]byte(accountView), &item.AccountView)
 		item.Balance = floatPointer(balance)
 		item.VisiblePages = normalizedVisiblePages(item.Role, item.VisiblePages)
+		item.AccountView = normalizeAccountView(item.Role, item.AccountView)
 	}
 	return item, err
 }
 
 func (a *app) handleUsers(w http.ResponseWriter, _ *http.Request) {
-	rows, err := a.db.Query(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, balance, rpm_limit, created_at, updated_at FROM users WHERE deleted_at IS NULL ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'readonly_admin' THEN 1 ELSE 2 END, id`)
+	rows, err := a.db.Query(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE deleted_at IS NULL ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'readonly_admin' THEN 1 ELSE 2 END, id`)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -466,6 +476,7 @@ func normalizeUserInput(input *userInput, requirePassword bool) error {
 	input.Status = strings.TrimSpace(input.Status)
 	input.AllowedGroupIDs = uniqueGroups(input.AllowedGroupIDs)
 	input.VisiblePages = normalizedVisiblePages(input.Role, input.VisiblePages)
+	input.AccountView = normalizeAccountView(input.Role, input.AccountView)
 	if input.Status == "" {
 		input.Status = "active"
 	}
@@ -491,6 +502,9 @@ func normalizeUserInput(input *userInput, requirePassword bool) error {
 	if len(input.VisiblePages) == 0 {
 		return errors.New("select at least one visible page")
 	}
+	if input.Role != "admin" && len(input.AccountView.Columns) == 0 {
+		return errors.New("select at least one account pool column")
+	}
 	if input.Password != "" && len(input.Password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
@@ -513,7 +527,8 @@ func (a *app) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	allowed, _ := json.Marshal(input.AllowedGroupIDs)
 	visible, _ := json.Marshal(input.VisiblePages)
-	result, err := a.db.Exec(`INSERT INTO users (username, name, password_hash, role, status, allowed_group_ids_json, visible_pages_json, balance, rpm_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), input.Balance, input.RPM)
+	accountView, _ := json.Marshal(input.AccountView)
+	result, err := a.db.Exec(`INSERT INTO users (username, name, password_hash, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			writeError(w, http.StatusConflict, "username already exists")
@@ -523,7 +538,7 @@ func (a *app) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := result.LastInsertId()
-	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ?`, id))
+	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ?`, id))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -550,21 +565,22 @@ func (a *app) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed, _ := json.Marshal(input.AllowedGroupIDs)
 	visible, _ := json.Marshal(input.VisiblePages)
+	accountView, _ := json.Marshal(input.AccountView)
 	var err error
 	if input.Password != "" {
 		hash, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, password_hash = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), input.Balance, input.RPM, id)
+		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, password_hash = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, account_view_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM, id)
 		if err == nil {
 			_, err = a.db.Exec(`DELETE FROM panel_sessions WHERE user_id = ?`, id)
 		}
 	} else {
-		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, input.Role, input.Status, string(allowed), string(visible), input.Balance, input.RPM, id)
+		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, account_view_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, input.Role, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM, id)
 	}
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
+	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
 	if err != nil {
 		writeDBError(w, err)
 		return

@@ -355,7 +355,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			break
 		}
 		account, acquireErr := a.acquireGatewayAccountPinnedDemand(key, session, envelope.Model, excluded, false, pinLarge && !releaseStickyPin, demand)
-		if acquireErr != nil && !countTokens && errors.Is(acquireErr, errNoGatewayAccountCapacity) && (a.gatewayShouldQueue(key) || gatewayITPMCapacityBlocked(acquireErr)) {
+		if acquireErr != nil && !countTokens && errors.Is(acquireErr, errNoGatewayAccountCapacity) && (a.gatewayShouldQueue(key) || gatewayITPMCapacityBlocked(acquireErr) || gatewayPacingBlocked(acquireErr)) {
 			account, acquireErr = a.waitForGatewayCapacityPinnedDemand(r.Context(), key, session, envelope.Model, excluded, acquireErr, pinLarge && !releaseStickyPin, demand)
 			if acquireErr != nil && recordGatewayContextFailure(w, r, acquireErr) {
 				return
@@ -1012,6 +1012,12 @@ func gatewayMaxAttempts(rpmDispatchEnabled bool) int {
 const (
 	gatewayLargeRequestBodyBytes = 512 << 10
 	gatewayLargeRequestMaxTokens = 16_384
+	// gatewayCachePinBodyBytes is the body size from which a warm session is
+	// pinned to its bound account (queue first, rebuild elsewhere only after
+	// the queue window). 128KB ≈ 40k prompt tokens — sessions in the
+	// 100k-150k token band were previously unprotected by the 512KB bound and
+	// kept losing their cache to account switches.
+	gatewayCachePinBodyBytes = 128 << 10
 )
 
 func gatewayRequestIsLarge(envelope messageEnvelope, bodyBytes int) bool {
@@ -1024,7 +1030,7 @@ func gatewayRequestIsLarge(envelope messageEnvelope, bodyBytes int) bool {
 // stake, and Claude Code routinely sends 32k-64k on ordinary requests — keying
 // cache affinity off it would pin and serialise essentially all traffic.
 func gatewayRequestHoldsLargeCache(bodyBytes int) bool {
-	return bodyBytes >= gatewayLargeRequestBodyBytes
+	return bodyBytes >= gatewayCachePinBodyBytes
 }
 
 func gatewayRequestMaxAttempts(strategyLimited bool, envelope messageEnvelope, bodyBytes int) int {
@@ -1968,7 +1974,7 @@ func (a *app) tryAcquireGatewayAccountWithPolicyDemand(key gatewayKey, sessionHa
 }
 
 func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, requestedModel string, excluded map[int64]bool, loadAware, pinSticky bool, demand gatewayDispatchDemand) (gatewayAccount, error) {
-	serializedDispatch := key.RPMDispatchEnabled || a.groupUsesRPMReservationStrategy(key.GroupID)
+	serializedDispatch := key.RPMDispatchEnabled || a.groupUsesRPMReservationStrategy(key.GroupID) || a.groupUsesDispatchPacing(key.GroupID)
 	if serializedDispatch {
 		lockValue, _ := a.dispatchLocks.LoadOrStore(key.GroupID, &sync.Mutex{})
 		dispatchLock := lockValue.(*sync.Mutex)
@@ -2002,10 +2008,17 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 	// tracks the last settled uncached input, not the full body estimate. The
 	// discounted demand applies only on the session's own account; anywhere
 	// else the prefix would be re-created at the full estimate. Factor 2
-	// leaves room for the conversation growing between turns.
+	// leaves room for the conversation growing between turns. A binding whose
+	// cost has not settled yet is assumed warm and small: the overshoot is
+	// bounded to a single request and settles right after, while the full
+	// estimate would evict a session whose real input the cache absorbs.
 	stickyDemand := demand
-	if stickyID != 0 && stickyLastInput > 0 && demand.EstimatedITPM > 0 {
-		if discounted := stickyLastInput * 2; discounted < demand.EstimatedITPM {
+	if stickyID != 0 && demand.EstimatedITPM > 0 {
+		discounted := stickyLastInput * 2
+		if stickyLastInput <= 0 {
+			discounted = gatewayITPMSmallRequest
+		}
+		if discounted < demand.EstimatedITPM {
 			stickyDemand.EstimatedITPM = discounted
 			stickyDemand.Oversized = discounted > gatewayITPMLargeRequest
 		}
@@ -2066,6 +2079,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		CASE WHEN ds.tpm_limit > 0 THEN COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) ELSE 0 END AS current_tpm,
 		0 AS current_itpm,
 		COALESCE(ds.itpm_protection_enabled, 1), COALESCE(ds.itpm_window_seconds, 60), COALESCE(ds.itpm_soft_limit, 100000), COALESCE(ds.itpm_hard_limit, 150000),
+		COALESCE(ds.dispatch_pacing, ''), COALESCE(ds.pacing_concurrency, 0), COALESCE(ds.pacing_interval_seconds, 0),
 		CASE WHEN EXISTS (SELECT 1 FROM account_model_cooldowns mc WHERE mc.account_id = a.id AND mc.model = ? AND mc.reset_at > `+nowSQL+`) THEN 1 ELSE 0 END AS model_cooldown
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
 		LEFT JOIN groups g ON g.id = ag.group_id
@@ -2098,6 +2112,9 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		itpm            int64
 		itpmProtection  bool
 		itpmWindow      int
+		pacing          string
+		pacingN         int
+		pacingInterval  int
 		itpmSoft        int64
 		itpmHard        int64
 		modelCooldown   int
@@ -2106,7 +2123,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 	for rows.Next() {
 		var item candidate
 		var itpmProtection int
-		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.consecutive429, &item.weightTier, &item.itpmRemaining, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyITPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &item.tpm, &item.itpm, &itpmProtection, &item.itpmWindow, &item.itpmSoft, &item.itpmHard, &item.modelCooldown); err != nil {
+		if err := rows.Scan(&item.account.ID, &item.account.Name, &item.account.AuthType, &item.account.CredentialsJSON, &item.account.SourceSKHint, &item.account.ExtraJSON, &item.account.Concurrency, &item.account.BaseRPM, &item.account.RPMStrategy, &item.account.StickyBuffer, &item.account.UserMsgQueueMode, &item.account.ProxyID, &item.groupPriority, &item.accountPriority, &item.lastUsed, &item.rpm, &item.inflight, &item.temporaryRPM, &item.consecutive429, &item.weightTier, &item.itpmRemaining, &item.strategyID, &item.strategyRPM, &item.strategyTPM, &item.strategyITPM, &item.strategyConc, &item.strategyRPMMode, &item.strategyBuffer, &item.strategyMode, &item.tpm, &item.itpm, &itpmProtection, &item.itpmWindow, &item.itpmSoft, &item.itpmHard, &item.pacing, &item.pacingN, &item.pacingInterval, &item.modelCooldown); err != nil {
 			rows.Close()
 			return gatewayAccount{}, err
 		}
@@ -2138,6 +2155,19 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 	}
 	for index := range candidates {
 		candidates[index].itpm = itpmUsage[candidates[index].account.ID]
+	}
+	// Interval pacing spreads admissions across the minute instead of letting
+	// the whole RPM budget burn in the first seconds: each account admits at
+	// most pacing_concurrency new requests per pacing_interval_seconds window.
+	pacingWindows := map[int64]int{}
+	for _, item := range candidates {
+		if item.pacing == "interval" && item.pacingN > 0 && item.pacingInterval > 0 {
+			pacingWindows[item.account.ID] = item.pacingInterval
+		}
+	}
+	pacingAdmissions, err := loadAccountRecentAdmissions(tx, pacingWindows)
+	if err != nil {
+		return gatewayAccount{}, err
 	}
 	// Group traffic is split between strategies by configured weight. Tally the
 	// last minute per strategy so each candidate can be measured against its
@@ -2234,6 +2264,22 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 				diagnostics.ConcurrencyBlocked++
 				continue
 			}
+			switch candidate.pacing {
+			case "completion":
+				// 成功接续：保持 pacingN 个在途，空出一个立即接入下一个，
+				// 不等整批完成。被挡下的请求由容量队列轮询补位。
+				if candidate.pacingN > 0 && candidate.inflight >= candidate.pacingN {
+					diagnostics.PacingBlocked++
+					continue
+				}
+			case "interval":
+				// 按秒间隔：滑动窗口内最多准入 pacingN 个新请求，把 RPM
+				// 预算摊到整分钟，而不是前几秒全部烧掉。
+				if candidate.pacingN > 0 && pacingAdmissions[candidate.account.ID] >= int64(candidate.pacingN) {
+					diagnostics.PacingBlocked++
+					continue
+				}
+			}
 			if candidate.temporaryRPM > 0 && candidate.rpm >= candidate.temporaryRPM {
 				// A learned threshold comes from a 429, so it is rate limiting, not
 				// account failure, and it does not release a pinned session: moving a
@@ -2270,11 +2316,16 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 				diagnostics.RPMBlocked++
 				continue
 			}
-			if !effective.Oversized && sticky && candidate.strategyMode == "round_robin" {
-				// Keep an eligible conversation on its bound account so upstream
-				// prompt-cache reads survive round-robin dispatch. The reservation
-				// below still increments this account's RPM, so sticky traffic uses
-				// its normal share and new sessions fill the lower-load accounts.
+			if sticky {
+				// A warm session's cache outweighs every placement heuristic
+				// below: once the bound account passes the capacity filters it
+				// serves the request. In particular the lowest-ITPM re-placement
+				// for oversized requests applies to cold sessions only — moving a
+				// warm oversized request rewrites its whole prefix elsewhere,
+				// which is exactly the input load the heuristics try to avoid.
+				// The reservation below still increments this account's RPM, so
+				// sticky traffic uses its normal share and new sessions fill the
+				// lower-load accounts.
 				selectedIndex = index
 				break
 			}
@@ -2407,12 +2458,14 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 			a.releaseGatewayITPM(selected)
 		}
 	}()
-	if key.RPMDispatchEnabled || selected.RPMStrategy == "fixed" || dispatchModeReservesRPM(selectedCandidate.strategyMode) {
+	if key.RPMDispatchEnabled || selected.RPMStrategy == "fixed" || dispatchModeReservesRPM(selectedCandidate.strategyMode) || selectedCandidate.pacing == "interval" {
 		// Reserve RPM in the same transaction as selection so a concurrent
 		// burst cannot overfill one account before opening the next. Fixed,
 		// round-robin and concentrated accounts reserve here to keep their
 		// policy hard; concentrated in particular would otherwise let a burst
 		// see every account at zero RPM and promote all of them at once.
+		// Interval pacing reserves too: its per-interval admission count reads
+		// this table, so the event must land before the transaction commits.
 		if _, err := tx.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, selected.ID); err != nil {
 			return gatewayAccount{}, err
 		}
@@ -2509,6 +2562,22 @@ func (a *app) groupHasDispatchMode(groupID string, modes []string) bool {
 	return err == nil && found > 0
 }
 
+// groupUsesDispatchPacing reports whether any account reachable through the
+// group resolves a strategy with a dispatch pacing mode. Paced admission reads
+// its counters inside the selection transaction, so selections must be
+// serialized or a concurrent burst would see the same count and overfill the
+// per-interval / in-flight cap.
+func (a *app) groupUsesDispatchPacing(groupID string) bool {
+	var found int
+	err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM account_groups ag
+		JOIN accounts a ON a.id = ag.account_id
+		LEFT JOIN groups g ON g.id = ag.group_id
+		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL AND COALESCE(ds.dispatch_pacing, '') != ''
+		LIMIT 1)`, groupID).Scan(&found)
+	return err == nil && found > 0
+}
+
 func (a *app) recordGatewayAccountRPM(accountID int64) {
 	_, err := a.db.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, accountID)
 	logDatabaseWriteError("insert account RPM event", err)
@@ -2534,9 +2603,13 @@ func (a *app) bindGatewayStickySession(apiKeyID int64, sessionHash string, accou
 
 // updateGatewaySessionCost remembers the request's settled uncached input so
 // the session's next dispatch reserves ITPM by real cost instead of the body
-// estimate. cache_read stays excluded, mirroring settleGatewayITPM.
+// estimate. cache_read stays excluded, mirroring settleGatewayITPM. The
+// cache_creation contribution is capped: a steady turn writes a few thousand
+// incremental tokens that do predict the next turn, while a full prefix
+// rebuild is a one-off write that would poison the estimate for the following
+// request.
 func (a *app) updateGatewaySessionCost(sessionHash string, apiKeyID int64, usage tokenUsage) {
-	actual := usage.Input + usage.CacheCreation
+	actual := usage.Input + min(usage.CacheCreation, gatewayITPMSmallRequest)
 	if sessionHash == "" || apiKeyID <= 0 || actual <= 0 {
 		return
 	}

@@ -256,6 +256,8 @@ type errorInsightAccount struct {
 	AvgRPM        float64 `json:"avg_rpm"`
 	MaxRPM        int64   `json:"max_rpm"`
 	MaxTPM        int64   `json:"max_tpm"`
+	MaxITPM       int64   `json:"max_itpm"`
+	MaxInflight   int64   `json:"max_inflight"`
 	TotalRequests int64   `json:"total_requests"`
 }
 
@@ -267,6 +269,8 @@ type errorInsightEvent struct {
 	Message       string `json:"message"`
 	RPM           int64  `json:"rpm"`
 	TPM           int64  `json:"tpm"`
+	ITPM          int64  `json:"itpm"`
+	Inflight      int64  `json:"inflight"`
 	TotalRequests int64  `json:"total_requests"`
 	CreatedAt     string `json:"created_at"`
 }
@@ -334,7 +338,7 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := a.db.Query(`SELECT ge.account_id, COALESCE(a.name, ''), COALESCE(a.base_rpm, 0), COUNT(*),
 		COALESCE(AVG(CASE WHEN ge.rpm_snapshot >= 0 THEN ge.rpm_snapshot END), 0),
-		COALESCE(MAX(ge.rpm_snapshot), -1), COALESCE(MAX(ge.tpm_snapshot), -1), COALESCE(MAX(ge.total_requests), -1)
+		COALESCE(MAX(ge.rpm_snapshot), -1), COALESCE(MAX(ge.tpm_snapshot), -1), COALESCE(MAX(ge.itpm_snapshot), -1), COALESCE(MAX(ge.inflight_snapshot), -1), COALESCE(MAX(ge.total_requests), -1)
 		FROM gateway_error_logs ge LEFT JOIN accounts a ON a.id = ge.account_id
 		WHERE `+clause+` GROUP BY ge.account_id ORDER BY COUNT(*) DESC LIMIT 40`, args...)
 	if err != nil {
@@ -343,7 +347,7 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	for rows.Next() {
 		var item errorInsightAccount
-		if err := rows.Scan(&item.AccountID, &item.AccountName, &item.BaseRPM, &item.Count, &item.AvgRPM, &item.MaxRPM, &item.MaxTPM, &item.TotalRequests); err != nil {
+		if err := rows.Scan(&item.AccountID, &item.AccountName, &item.BaseRPM, &item.Count, &item.AvgRPM, &item.MaxRPM, &item.MaxTPM, &item.MaxITPM, &item.MaxInflight, &item.TotalRequests); err != nil {
 			rows.Close()
 			writeDBError(w, err)
 			return
@@ -382,7 +386,7 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 	timelineRows.Close()
 
 	eventRows, err := a.db.Query(`SELECT ge.account_id, COALESCE(a.name, ''), ge.status_code, ge.category, ge.message,
-		ge.rpm_snapshot, ge.tpm_snapshot, ge.total_requests, ge.created_at
+		ge.rpm_snapshot, ge.tpm_snapshot, ge.itpm_snapshot, ge.inflight_snapshot, ge.total_requests, ge.created_at
 		FROM gateway_error_logs ge LEFT JOIN accounts a ON a.id = ge.account_id
 		WHERE `+clause+` ORDER BY ge.created_at DESC LIMIT 50`, args...)
 	if err != nil {
@@ -392,7 +396,7 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 	defer eventRows.Close()
 	for eventRows.Next() {
 		var item errorInsightEvent
-		if err := eventRows.Scan(&item.AccountID, &item.AccountName, &item.StatusCode, &item.Category, &item.Message, &item.RPM, &item.TPM, &item.TotalRequests, &item.CreatedAt); err != nil {
+		if err := eventRows.Scan(&item.AccountID, &item.AccountName, &item.StatusCode, &item.Category, &item.Message, &item.RPM, &item.TPM, &item.ITPM, &item.Inflight, &item.TotalRequests, &item.CreatedAt); err != nil {
 			writeDBError(w, err)
 			return
 		}
@@ -806,25 +810,37 @@ func (a *app) recordGatewayError(r *http.Request, response *gatewayErrorResponse
 	if runes := []rune(message); len(runes) > 1000 {
 		message = string(runes[:1000])
 	}
-	rpmSnapshot, tpmSnapshot, totalRequests := a.accountLoadSnapshot(response.accountID)
-	_, err = a.db.Exec(`INSERT INTO gateway_error_logs (request_id, client_request_id, trace_id, upstream_request_id, api_key_id, user_id, account_id, group_id, status_code, category, method, path, message, client_ip, dispatch_diagnostics, duration_ms, rpm_snapshot, tpm_snapshot, total_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		requestID, clientRequestID, traceID, upstreamRequestID, key.ID, key.UserID, optionalID(response.accountID), key.GroupID, status, category, r.Method, r.URL.Path, message, requestIP(r), response.dispatchDiagnostics, response.durationMS, rpmSnapshot, tpmSnapshot, totalRequests)
+	snapshot := a.accountLoadSnapshot(response.accountID)
+	_, err = a.db.Exec(`INSERT INTO gateway_error_logs (request_id, client_request_id, trace_id, upstream_request_id, api_key_id, user_id, account_id, group_id, status_code, category, method, path, message, client_ip, dispatch_diagnostics, duration_ms, rpm_snapshot, tpm_snapshot, itpm_snapshot, inflight_snapshot, total_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		requestID, clientRequestID, traceID, upstreamRequestID, key.ID, key.UserID, optionalID(response.accountID), key.GroupID, status, category, r.Method, r.URL.Path, message, requestIP(r), response.dispatchDiagnostics, response.durationMS, snapshot.RPM, snapshot.TPM, snapshot.ITPM, snapshot.Inflight, snapshot.Total)
 	logDatabaseWriteError("insert gateway error log", err)
 	_ = a.pruneGatewayErrorLogs(false)
 }
 
+type accountLoadSnapshot struct {
+	RPM      int64 `json:"rpm"`
+	TPM      int64 `json:"tpm"`
+	ITPM     int64 `json:"itpm"`
+	Inflight int64 `json:"inflight"`
+	Total    int64 `json:"total"`
+}
+
 // accountLoadSnapshot captures the account's load at the moment an error is
-// recorded: requests in the sliding 60s window, tokens in the same window, and
-// lifetime request count. -1 means the value was not captured.
-func (a *app) accountLoadSnapshot(accountID int64) (rpm, tpm, total int64) {
-	rpm, tpm, total = -1, -1, -1
+// recorded: requests and tokens in the sliding 60s window, the ITPM-relevant
+// uncached input in the same window, requests currently being processed, and
+// the lifetime request count. -1 means the value was not captured. Together
+// with the 429 category this answers "how much concurrent volume was this
+// account carrying when the upstream rate-limited it".
+func (a *app) accountLoadSnapshot(accountID int64) accountLoadSnapshot {
+	snapshot := accountLoadSnapshot{RPM: -1, TPM: -1, ITPM: -1, Inflight: -1, Total: -1}
 	if accountID <= 0 {
-		return
+		return snapshot
 	}
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, accountID).Scan(&rpm)
-	_ = a.db.QueryRow(`SELECT COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) FROM usage_logs WHERE account_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, accountID).Scan(&tpm)
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE account_id = ?`, accountID).Scan(&total)
-	return
+	_ = a.db.QueryRow(`SELECT COUNT(*) FROM account_rpm_events WHERE account_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, accountID).Scan(&snapshot.RPM)
+	_ = a.db.QueryRow(`SELECT COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0), COALESCE(SUM(input_tokens + cache_creation_tokens), 0) FROM usage_logs WHERE account_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')`, accountID).Scan(&snapshot.TPM, &snapshot.ITPM)
+	_ = a.db.QueryRow(`SELECT COALESCE(requests, 0) FROM account_inflight WHERE account_id = ?`, accountID).Scan(&snapshot.Inflight)
+	_ = a.db.QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE account_id = ?`, accountID).Scan(&snapshot.Total)
+	return snapshot
 }
 
 func gatewayErrorResponseMessage(body []byte, status int) string {

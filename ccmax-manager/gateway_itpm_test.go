@@ -55,12 +55,12 @@ func TestLocalITPMExclusiveReservationAndCacheReadSettlement(t *testing.T) {
 	}
 
 	account := gatewayAccount{ID: 9, ITPMReservationID: "large"}
-	app.settleGatewayITPM(account, tokenUsage{Input: 1_000, CacheCreation: 2_000, CacheRead: 500_000})
+	app.settleGatewayITPM(account, tokenUsage{Input: 1_000, CacheCreation: 50_000, CacheRead: 500_000})
 	store.mu.Lock()
 	settled = store.accounts[9]["large"]
 	store.mu.Unlock()
-	if settled.tokens != 3_000 {
-		t.Fatalf("cache_read leaked into ITPM settlement: got %d, want 3000", settled.tokens)
+	if settled.tokens != 51_000 {
+		t.Fatalf("ITPM settlement capped real cache creation or included cache read: got %d, want 51000", settled.tokens)
 	}
 }
 

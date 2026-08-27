@@ -2123,6 +2123,22 @@ textarea:focus {
 .page-picker > small {
   margin-top: 1px;
 }
+.account-view-picker {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.account-view-picker legend {
+  color: var(--ink);
+  font-size: 11px;
+}
+.account-tpm {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .quota-cell {
   display: grid;
   min-width: 110px;
@@ -3027,6 +3043,8 @@ pre.audit-detail-value {
 }
 .form-stack {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 15px;
 }
 .form-grid .span-2 {

@@ -28,6 +28,9 @@ func (a *app) migrateMySQL() error {
 			rpm_strategy VARCHAR(32) NOT NULL DEFAULT 'fixed',
 			rpm_sticky_buffer INT NOT NULL DEFAULT 0,
 			dispatch_mode VARCHAR(32) NOT NULL DEFAULT '',
+			dispatch_pacing VARCHAR(32) NOT NULL DEFAULT '',
+			pacing_concurrency INT NOT NULL DEFAULT 0,
+			pacing_interval_seconds INT NOT NULL DEFAULT 0,
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			deleted_at DATETIME(3) NULL
@@ -130,6 +133,7 @@ func (a *app) migrateMySQL() error {
 			status VARCHAR(16) NOT NULL DEFAULT 'active',
 			allowed_group_ids_json LONGTEXT NOT NULL DEFAULT ('[]'),
 			visible_pages_json LONGTEXT NOT NULL DEFAULT ('[]'),
+			account_view_json LONGTEXT NOT NULL DEFAULT ('{}'),
 			balance DECIMAL(24,12) NULL,
 			rpm_limit INT NOT NULL DEFAULT 0,
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -482,6 +486,8 @@ func (a *app) migrateMySQL() error {
 			duration_ms INT NOT NULL DEFAULT 0,
 			rpm_snapshot BIGINT NOT NULL DEFAULT -1,
 			tpm_snapshot BIGINT NOT NULL DEFAULT -1,
+			itpm_snapshot BIGINT NOT NULL DEFAULT -1,
+			inflight_snapshot BIGINT NOT NULL DEFAULT -1,
 			total_requests BIGINT NOT NULL DEFAULT -1,
 			dispatch_diagnostics LONGTEXT NOT NULL DEFAULT (''),
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -616,6 +622,24 @@ func (a *app) migrateMySQL() error {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_sessions", "last_input_tokens", "BIGINT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "users", "account_view_json", "LONGTEXT NOT NULL DEFAULT ('{}')"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "dispatch_pacing", "VARCHAR(32) NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "pacing_concurrency", "INT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "pacing_interval_seconds", "INT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "gateway_error_logs", "itpm_snapshot", "BIGINT NOT NULL DEFAULT -1"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "gateway_error_logs", "inflight_snapshot", "BIGINT NOT NULL DEFAULT -1"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "rate_limit_reason", "VARCHAR(32) NOT NULL DEFAULT ''"); err != nil {

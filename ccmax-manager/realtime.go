@@ -66,6 +66,9 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		where = append(where, condition)
 		args = append(args, scopeArgs...)
 	}
+	if user.Role != "admin" {
+		where = append(where, accountStatePredicate("a", "normal"))
+	}
 	groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id")))
 	if groupIDPattern.MatchString(groupID) {
 		where = append(where, `EXISTS (SELECT 1 FROM account_groups filter_ag WHERE filter_ag.account_id = a.id AND filter_ag.group_id = ?)`)
@@ -236,6 +239,10 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result.WaitingRequests = a.realtimeCapacityWaiters(groupID, user)
+	if user.Role != "admin" {
+		writeJSON(w, http.StatusOK, realtimeForRestrictedView(result, user.AccountView))
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

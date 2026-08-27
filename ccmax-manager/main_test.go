@@ -1723,10 +1723,16 @@ func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
 	a.insertAudit(userB, "tenant-b.event", http.MethodGet, "/api/test", "test", "b", "{}", "127.0.0.1", "ok", http.StatusOK, 1)
 
 	userCookie := loginCookie(t, handler, "tenant-a", "tenant-password")
-	var accounts []account
+	var accounts []map[string]any
 	requestJSON(t, handler, http.MethodGet, "/api/accounts", nil, userCookie, "", http.StatusOK, &accounts)
-	if len(accounts) != 1 || accounts[0].ID != accountA.ID || len(accounts[0].GroupIDs) != 1 || accounts[0].GroupIDs[0] != "a" {
+	if len(accounts) != 1 || int64(accounts[0]["id"].(float64)) != accountA.ID {
 		t.Fatalf("scoped accounts=%+v", accounts)
+	}
+	if _, leaked := accounts[0]["name"]; leaked {
+		t.Fatalf("ordinary account view leaked account identity: %+v", accounts[0])
+	}
+	if _, leaked := accounts[0]["group_ids"]; leaked {
+		t.Fatalf("ordinary account view leaked group membership: %+v", accounts[0])
 	}
 	var summary accountSummary
 	requestJSON(t, handler, http.MethodGet, "/api/accounts/summary", nil, userCookie, "", http.StatusOK, &summary)

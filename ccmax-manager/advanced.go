@@ -35,6 +35,9 @@ func (a *app) migrateAdvancedFeatures() error {
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
 			dispatch_mode TEXT NOT NULL DEFAULT '' CHECK (dispatch_mode IN (` + dispatchModeCheckList + `)),
+			dispatch_pacing TEXT NOT NULL DEFAULT '' CHECK (dispatch_pacing IN ('', 'interval', 'completion')),
+			pacing_concurrency INTEGER NOT NULL DEFAULT 0 CHECK (pacing_concurrency >= 0),
+			pacing_interval_seconds INTEGER NOT NULL DEFAULT 0 CHECK (pacing_interval_seconds BETWEEN 0 AND 3600),
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			updated_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			deleted_at TEXT
@@ -51,6 +54,9 @@ func (a *app) migrateAdvancedFeatures() error {
 		{"itpm_window_seconds", "INTEGER NOT NULL DEFAULT 60 CHECK (itpm_window_seconds BETWEEN 1 AND 3600)"},
 		{"itpm_soft_limit", "INTEGER NOT NULL DEFAULT 100000 CHECK (itpm_soft_limit > 0)"},
 		{"itpm_hard_limit", "INTEGER NOT NULL DEFAULT 150000 CHECK (itpm_hard_limit > itpm_soft_limit)"},
+		{"dispatch_pacing", "TEXT NOT NULL DEFAULT '' CHECK (dispatch_pacing IN ('', 'interval', 'completion'))"},
+		{"pacing_concurrency", "INTEGER NOT NULL DEFAULT 0 CHECK (pacing_concurrency >= 0)"},
+		{"pacing_interval_seconds", "INTEGER NOT NULL DEFAULT 0 CHECK (pacing_interval_seconds BETWEEN 0 AND 3600)"},
 	} {
 		if err := addColumnIfMissing(a.db, "dispatch_strategies", column.name, column.definition); err != nil {
 			return err
@@ -249,6 +255,8 @@ func (a *app) migrateAdvancedFeatures() error {
 			rpm_snapshot INTEGER NOT NULL DEFAULT -1,
 			tpm_snapshot INTEGER NOT NULL DEFAULT -1,
 			total_requests INTEGER NOT NULL DEFAULT -1,
+			itpm_snapshot INTEGER NOT NULL DEFAULT -1,
+			inflight_snapshot INTEGER NOT NULL DEFAULT -1,
 			created_at TEXT NOT NULL DEFAULT (` + nowSQL + `)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_gateway_errors_created ON gateway_error_logs(created_at DESC)`,
@@ -320,7 +328,7 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "gateway_error_logs", "duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	for _, column := range []string{"rpm_snapshot", "tpm_snapshot", "total_requests"} {
+	for _, column := range []string{"rpm_snapshot", "tpm_snapshot", "total_requests", "itpm_snapshot", "inflight_snapshot"} {
 		if err := addColumnIfMissing(a.db, "gateway_error_logs", column, "INTEGER NOT NULL DEFAULT -1"); err != nil {
 			return err
 		}
@@ -492,12 +500,15 @@ func (a *app) migrateDispatchStrategyModes() error {
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
 			dispatch_mode TEXT NOT NULL DEFAULT '' CHECK (dispatch_mode IN (` + dispatchModeCheckList + `)),
+			dispatch_pacing TEXT NOT NULL DEFAULT '' CHECK (dispatch_pacing IN ('', 'interval', 'completion')),
+			pacing_concurrency INTEGER NOT NULL DEFAULT 0 CHECK (pacing_concurrency >= 0),
+			pacing_interval_seconds INTEGER NOT NULL DEFAULT 0 CHECK (pacing_interval_seconds BETWEEN 0 AND 3600),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
 		)`,
-		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at)
-		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at FROM dispatch_strategies`,
+		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, created_at, updated_at, deleted_at)
+		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, dispatch_pacing, pacing_concurrency, pacing_interval_seconds, created_at, updated_at, deleted_at FROM dispatch_strategies`,
 		`DROP TABLE dispatch_strategies`,
 		`ALTER TABLE dispatch_strategies_migrated RENAME TO dispatch_strategies`,
 	}
@@ -662,16 +673,20 @@ func (a *app) backfillAccountSubscriptions() error {
 func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	where := []string{"a.deleted_at IS NULL", "a.archived_at IS NULL"}
 	whereArgs := []any{}
-	if user := currentUser(r); user.Role == "user" {
+	user := currentUser(r)
+	if user.Role == "user" {
 		condition, args := scopedAccountCondition(user, "a")
 		where = append(where, condition)
 		whereArgs = append(whereArgs, args...)
+	}
+	if user.Role != "admin" {
+		where = append(where, accountStatePredicate("a", "normal"))
 	}
 	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupIDPattern.MatchString(groupID) {
 		where = append(where, `EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`)
 		whereArgs = append(whereArgs, groupID)
 	}
-	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" {
+	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" && user.Role == "admin" {
 		where = append(where, accountStatePredicate("a", status))
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
@@ -692,7 +707,7 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	whereArgs = append(whereArgs, quotaArgs...)
 	join := "LEFT JOIN usage_logs u ON u.account_id = a.id"
 	joinArgs := []any{}
-	if user := currentUser(r); user.Role == "user" {
+	if user.Role == "user" {
 		join += " AND u.user_id = ?"
 		joinArgs = append(joinArgs, user.ID)
 	}
@@ -709,6 +724,10 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT COUNT(DISTINCT a.id), COUNT(DISTINCT CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN a.id END), COUNT(u.id), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0) FROM accounts a ` + join + ` WHERE ` + strings.Join(where, " AND ")
 	if err := a.db.QueryRow(query, args...).Scan(&item.Accounts, &item.ActiveAccounts, &item.Requests, &item.InputTokens, &item.OutputTokens, &item.BilledCost, &item.ActualCost); err != nil {
 		writeDBError(w, err)
+		return
+	}
+	if user.Role != "admin" {
+		writeJSON(w, http.StatusOK, accountSummaryForRestrictedView(item, user.AccountView))
 		return
 	}
 	writeJSON(w, http.StatusOK, item)

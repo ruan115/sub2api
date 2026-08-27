@@ -132,6 +132,48 @@ func loadAccountITPMUsage(queryer accountITPMQueryer, accountWindows map[int64]i
 	return result, nil
 }
 
+// loadAccountRecentAdmissions counts how many requests each account admitted
+// within its pacing interval. account_rpm_events is authoritative because
+// interval-paced accounts reserve their event inside the selection
+// transaction, so a concurrent burst cannot slip past the per-interval cap.
+func loadAccountRecentAdmissions(queryer accountITPMQueryer, accountWindows map[int64]int) (map[int64]int64, error) {
+	result := map[int64]int64{}
+	byWindow := map[int][]int64{}
+	for accountID, window := range accountWindows {
+		if accountID <= 0 || window <= 0 {
+			continue
+		}
+		byWindow[window] = append(byWindow[window], accountID)
+	}
+	for window, accountIDs := range byWindow {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(accountIDs)), ",")
+		args := make([]any, 0, len(accountIDs)+1)
+		args = append(args, time.Now().UTC().Add(-time.Duration(window)*time.Second).Format(time.RFC3339Nano))
+		for _, accountID := range accountIDs {
+			args = append(args, accountID)
+		}
+		rows, err := queryer.Query(`SELECT account_id, COUNT(*) FROM account_rpm_events
+			WHERE created_at >= ? AND account_id IN (`+placeholders+`) GROUP BY account_id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var accountID, admitted int64
+			if err := rows.Scan(&accountID, &admitted); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[accountID] = admitted
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
 type localITPMReservation struct {
 	tokens    int64
 	exclusive bool
@@ -373,4 +415,13 @@ func (a *app) keepGatewayITPMReservation(account gatewayAccount) func() {
 func gatewayITPMCapacityBlocked(err error) bool {
 	diagnostics, ok := gatewayCapacityDiagnosticsFromError(err)
 	return ok && (diagnostics.ITPMBlocked > 0 || diagnostics.ITPMReservationBlocked > 0)
+}
+
+// gatewayPacingBlocked reports that a paced account deferred the request. The
+// request should wait in the capacity queue for the next admission slot even
+// when the group queue switch is off — pacing exists to spread requests over
+// time, and rejecting them outright would defeat it.
+func gatewayPacingBlocked(err error) bool {
+	diagnostics, ok := gatewayCapacityDiagnosticsFromError(err)
+	return ok && diagnostics.PacingBlocked > 0
 }
