@@ -9,8 +9,7 @@ User=ccmax
 Group=ccmax
 WorkingDirectory=/var/lib/ccmax-manager
 EnvironmentFile=/etc/ccmax-manager.env
-Environment=CCMAX_ADDR=127.0.0.1:%i
-ExecStart=/opt/ccmax-manager/ports/%i/ccmax-manager
+ExecStart=/usr/bin/env CCMAX_ADDR=127.0.0.1:%i /opt/ccmax-manager/ports/%i/ccmax-manager
 Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=30s
