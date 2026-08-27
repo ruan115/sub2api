@@ -59,16 +59,18 @@ type dailyStat struct {
 }
 
 type batchAuthorizationInput struct {
-	SessionKeys     []string `json:"session_keys"`
-	ProxyPoolID     int64    `json:"proxy_pool_id"`
-	GroupIDs        []string `json:"group_ids"`
-	AuthType        string   `json:"auth_type"`
-	AccountPrice    float64  `json:"account_price"`
-	Concurrency     int      `json:"concurrency"`
-	BaseRPM         int      `json:"base_rpm"`
-	RPMStrategy     string   `json:"rpm_strategy"`
-	RPMStickyBuffer int      `json:"rpm_sticky_buffer"`
-	StrategyID      *int64   `json:"strategy_id"`
+	SessionKeys             []string `json:"session_keys"`
+	ProxyPoolID             int64    `json:"proxy_pool_id"`
+	GroupIDs                []string `json:"group_ids"`
+	AuthType                string   `json:"auth_type"`
+	AccountPrice            float64  `json:"account_price"`
+	Concurrency             int      `json:"concurrency"`
+	BaseRPM                 int      `json:"base_rpm"`
+	RPMStrategy             string   `json:"rpm_strategy"`
+	RPMStickyBuffer         int      `json:"rpm_sticky_buffer"`
+	StrategyID              *int64   `json:"strategy_id"`
+	Quota5HThresholdEnabled *bool    `json:"quota_5h_threshold_enabled"`
+	Quota5HThresholdPercent *int     `json:"quota_5h_threshold_percent"`
 }
 
 type batchAuthorizationResult struct {
@@ -591,6 +593,10 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "RPM sticky buffer cannot be negative")
 		return
 	}
+	if input.Quota5HThresholdPercent != nil && (*input.Quota5HThresholdPercent < 1 || *input.Quota5HThresholdPercent > 100) {
+		writeError(w, http.StatusBadRequest, "5h quota threshold must be between 1 and 100")
+		return
+	}
 	strategyValue, err := a.resolveStrategyBinding(input.StrategyID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -923,8 +929,8 @@ func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authTy
 	}
 	defer tx.Rollback()
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, auth_status, auth_checked_at, token_expires_at, subscription_type, rate_limit_tier, account_price, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, ?, ?, 'active', 1, ?, 50, 1, ?, ?, 1, ?, ?, ?, 'off', ?, 'valid', `+nowSQL+`, ?, ?, ?, ?, `+nowSQL+`)`,
-		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), string(extraJSON), input.Concurrency, input.ProxyPoolID, nil, input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, strategyID, expiresAt, token.SubscriptionType, token.RateLimitTier, input.AccountPrice)
+	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, proxy_pool_id, proxy_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, auth_status, auth_checked_at, token_expires_at, subscription_type, rate_limit_tier, account_price, quota_5h_threshold_enabled, quota_5h_threshold_percent, onboarded_at) VALUES (?, 'anthropic', ?, ?, ?, ?, ?, 'active', 1, ?, 50, 1, ?, ?, 1, ?, ?, ?, 'off', ?, 'valid', `+nowSQL+`, ?, ?, ?, ?, ?, ?, `+nowSQL+`)`,
+		name, authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), string(extraJSON), input.Concurrency, input.ProxyPoolID, nil, input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, strategyID, expiresAt, token.SubscriptionType, token.RateLimitTier, input.AccountPrice, boolInt(boolPointerValue(input.Quota5HThresholdEnabled, false)), intPointerValue(input.Quota5HThresholdPercent, 80))
 	if err != nil {
 		return 0, err
 	}
@@ -971,9 +977,16 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 		return err
 	}
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, reauthorized_at = CASE WHEN ? THEN `+nowSQL+` ELSE reauthorized_at END, reauthorization_count = reauthorization_count + CASE WHEN ? THEN 1 ELSE 0 END, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+	var quota5HThresholdEnabled, quota5HThresholdPercent any
+	if input.Quota5HThresholdEnabled != nil {
+		quota5HThresholdEnabled = boolInt(*input.Quota5HThresholdEnabled)
+	}
+	if input.Quota5HThresholdPercent != nil {
+		quota5HThresholdPercent = *input.Quota5HThresholdPercent
+	}
+	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), reauthorized_at = CASE WHEN ? THEN `+nowSQL+` ELSE reauthorized_at END, reauthorization_count = reauthorization_count + CASE WHEN ? THEN 1 ELSE 0 END, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`,
-		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, previousOnboarded.Valid, previousOnboarded.Valid, accountID, leaseOwner)
+		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, quota5HThresholdEnabled, quota5HThresholdPercent, previousOnboarded.Valid, previousOnboarded.Valid, accountID, leaseOwner)
 	if err != nil {
 		return err
 	}
@@ -991,5 +1004,8 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return a.enforceStoredAccountFiveHourThreshold(accountID, rateLimitPolicy{})
 }

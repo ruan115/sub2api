@@ -413,8 +413,8 @@
               <div class="realtime-load-item" id="realtime-rpm-item" title="最近 60 秒上游请求数">
                 <span>RPM</span><strong id="realtime-rpm">0 / 0</strong><small id="realtime-rpm-capacity">当前 / 最大承接 RPM</small>
               </div>
-              <div class="realtime-load-item" title="上游真实限流口径：未缓存输入（input + cache_creation），缓存读不计入">
-                <span>ITPM</span><strong id="realtime-itpm">0</strong><small>60 秒滚动 · 上游限流口径</small>
+              <div class="realtime-load-item" id="realtime-itpm-item" title="上游真实限流口径：未缓存输入（input + cache_creation），缓存读不计入">
+                <span>ITPM</span><strong id="realtime-itpm">0</strong><small id="realtime-itpm-window">按策略窗口 · 含在途预留</small>
               </div>
               <div class="realtime-load-item" title="最近 60 秒缓存读取量。不计入上游 ITPM 限流，命中越多越省额度">
                 <span>缓存读</span><strong id="realtime-cache-read-tpm">0</strong><small>60 秒滚动 · 不占限流</small>
@@ -524,6 +524,8 @@
               <label><span>RPM 策略</span><select id="batch-rpm-strategy"><option value="tiered">三区模型</option><option value="sticky_exempt">粘性豁免</option><option value="fixed">固定硬限</option></select></label>
               <label><span>粘性缓冲 n</span><input id="batch-rpm-buffer" type="number" min="0" value="0" /><small id="batch-rpm-buffer-hint">三区模型：n 为粘性缓冲；0 按并发与会话数自动计算</small></label>
               <label><span>调度策略</span><select id="batch-strategy"><option value="">跟随分组</option></select><small>绑定后该账号的限流与算法优先使用策略配置</small></label>
+              <label class="toggle-field"><span>启用提前冷却</span><input type="checkbox" id="batch-quota-threshold-enabled" /><i></i></label>
+              <label class="quota-threshold-value-field"><span>5h 使用率阈值</span><span class="percent-input"><input id="batch-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 5h 刷新时间，并沿用所属分组的刷新错峰配置</small></label>
               <fieldset class="group-picker" id="batch-group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
               <div class="span-2 batch-auth-actions"><button class="button primary write-action" id="batch-auth-submit" type="submit"><i data-lucide="key-round"></i><span>开始批量授权</span></button></div>
             </form>
@@ -2147,6 +2149,47 @@
             ><span>描述</span
             ><input id="strategy-description" maxlength="200"
           /></label>
+          <div class="form-section span-2">
+            <strong>ITPM 峰值保护</strong><span>按策略控制未缓存输入的动态调度阈值</span>
+          </div>
+          <label class="toggle-field span-2" title="启用策略级 ITPM 峰值保护">
+            <span>启用 ITPM 峰值保护</span>
+            <input id="strategy-itpm-protection" type="checkbox" checked />
+            <i aria-hidden="true"></i>
+          </label>
+          <label
+            ><span>统计窗口（秒）</span
+            ><input
+              id="strategy-itpm-window"
+              type="number"
+              min="1"
+              max="3600"
+              value="60" /><small>在最近 n 秒内累计 input + cache_creation</small></label
+          ><label
+            ><span>软阈值</span
+            ><input
+              id="strategy-itpm-soft"
+              type="number"
+              min="1"
+              value="100000" /><small>超过后仅允许粘性会话或小请求，普通请求切换账号</small></label
+          ><label
+            ><span>硬阈值</span
+            ><input
+              id="strategy-itpm-hard"
+              type="number"
+              min="2"
+              value="150000" /><small>达到后暂停向该账号分配所有新请求</small></label
+          ><label
+            ><span>额外 ITPM 上限</span
+            ><input
+              id="strategy-itpm"
+              type="number"
+              min="0"
+              value="0" /><small>兼容原策略限制；0 表示只使用上述软/硬阈值</small></label
+          >
+          <div class="form-section span-2">
+            <strong>调度容量</strong><span>RPM、TPM、并发与分配算法</span>
+          </div>
           <label
             ><span>RPM 限制</span
             ><input
@@ -2162,13 +2205,6 @@
               type="number"
               min="0"
               value="0" /><small>最近 60 秒 token 总量（含缓存读）达到后暂停调度，0 不限制。这不是上游的限流口径</small></label
-          ><label
-            ><span>ITPM 限制</span
-            ><input
-              id="strategy-itpm"
-              type="number"
-              min="0"
-              value="0" /><small>上游真实限流口径：仅计未缓存输入（input + cache_creation），缓存读不计入。0 不限制</small></label
           ><label
             ><span>并发限制</span
             ><input

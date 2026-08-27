@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -140,6 +141,71 @@ func TestRealtimeStatsResolvesRPMFromStrategyGroupThenAccount(t *testing.T) {
 	assertCapacity("/api/stats/realtime?group_id=a", 15, map[int64]int{
 		direct.ID: 11, group.ID: 4,
 	})
+}
+
+func TestRealtimeCapacityTracksStrategyITPMWindowAndReservations(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "dynamic-itpm-capacity", "rpm_limit": 8, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+		"itpm_protection_enabled": true,
+		"itpm_window_seconds":     30,
+		"itpm_soft_limit":         100,
+		"itpm_hard_limit":         150,
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	recent := createGatewayTestAccount(t, a, handler, "itpm-recent", "https://recent.example.test", 0, nil, map[string]any{"access_token": "recent"})
+	expired := createGatewayTestAccount(t, a, handler, "itpm-expired", "https://expired.example.test", 0, nil, map[string]any{"access_token": "expired"})
+	reserved := createGatewayTestAccount(t, a, handler, "itpm-reserved", "https://reserved.example.test", 0, nil, map[string]any{"access_token": "reserved"})
+
+	for _, input := range []usageInput{
+		{RequestID: "itpm-recent-usage", PurposeKey: "default", GroupID: "a", AccountID: recent.ID, Model: "claude-test", InputTokens: 110},
+		{RequestID: "itpm-expired-usage", PurposeKey: "default", GroupID: "a", AccountID: expired.ID, Model: "claude-test", InputTokens: 110},
+	} {
+		if _, _, err := a.recordUsage(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := a.db.Exec(`UPDATE usage_logs SET created_at = ? WHERE request_id = ?`, time.Now().UTC().Add(-45*time.Second).Format(time.RFC3339Nano), "itpm-expired-usage"); err != nil {
+		t.Fatal(err)
+	}
+	allowed, _ := a.localITPMReservations.reserve(reserved.ID, "reserved-load", 100, 0, 100, 150, false, false, 0)
+	if !allowed {
+		t.Fatal("failed to create in-flight ITPM reservation")
+	}
+
+	var realtime realtimeLoad
+	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=a", nil, http.StatusOK, &realtime)
+	if realtime.RPMCapacity != 8 || realtime.EligibleAccounts != 1 || realtime.ITPMRestricted != 2 || realtime.ITPMHardBlocked != 0 || realtime.ITPM != 210 {
+		t.Fatalf("dynamic realtime capacity = %+v", realtime)
+	}
+	loads := map[int64]accountRealtimeLoad{}
+	for _, item := range realtime.Accounts {
+		loads[item.AccountID] = item
+	}
+	if !loads[recent.ID].ITPMRestricted || !loads[reserved.ID].ITPMRestricted || loads[expired.ID].ITPM != 0 || !loads[expired.ID].Eligible {
+		t.Fatalf("dynamic account loads = %+v", loads)
+	}
+
+	var observed []strategyObservation
+	putJSON(t, handler, http.MethodGet, "/api/strategies/observe", nil, http.StatusOK, &observed)
+	if len(observed) != 1 || observed[0].RPMCapacity != 8 || observed[0].AccountsITPMRestricted != 2 {
+		t.Fatalf("strategy dynamic capacity = %+v", observed)
+	}
+
+	putJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/strategies/%d", strategyID), map[string]any{
+		"name": "dynamic-itpm-capacity", "rpm_limit": 8, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+		"itpm_protection_enabled": false,
+		"itpm_window_seconds":     30,
+		"itpm_soft_limit":         100,
+		"itpm_hard_limit":         150,
+	}, http.StatusOK, nil)
+	putJSON(t, handler, http.MethodGet, "/api/stats/realtime?group_id=a", nil, http.StatusOK, &realtime)
+	if realtime.RPMCapacity != 24 || realtime.EligibleAccounts != 3 || realtime.ITPMRestricted != 0 {
+		t.Fatalf("disabled ITPM protection capacity = %+v", realtime)
+	}
 }
 
 func TestRPMConcentratedDispatchFillsOneAccountBeforeNext(t *testing.T) {

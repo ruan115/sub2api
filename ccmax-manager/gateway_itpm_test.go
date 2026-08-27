@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -115,4 +117,69 @@ func TestOversizedDispatchChoosesIdleLowestITPMAccount(t *testing.T) {
 	if inflight != 1 || !selected.ITPMExclusive {
 		t.Fatalf("large dispatch inflight=%d exclusive=%t", inflight, selected.ITPMExclusive)
 	}
+}
+
+func TestLocalITPMExclusiveReservationRejectsAccountAtHardLimit(t *testing.T) {
+	var store localITPMReservationStore
+	allowed, _ := store.reserve(1, "hard-exclusive", 110_000, 150_000, 100_000, 150_000, false, true, 0)
+	if allowed {
+		t.Fatal("oversized request was reserved on an account already at the hard ITPM limit")
+	}
+}
+
+func TestDispatchStrategyITPMProtectionUsesConfiguredWindowAndSwitch(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	createdKey := createGatewayTestKey(t, handler)
+	key, err := a.authenticateGatewayKey(createdKey.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyID := createTestStrategy(t, handler, map[string]any{
+		"name": "scheduler-itpm-window", "rpm_limit": 8, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+		"itpm_protection_enabled": true,
+		"itpm_window_seconds":     30,
+		"itpm_soft_limit":         100,
+		"itpm_hard_limit":         150,
+	})
+	bindGroupStrategy(t, handler, strategyID, nil)
+	created := createGatewayTestAccount(t, a, handler, "scheduler-itpm-account", "https://itpm.example.test", 0, nil, map[string]any{"access_token": "token"})
+	if _, _, err := a.recordUsage(usageInput{
+		RequestID: "scheduler-itpm-usage", PurposeKey: "default", GroupID: "a", AccountID: created.ID,
+		Model: "claude-fable-5", InputTokens: 160,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	demand := gatewayDispatchDemand{EstimatedITPM: 1}
+	if _, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, demand); err == nil {
+		t.Fatal("account above the configured hard ITPM limit remained schedulable")
+	}
+
+	if _, err := a.db.Exec(`UPDATE usage_logs SET created_at = ? WHERE request_id = ?`, time.Now().UTC().Add(-45*time.Second).Format(time.RFC3339Nano), "scheduler-itpm-usage"); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, demand)
+	if err != nil {
+		t.Fatalf("usage outside the configured 30-second window blocked dispatch: %v", err)
+	}
+	a.releaseGatewayAccount(selected.ID)
+	a.releaseGatewayITPM(selected)
+
+	if _, err := a.db.Exec(`UPDATE usage_logs SET created_at = ? WHERE request_id = ?`, time.Now().UTC().Format(time.RFC3339Nano), "scheduler-itpm-usage"); err != nil {
+		t.Fatal(err)
+	}
+	putJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/strategies/%d", strategyID), map[string]any{
+		"name": "scheduler-itpm-window", "rpm_limit": 8, "rpm_strategy": "fixed", "dispatch_mode": "balance",
+		"itpm_protection_enabled": false,
+		"itpm_window_seconds":     30,
+		"itpm_soft_limit":         100,
+		"itpm_hard_limit":         150,
+	}, http.StatusOK, nil)
+	selected, err = a.tryAcquireGatewayAccountWithPolicyDemand(key, "", "claude-fable-5", map[int64]bool{}, false, demand)
+	if err != nil {
+		t.Fatalf("disabled strategy ITPM protection still blocked dispatch: %v", err)
+	}
+	a.releaseGatewayAccount(selected.ID)
 }

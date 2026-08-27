@@ -27,6 +27,10 @@ func (a *app) migrateAdvancedFeatures() error {
 			rpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (rpm_limit >= 0),
 			tpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (tpm_limit >= 0),
 			itpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0),
+			itpm_protection_enabled INTEGER NOT NULL DEFAULT 1,
+			itpm_window_seconds INTEGER NOT NULL DEFAULT 60 CHECK (itpm_window_seconds BETWEEN 1 AND 3600),
+			itpm_soft_limit INTEGER NOT NULL DEFAULT 100000 CHECK (itpm_soft_limit > 0),
+			itpm_hard_limit INTEGER NOT NULL DEFAULT 150000 CHECK (itpm_hard_limit > itpm_soft_limit),
 			concurrency_limit INTEGER NOT NULL DEFAULT 0 CHECK (concurrency_limit >= 0),
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
@@ -41,6 +45,16 @@ func (a *app) migrateAdvancedFeatures() error {
 	// the rebuild's INSERT ... SELECT can carry it across.
 	if err := addColumnIfMissing(a.db, "dispatch_strategies", "itpm_limit", "INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0)"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"itpm_protection_enabled", "INTEGER NOT NULL DEFAULT 1"},
+		{"itpm_window_seconds", "INTEGER NOT NULL DEFAULT 60 CHECK (itpm_window_seconds BETWEEN 1 AND 3600)"},
+		{"itpm_soft_limit", "INTEGER NOT NULL DEFAULT 100000 CHECK (itpm_soft_limit > 0)"},
+		{"itpm_hard_limit", "INTEGER NOT NULL DEFAULT 150000 CHECK (itpm_hard_limit > itpm_soft_limit)"},
+	} {
+		if err := addColumnIfMissing(a.db, "dispatch_strategies", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	if err := a.migrateDispatchStrategyModes(); err != nil {
 		return err
@@ -94,6 +108,12 @@ func (a *app) migrateAdvancedFeatures() error {
 	// split (tracked from message_start) into distilled message_delta usage
 	// instead of backfilling zeros.
 	if err := addColumnIfMissing(a.db, "groups", "cache_creation_detail_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Warm sessions reserve ITPM by their last settled uncached input instead
+	// of the full body estimate, so the sticky account is not evicted by a
+	// projection the prompt cache will absorb.
+	if err := addColumnIfMissing(a.db, "dispatch_sessions", "last_input_tokens", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(a.db, "groups", "overload_cooldown_seconds", "INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600)"); err != nil {
@@ -464,6 +484,10 @@ func (a *app) migrateDispatchStrategyModes() error {
 			rpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (rpm_limit >= 0),
 			tpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (tpm_limit >= 0),
 			itpm_limit INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0),
+			itpm_protection_enabled INTEGER NOT NULL DEFAULT 1,
+			itpm_window_seconds INTEGER NOT NULL DEFAULT 60 CHECK (itpm_window_seconds BETWEEN 1 AND 3600),
+			itpm_soft_limit INTEGER NOT NULL DEFAULT 100000 CHECK (itpm_soft_limit > 0),
+			itpm_hard_limit INTEGER NOT NULL DEFAULT 150000 CHECK (itpm_hard_limit > itpm_soft_limit),
 			concurrency_limit INTEGER NOT NULL DEFAULT 0 CHECK (concurrency_limit >= 0),
 			rpm_strategy TEXT NOT NULL DEFAULT 'fixed' CHECK (rpm_strategy IN ('tiered', 'sticky_exempt', 'fixed')),
 			rpm_sticky_buffer INTEGER NOT NULL DEFAULT 0 CHECK (rpm_sticky_buffer >= 0),
@@ -472,8 +496,8 @@ func (a *app) migrateDispatchStrategyModes() error {
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
 		)`,
-		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at)
-		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at FROM dispatch_strategies`,
+		`INSERT INTO dispatch_strategies_migrated (id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at)
+		 SELECT id, name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode, created_at, updated_at, deleted_at FROM dispatch_strategies`,
 		`DROP TABLE dispatch_strategies`,
 		`ALTER TABLE dispatch_strategies_migrated RENAME TO dispatch_strategies`,
 	}

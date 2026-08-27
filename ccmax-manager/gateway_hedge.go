@@ -217,7 +217,7 @@ func (a *app) handleGatewayStreamHedge(w http.ResponseWriter, r *http.Request, k
 				}
 				a.bindGatewayStickySession(key.ID, session, outcome.attempt.account.ID)
 				drained := a.drainGatewayHedgeOutcomes(results, pending)
-				a.forwardGatewayHedgeWinner(w, r, key, model, outcome.attempt, drained)
+				a.forwardGatewayHedgeWinner(w, r, key, model, session, outcome.attempt, drained)
 				for _, candidate := range running {
 					if candidate.accountID == outcome.attempt.account.ID {
 						candidate.cancel()
@@ -434,7 +434,7 @@ func (a *app) drainGatewayHedgeOutcomes(results <-chan gatewayHedgeOutcome, coun
 	return done
 }
 
-func (a *app) forwardGatewayHedgeWinner(w http.ResponseWriter, r *http.Request, key gatewayKey, model string, attempt *gatewayHedgeAttempt, drained <-chan struct{}) {
+func (a *app) forwardGatewayHedgeWinner(w http.ResponseWriter, r *http.Request, key gatewayKey, model, session string, attempt *gatewayHedgeAttempt, drained <-chan struct{}) {
 	defer a.releaseGatewayAccount(attempt.account.ID)
 	defer attempt.stopITPMReservation()
 	defer attempt.response.Body.Close()
@@ -458,6 +458,7 @@ func (a *app) forwardGatewayHedgeWinner(w http.ResponseWriter, r *http.Request, 
 	} else {
 		a.settleGatewayITPM(attempt.account, usage)
 	}
+	a.updateGatewaySessionCost(session, key.ID, usage)
 	if errors.As(forwardErr, &downgradeErr) && !downgradeErr.committed {
 		copyGatewayRequestID(w.Header(), attempt.response.Header)
 		writeAnthropicGatewayError(w, http.StatusBadGateway, "api_error", downgradeErr.Error())

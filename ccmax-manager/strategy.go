@@ -26,6 +26,15 @@ const dispatchModeCheckList = `'', 'serial', 'balance', 'round_robin', 'concentr
 // accounts are in play, so failing fast would defeat the policy.
 var dispatchModesQueueWhenFull = []string{"round_robin", "concentrated"}
 
+const (
+	defaultStrategyITPMProtectionEnabled       = true
+	defaultStrategyITPMWindowSeconds           = 60
+	defaultStrategyITPMSoftLimit         int64 = 100_000
+	defaultStrategyITPMHardLimit         int64 = 150_000
+	minStrategyITPMWindowSeconds               = 1
+	maxStrategyITPMWindowSeconds               = 3600
+)
+
 func validDispatchMode(mode string) bool {
 	for _, candidate := range dispatchModes {
 		if candidate == mode {
@@ -39,32 +48,40 @@ func validDispatchMode(mode string) bool {
 // accounts bind to one strategy; an account-level binding overrides the
 // group-level one. Zero limits mean "not limited by this strategy".
 type dispatchStrategy struct {
-	ID               int64  `json:"id"`
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	RPMLimit         int    `json:"rpm_limit"`
-	TPMLimit         int64  `json:"tpm_limit"`
-	ITPMLimit        int64  `json:"itpm_limit"`
-	ConcurrencyLimit int    `json:"concurrency_limit"`
-	RPMStrategy      string `json:"rpm_strategy"`
-	RPMStickyBuffer  int    `json:"rpm_sticky_buffer"`
-	DispatchMode     string `json:"dispatch_mode"`
-	BoundGroups      int    `json:"bound_groups"`
-	BoundAccounts    int    `json:"bound_accounts"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	ID                    int64  `json:"id"`
+	Name                  string `json:"name"`
+	Description           string `json:"description"`
+	RPMLimit              int    `json:"rpm_limit"`
+	TPMLimit              int64  `json:"tpm_limit"`
+	ITPMLimit             int64  `json:"itpm_limit"`
+	ITPMProtectionEnabled bool   `json:"itpm_protection_enabled"`
+	ITPMWindowSeconds     int    `json:"itpm_window_seconds"`
+	ITPMSoftLimit         int64  `json:"itpm_soft_limit"`
+	ITPMHardLimit         int64  `json:"itpm_hard_limit"`
+	ConcurrencyLimit      int    `json:"concurrency_limit"`
+	RPMStrategy           string `json:"rpm_strategy"`
+	RPMStickyBuffer       int    `json:"rpm_sticky_buffer"`
+	DispatchMode          string `json:"dispatch_mode"`
+	BoundGroups           int    `json:"bound_groups"`
+	BoundAccounts         int    `json:"bound_accounts"`
+	CreatedAt             string `json:"created_at"`
+	UpdatedAt             string `json:"updated_at"`
 }
 
 type dispatchStrategyInput struct {
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	RPMLimit         int    `json:"rpm_limit"`
-	TPMLimit         int64  `json:"tpm_limit"`
-	ITPMLimit        int64  `json:"itpm_limit"`
-	ConcurrencyLimit int    `json:"concurrency_limit"`
-	RPMStrategy      string `json:"rpm_strategy"`
-	RPMStickyBuffer  int    `json:"rpm_sticky_buffer"`
-	DispatchMode     string `json:"dispatch_mode"`
+	Name                  string `json:"name"`
+	Description           string `json:"description"`
+	RPMLimit              int    `json:"rpm_limit"`
+	TPMLimit              int64  `json:"tpm_limit"`
+	ITPMLimit             int64  `json:"itpm_limit"`
+	ITPMProtectionEnabled *bool  `json:"itpm_protection_enabled"`
+	ITPMWindowSeconds     *int   `json:"itpm_window_seconds"`
+	ITPMSoftLimit         *int64 `json:"itpm_soft_limit"`
+	ITPMHardLimit         *int64 `json:"itpm_hard_limit"`
+	ConcurrencyLimit      int    `json:"concurrency_limit"`
+	RPMStrategy           string `json:"rpm_strategy"`
+	RPMStickyBuffer       int    `json:"rpm_sticky_buffer"`
+	DispatchMode          string `json:"dispatch_mode"`
 }
 
 func (input *dispatchStrategyInput) validate() error {
@@ -74,6 +91,18 @@ func (input *dispatchStrategyInput) validate() error {
 	}
 	if input.RPMLimit < 0 || input.TPMLimit < 0 || input.ITPMLimit < 0 || input.ConcurrencyLimit < 0 || input.RPMStickyBuffer < 0 {
 		return errors.New("strategy limits cannot be negative")
+	}
+	if input.ITPMWindowSeconds != nil && (*input.ITPMWindowSeconds < minStrategyITPMWindowSeconds || *input.ITPMWindowSeconds > maxStrategyITPMWindowSeconds) {
+		return errors.New("ITPM window must be between 1 and 3600 seconds")
+	}
+	if input.ITPMSoftLimit != nil && *input.ITPMSoftLimit <= 0 {
+		return errors.New("ITPM soft limit must be greater than zero")
+	}
+	if input.ITPMHardLimit != nil && *input.ITPMHardLimit <= 0 {
+		return errors.New("ITPM hard limit must be greater than zero")
+	}
+	if input.ITPMSoftLimit != nil && input.ITPMHardLimit != nil && *input.ITPMSoftLimit >= *input.ITPMHardLimit {
+		return errors.New("ITPM hard limit must be greater than the soft limit")
 	}
 	if input.RPMStrategy == "" {
 		input.RPMStrategy = "fixed"
@@ -87,7 +116,61 @@ func (input *dispatchStrategyInput) validate() error {
 	return nil
 }
 
-const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode,
+func (input dispatchStrategyInput) itpmProtectionValues(defaultEnabled bool, defaultWindow int, defaultSoft, defaultHard int64) (bool, int, int64, int64) {
+	enabled := defaultEnabled
+	window := defaultWindow
+	soft := defaultSoft
+	hard := defaultHard
+	if input.ITPMProtectionEnabled != nil {
+		enabled = *input.ITPMProtectionEnabled
+	}
+	if input.ITPMWindowSeconds != nil {
+		window = *input.ITPMWindowSeconds
+	}
+	if input.ITPMSoftLimit != nil {
+		soft = *input.ITPMSoftLimit
+	}
+	if input.ITPMHardLimit != nil {
+		hard = *input.ITPMHardLimit
+	}
+	return enabled, window, soft, hard
+}
+
+func validateStrategyITPMValues(window int, soft, hard int64) error {
+	if window < minStrategyITPMWindowSeconds || window > maxStrategyITPMWindowSeconds {
+		return errors.New("ITPM window must be between 1 and 3600 seconds")
+	}
+	if soft <= 0 {
+		return errors.New("ITPM soft limit must be greater than zero")
+	}
+	if hard <= soft {
+		return errors.New("ITPM hard limit must be greater than the soft limit")
+	}
+	return nil
+}
+
+func optionalBoolInt(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return boolInt(*value)
+}
+
+func optionalInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func optionalInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit, s.tpm_limit, s.itpm_limit, s.itpm_protection_enabled, s.itpm_window_seconds, s.itpm_soft_limit, s.itpm_hard_limit, s.concurrency_limit, s.rpm_strategy, s.rpm_sticky_buffer, s.dispatch_mode,
 	(SELECT COUNT(*) FROM groups g WHERE g.strategy_id = s.id) AS bound_groups,
 	(SELECT COUNT(DISTINCT a.id) FROM accounts a
 		LEFT JOIN account_groups ag ON ag.account_id = a.id
@@ -99,7 +182,9 @@ const dispatchStrategySelect = `SELECT s.id, s.name, s.description, s.rpm_limit,
 
 func scanDispatchStrategy(rows *sql.Rows) (dispatchStrategy, error) {
 	var item dispatchStrategy
-	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
+	var itpmProtectionEnabled int
+	err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.RPMLimit, &item.TPMLimit, &item.ITPMLimit, &itpmProtectionEnabled, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.ConcurrencyLimit, &item.RPMStrategy, &item.RPMStickyBuffer, &item.DispatchMode, &item.BoundGroups, &item.BoundAccounts, &item.CreatedAt, &item.UpdatedAt)
+	item.ITPMProtectionEnabled = itpmProtectionEnabled == 1
 	return item, err
 }
 
@@ -138,8 +223,13 @@ func (a *app) handleStrategyCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode)
+	itpmProtectionEnabled, itpmWindowSeconds, itpmSoftLimit, itpmHardLimit := input.itpmProtectionValues(defaultStrategyITPMProtectionEnabled, defaultStrategyITPMWindowSeconds, defaultStrategyITPMSoftLimit, defaultStrategyITPMHardLimit)
+	if err := validateStrategyITPMValues(itpmWindowSeconds, itpmSoftLimit, itpmHardLimit); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := a.db.Exec(`INSERT INTO dispatch_strategies (name, description, rpm_limit, tpm_limit, itpm_limit, itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit, concurrency_limit, rpm_strategy, rpm_sticky_buffer, dispatch_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, boolInt(itpmProtectionEnabled), itpmWindowSeconds, itpmSoftLimit, itpmHardLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -162,8 +252,32 @@ func (a *app) handleStrategyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := a.db.Exec(`UPDATE dispatch_strategies SET name = ?, description = ?, rpm_limit = ?, tpm_limit = ?, itpm_limit = ?, concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
-		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit, input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, id)
+	if input.ITPMProtectionEnabled != nil || input.ITPMWindowSeconds != nil || input.ITPMSoftLimit != nil || input.ITPMHardLimit != nil {
+		var currentEnabled int
+		var currentWindow int
+		var currentSoft, currentHard int64
+		err := a.db.QueryRow(`SELECT itpm_protection_enabled, itpm_window_seconds, itpm_soft_limit, itpm_hard_limit FROM dispatch_strategies WHERE id = ? AND deleted_at IS NULL`, id).Scan(&currentEnabled, &currentWindow, &currentSoft, &currentHard)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "strategy not found")
+			return
+		}
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		_, window, soft, hard := input.itpmProtectionValues(currentEnabled == 1, currentWindow, currentSoft, currentHard)
+		if err := validateStrategyITPMValues(window, soft, hard); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	result, err := a.db.Exec(`UPDATE dispatch_strategies SET name = ?, description = ?, rpm_limit = ?, tpm_limit = ?, itpm_limit = ?,
+		itpm_protection_enabled = COALESCE(?, itpm_protection_enabled), itpm_window_seconds = COALESCE(?, itpm_window_seconds),
+		itpm_soft_limit = COALESCE(?, itpm_soft_limit), itpm_hard_limit = COALESCE(?, itpm_hard_limit),
+		concurrency_limit = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, dispatch_mode = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`,
+		input.Name, input.Description, input.RPMLimit, input.TPMLimit, input.ITPMLimit,
+		optionalBoolInt(input.ITPMProtectionEnabled), optionalInt(input.ITPMWindowSeconds), optionalInt64(input.ITPMSoftLimit), optionalInt64(input.ITPMHardLimit),
+		input.ConcurrencyLimit, input.RPMStrategy, input.RPMStickyBuffer, input.DispatchMode, id)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -203,17 +317,24 @@ func (a *app) handleStrategyDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 type strategyAccountObservation struct {
-	AccountID   int64    `json:"account_id"`
-	Name        string   `json:"name"`
-	GroupIDs    []string `json:"group_ids"`
-	Alive       bool     `json:"alive"`
-	Status      string   `json:"status"`
-	RPM         int      `json:"rpm"`
-	TPM         int64    `json:"tpm"`
-	Inflight    int      `json:"inflight"`
-	BaseRPM     int      `json:"base_rpm"`
-	Concurrency int      `json:"concurrency"`
-	Direct      bool     `json:"direct_binding"`
+	AccountID      int64    `json:"account_id"`
+	Name           string   `json:"name"`
+	GroupIDs       []string `json:"group_ids"`
+	Alive          bool     `json:"alive"`
+	Status         string   `json:"status"`
+	RPM            int      `json:"rpm"`
+	TPM            int64    `json:"tpm"`
+	ITPM           int64    `json:"itpm"`
+	ITPMReserved   int64    `json:"itpm_reserved"`
+	ITPMLoad       int64    `json:"itpm_load"`
+	CacheReadTPM   int64    `json:"cache_read_tpm"`
+	ITPMRestricted bool     `json:"itpm_restricted"`
+	Inflight       int      `json:"inflight"`
+	BaseRPM        int      `json:"base_rpm"`
+	EffectiveRPM   int      `json:"effective_rpm"`
+	Concurrency    int      `json:"concurrency"`
+	Direct         bool     `json:"direct_binding"`
+	temporaryRPM   int
 	// Dispatch is "unavailable", "pending" (待调度, held back by a concentrated
 	// strategy) or "active".
 	Dispatch string `json:"dispatch"`
@@ -221,14 +342,15 @@ type strategyAccountObservation struct {
 
 type strategyObservation struct {
 	dispatchStrategy
-	AccountsAlive        int                          `json:"accounts_alive"`
-	AccountsPending      int                          `json:"accounts_pending"`
-	CurrentRPM           int                          `json:"current_rpm"`
-	RPMCapacity          int64                        `json:"rpm_capacity"`
-	RPMCapacityUnlimited bool                         `json:"rpm_capacity_unlimited"`
-	CurrentTPM           int64                        `json:"current_tpm"`
-	CurrentInflight      int                          `json:"current_inflight"`
-	Accounts             []strategyAccountObservation `json:"accounts"`
+	AccountsAlive          int                          `json:"accounts_alive"`
+	AccountsPending        int                          `json:"accounts_pending"`
+	AccountsITPMRestricted int                          `json:"accounts_itpm_restricted"`
+	CurrentRPM             int                          `json:"current_rpm"`
+	RPMCapacity            int64                        `json:"rpm_capacity"`
+	RPMCapacityUnlimited   bool                         `json:"rpm_capacity_unlimited"`
+	CurrentTPM             int64                        `json:"current_tpm"`
+	CurrentInflight        int                          `json:"current_inflight"`
+	Accounts               []strategyAccountObservation `json:"accounts"`
 }
 
 // handleStrategyObserve returns every strategy with its live per-account load
@@ -248,6 +370,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			a.strategy_id IS NOT NULL AS direct_binding,
 			COALESCE((SELECT COUNT(*) FROM account_rpm_events e WHERE e.account_id = a.id AND e.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_rpm,
 			COALESCE((SELECT SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_tpm,
+			COALESCE((SELECT SUM(u.cache_read_tokens) FROM usage_logs u WHERE u.account_id = a.id AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')), 0) AS current_cache_read_tpm,
 			COALESCE((SELECT f.requests FROM account_inflight f WHERE f.account_id = a.id), 0) AS current_inflight,
 			CASE WHEN a.rate_limit_downweight_until IS NOT NULL AND a.rate_limit_downweight_until > `+nowSQL+`
 				THEN COALESCE((SELECT threshold.rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > `+nowSQL+`), 0)
@@ -267,7 +390,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			var item strategyAccountObservation
 			var alive, direct, temporaryRPM int
 			var groupIDs string
-			if err := rows.Scan(&item.AccountID, &item.Name, &item.Status, &item.BaseRPM, &item.Concurrency, &groupIDs, &alive, &direct, &item.RPM, &item.TPM, &item.Inflight, &temporaryRPM); err != nil {
+			if err := rows.Scan(&item.AccountID, &item.Name, &item.Status, &item.BaseRPM, &item.Concurrency, &groupIDs, &alive, &direct, &item.RPM, &item.TPM, &item.CacheReadTPM, &item.Inflight, &temporaryRPM); err != nil {
 				rows.Close()
 				writeDBError(w, err)
 				return
@@ -275,11 +398,47 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			item.Alive = alive == 1
 			item.Direct = direct == 1
 			item.GroupIDs = splitErrorGroupIDs(groupIDs)
+			item.temporaryRPM = temporaryRPM
+			observation.Accounts = append(observation.Accounts, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			writeDBError(w, err)
+			return
+		}
+		rows.Close()
+		itpmWindows := map[int64]int{}
+		accountIDs := make([]int64, 0, len(observation.Accounts))
+		for _, item := range observation.Accounts {
+			accountIDs = append(accountIDs, item.AccountID)
+			itpmWindows[item.AccountID] = strategy.ITPMWindowSeconds
+		}
+		itpmUsage, err := loadAccountITPMUsage(a.db, itpmWindows)
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		reservations, err := a.accountITPMReservationStatuses(accountIDs)
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		_, _, softLimit, _ := normalizeStrategyITPMConfig(strategy.ITPMProtectionEnabled, strategy.ITPMWindowSeconds, strategy.ITPMSoftLimit, strategy.ITPMHardLimit, strategy.ITPMLimit)
+		for index := range observation.Accounts {
+			item := &observation.Accounts[index]
+			item.ITPM = itpmUsage[item.AccountID]
+			reservation := reservations[item.AccountID]
+			item.ITPMReserved = reservation.Tokens
+			item.ITPMLoad = item.ITPM + item.ITPMReserved
+			item.ITPMRestricted = strategy.ITPMProtectionEnabled && (reservation.Exclusive || item.ITPMLoad >= softLimit)
 			// Under a concentrated strategy an idle account is deliberately held
 			// back, which is different from being unable to serve.
 			switch {
 			case !item.Alive:
 				item.Dispatch = "unavailable"
+			case item.ITPMRestricted:
+				item.Dispatch = "itpm_restricted"
+				observation.AccountsITPMRestricted++
 			case strategy.DispatchMode == "concentrated" && item.RPM == 0:
 				item.Dispatch = "pending"
 				observation.AccountsPending++
@@ -288,13 +447,16 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			}
 			if item.Alive {
 				observation.AccountsAlive++
+			}
+			if item.Alive && !item.ITPMRestricted {
 				effectiveRPM := item.BaseRPM
 				if strategy.RPMLimit > 0 {
 					effectiveRPM = strategy.RPMLimit
 				}
-				if temporaryRPM > 0 && (effectiveRPM <= 0 || temporaryRPM < effectiveRPM) {
-					effectiveRPM = temporaryRPM
+				if item.temporaryRPM > 0 && (effectiveRPM <= 0 || item.temporaryRPM < effectiveRPM) {
+					effectiveRPM = item.temporaryRPM
 				}
+				item.EffectiveRPM = effectiveRPM
 				if effectiveRPM > 0 {
 					observation.RPMCapacity += int64(effectiveRPM)
 				} else {
@@ -304,14 +466,7 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			observation.CurrentRPM += item.RPM
 			observation.CurrentTPM += item.TPM
 			observation.CurrentInflight += item.Inflight
-			observation.Accounts = append(observation.Accounts, item)
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			writeDBError(w, err)
-			return
-		}
-		rows.Close()
 		result = append(result, observation)
 	}
 	writeJSON(w, http.StatusOK, result)

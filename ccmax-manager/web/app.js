@@ -1377,7 +1377,7 @@ function renderStrategies() {
         </div>
         <p class="strategy-card-desc">${escapeHTML(item.description || strategyModeLabels[item.dispatch_mode] || "")}</p>
         <div class="strategy-card-grid">
-          <div title="当前 RPM / 最大承接 RPM"><span>RPM</span><b>${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyRPMCapacityText(item)}</b></div>
+          <div title="当前 RPM / 动态最大承接 RPM；达到 ITPM 软阈值的账号不计入分母"><span>RPM</span><b>${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyRPMCapacityText(item)}</b></div>
           <div><span>TPM</span><b>${Number(item.current_tpm).toLocaleString("zh-CN")} / ${strategyLimitText(item.tpm_limit)}</b></div>
           <div><span>并发</span><b>${item.current_inflight} / ${strategyLimitText(item.concurrency_limit)}</b></div>
           <div><span>存活账号</span><b class="${item.accounts_alive < item.bound_accounts ? "warn" : ""}">${item.accounts_alive} / ${item.bound_accounts}${item.accounts_pending ? `<small> · 待调度 ${item.accounts_pending}</small>` : ""}</b></div>
@@ -1385,6 +1385,8 @@ function renderStrategies() {
         <footer>
           <span class="pill" title="${escapeHTML(rpmBufferHint(item.rpm_strategy))}">${escapeHTML(strategyRPMModeLabels[item.rpm_strategy] || item.rpm_strategy)}</span>
           <span class="pill">${escapeHTML(strategyModeLabels[item.dispatch_mode] ?? item.dispatch_mode)}</span>
+          <span class="pill ${item.itpm_protection_enabled ? "ok" : "off"}" title="${item.itpm_protection_enabled ? `${Number(item.itpm_window_seconds || 60).toLocaleString("zh-CN")} 秒窗口 · 软阈值 ${Number(item.itpm_soft_limit || 0).toLocaleString("zh-CN")} · 硬阈值 ${Number(item.itpm_hard_limit || 0).toLocaleString("zh-CN")}` : "ITPM 峰值保护已关闭"}">${item.itpm_protection_enabled ? `ITPM ${Number(item.itpm_soft_limit || 0).toLocaleString("zh-CN")} / ${Number(item.itpm_hard_limit || 0).toLocaleString("zh-CN")}` : "ITPM 保护关闭"}</span>
+          ${item.accounts_itpm_restricted ? `<span class="pill warn">ITPM 受限 ${Number(item.accounts_itpm_restricted).toLocaleString("zh-CN")}</span>` : ""}
           <span class="pill ${item.bound_groups ? "ok" : "off"}">${item.bound_groups} 个分组绑定</span>
           <span class="pill ${item.bound_accounts ? "ok" : "off"}">${escapeHTML(boundLabel)}</span>
         </footer>
@@ -1505,6 +1507,12 @@ function strategySummaryStatus(item) {
   if (item.accounts_pending) {
     return { label: `${item.accounts_pending} 个待调度`, className: "warn" };
   }
+  if (item.accounts_itpm_restricted) {
+    return {
+      label: `${item.accounts_itpm_restricted} 个 ITPM 受限`,
+      className: "warn",
+    };
+  }
   return { label: "运行正常", className: "ok" };
 }
 
@@ -1520,12 +1528,16 @@ function strategyAccountRows(item, open) {
       const dispatchLabel =
         account.dispatch === "pending"
           ? "待调度"
+          : account.dispatch === "itpm_restricted"
+            ? "ITPM 受限"
           : account.alive
             ? "存活"
             : "不可用";
       const dispatchClass =
         account.dispatch === "pending"
           ? "warn"
+          : account.dispatch === "itpm_restricted"
+            ? "warn"
           : account.alive
             ? "ok"
             : "error";
@@ -1535,7 +1547,7 @@ function strategyAccountRows(item, open) {
       return `<tr class="strategy-account-detail-row" ${open ? "" : "hidden"}>
         <td><span class="strategy-account-indent" aria-hidden="true"></span><strong class="strategy-account-name" title="${escapeHTML(account.name)}">${escapeHTML(account.name)}</strong></td>
         <td class="num" title="当前 RPM ${Number(account.rpm || 0).toLocaleString("zh-CN")}">${Number(account.rpm || 0).toLocaleString("zh-CN")}</td>
-        <td class="num" title="ITPM ${Number(account.itpm || 0).toLocaleString("zh-CN")}（上游限流口径）· 缓存读 ${Number(account.cache_read_tpm || 0).toLocaleString("zh-CN")}（不占限流）· 总吞吐 ${Number(account.tpm || 0).toLocaleString("zh-CN")}">${Number(account.itpm || 0).toLocaleString("zh-CN")}</td>
+        <td class="num" title="ITPM 负载 ${Number(account.itpm_load || 0).toLocaleString("zh-CN")}（已结算 ${Number(account.itpm || 0).toLocaleString("zh-CN")} + 在途预留 ${Number(account.itpm_reserved || 0).toLocaleString("zh-CN")}）· 缓存读 ${Number(account.cache_read_tpm || 0).toLocaleString("zh-CN")}（不占限流）· 总吞吐 ${Number(account.tpm || 0).toLocaleString("zh-CN")}">${Number(account.itpm_load || 0).toLocaleString("zh-CN")}</td>
         <td><span class="pill ${dispatchClass}" title="${escapeHTML(account.status || dispatchLabel)}">${dispatchLabel}</span></td>
         <td><span class="strategy-account-groups" title="${escapeHTML(groups)}">${escapeHTML(groups)}</span></td>
       </tr>`;
@@ -1599,7 +1611,7 @@ function renderStrategyAccordion(strategies) {
                   </span>
                 </button>
               </td>
-              <td class="num" title="当前 RPM / 最大承接 RPM：${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyRPMCapacityText(item)}">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyRPMCapacityText(item)}</small></td>
+              <td class="num" title="当前 RPM / 动态最大承接 RPM：${Number(item.current_rpm || 0).toLocaleString("zh-CN")} / ${strategyRPMCapacityText(item)}；ITPM 受限账号已从分母剔除">${Number(item.current_rpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyRPMCapacityText(item)}</small></td>
               <td class="num" title="当前 ${Number(item.current_tpm || 0).toLocaleString("zh-CN")}，限制 ${strategyLimitText(item.tpm_limit)}">${Number(item.current_tpm || 0).toLocaleString("zh-CN")} <small>/ ${strategyLimitText(item.tpm_limit)}</small></td>
               <td><span class="pill ${status.className}" title="${escapeHTML(status.label)}">${escapeHTML(status.label)}</span><small class="strategy-survival" title="${item.accounts_alive} 个存活，${item.bound_accounts} 个已绑定">${item.accounts_alive} / ${item.bound_accounts}</small></td>
               <td><span class="strategy-account-groups" title="${escapeHTML(`${item.bound_groups} 个分组 · ${dispatchMode}`)}">${item.bound_groups} 个分组 · ${escapeHTML(dispatchMode)}</span></td>
@@ -1619,6 +1631,11 @@ function openStrategy(item = null) {
   $("#strategy-rpm").value = item?.rpm_limit ?? 0;
   $("#strategy-tpm").value = item?.tpm_limit ?? 0;
   $("#strategy-itpm").value = item?.itpm_limit ?? 0;
+  $("#strategy-itpm-protection").checked =
+    item?.itpm_protection_enabled ?? true;
+  $("#strategy-itpm-window").value = item?.itpm_window_seconds ?? 60;
+  $("#strategy-itpm-soft").value = item?.itpm_soft_limit ?? 100000;
+  $("#strategy-itpm-hard").value = item?.itpm_hard_limit ?? 150000;
   $("#strategy-concurrency").value = item?.concurrency_limit ?? 0;
   $("#strategy-rpm-mode").value = item?.rpm_strategy || "fixed";
   $("#strategy-buffer").value = item?.rpm_sticky_buffer ?? 0;
@@ -1628,7 +1645,20 @@ function openStrategy(item = null) {
     "#strategy-buffer",
     "#strategy-buffer-hint",
   );
+  syncStrategyITPMControls();
   showInitializedDialog("#strategy-dialog");
+}
+
+function syncStrategyITPMControls() {
+  const enabled = $("#strategy-itpm-protection").checked;
+  [
+    "#strategy-itpm-window",
+    "#strategy-itpm-soft",
+    "#strategy-itpm-hard",
+    "#strategy-itpm",
+  ].forEach((selector) => {
+    $(selector).disabled = !enabled;
+  });
 }
 
 function fillStrategySelect(select, selectedID) {
@@ -1920,16 +1950,24 @@ function accountLiveLoadInner(load, fallbackBaseRPM = 0) {
     load?.effective_rpm ?? load?.base_rpm ?? fallbackBaseRPM ?? 0,
   );
   const temporaryRPM = Number(load?.temporary_rpm || 0);
+  const itpmLoad = Number(load?.itpm_load || 0);
+  const itpmReserved = Number(load?.itpm_reserved || 0);
+  const itpmRestricted = Boolean(load?.itpm_restricted);
   let tone = "idle";
-  if (baseRPM > 0 && rpm >= baseRPM) tone = "error";
+  if (itpmRestricted || (baseRPM > 0 && rpm >= baseRPM)) tone = "error";
   else if (baseRPM > 0 && rpm >= baseRPM * 0.8) tone = "warn";
   else if (rpm > 0 || inflight > 0) tone = "ok";
   const ratio =
     baseRPM > 0 ? Math.min(100, Math.round((rpm / baseRPM) * 100)) : 0;
   const capacity = baseRPM > 0 ? `${rpm}/${baseRPM}` : `${rpm}/∞`;
-  const detail = `TPM ${compact(tpm)} · 在途 ${inflight}`;
+  const detail = itpmRestricted
+    ? `ITPM ${compact(itpmLoad)} · 受限`
+    : `TPM ${compact(tpm)} · 在途 ${inflight}`;
   const thresholdHint = temporaryRPM > 0 ? ` · 临时阈值 ${temporaryRPM}` : "";
-  const hint = `最近 60 秒：RPM ${capacity}${baseRPM > 0 ? "" : "（未设置 RPM 上限）"}${thresholdHint} · TPM ${Number(tpm).toLocaleString("zh-CN")} · 在途 ${inflight}`;
+  const itpmHint = load?.itpm_protection_enabled
+    ? ` · ITPM ${itpmLoad.toLocaleString("zh-CN")}（含预留 ${itpmReserved.toLocaleString("zh-CN")}）/ 软阈值 ${Number(load.itpm_soft_limit || 0).toLocaleString("zh-CN")} / 硬阈值 ${Number(load.itpm_hard_limit || 0).toLocaleString("zh-CN")} · ${Number(load.itpm_window_seconds || 60)} 秒窗口`
+    : " · ITPM 保护关闭";
+  const hint = `最近 60 秒：RPM ${capacity}${baseRPM > 0 ? "" : "（未设置 RPM 上限）"}${thresholdHint} · TPM ${Number(tpm).toLocaleString("zh-CN")} · 在途 ${inflight}${itpmHint}`;
   return `<b>RPM</b><span class="${tone}"><i style="width:${ratio}%"></i></span><strong class="${tone}" title="${escapeHTML(hint)}">${capacity}</strong><small title="${escapeHTML(hint)}">${detail}</small>`;
 }
 function renderRealtime() {
@@ -1941,9 +1979,12 @@ function renderRealtime() {
     : Number(data.rpm_capacity || 0).toLocaleString("zh-CN");
   const rpmCapacityText = `${currentRPM} / ${maximumRPM}`;
   $("#realtime-rpm").textContent = rpmCapacityText;
-  $("#realtime-rpm").title = `当前 RPM / 最大承接 RPM：${rpmCapacityText}`;
+  const restricted = Number(data.itpm_restricted_accounts || 0);
+  const hardBlocked = Number(data.itpm_hard_blocked_accounts || 0);
+  $("#realtime-rpm").title = `当前 RPM / 动态最大承接 RPM：${rpmCapacityText}；ITPM 受限 ${restricted.toLocaleString("zh-CN")} 个，其中硬阈值暂停 ${hardBlocked.toLocaleString("zh-CN")} 个`;
   $("#realtime-tpm").textContent = compact(data.tpm);
   $("#realtime-itpm").textContent = compact(data.itpm);
+  $("#realtime-itpm-item").title = `按各账号策略窗口统计的 ITPM 负载（已结算 + 在途预留）；当前受限 ${restricted.toLocaleString("zh-CN")} 个，硬阈值暂停 ${hardBlocked.toLocaleString("zh-CN")} 个`;
   $("#realtime-cache-read-tpm").textContent = compact(data.cache_read_tpm);
   $("#realtime-otpm").textContent = compact(data.otpm);
   const inflight = Number(data.inflight || 0);
@@ -1954,11 +1995,13 @@ function renderRealtime() {
   const waiting = Number(data.waiting_requests || 0);
   $("#realtime-waiting").textContent = waiting.toLocaleString("zh-CN");
   $("#realtime-queue-item").title = waiting
-    ? `${waiting.toLocaleString("zh-CN")} 个请求正在等待账号并发或 RPM 容量释放`
+    ? `${waiting.toLocaleString("zh-CN")} 个请求正在等待账号 ITPM、并发或 RPM 容量释放`
     : "当前没有请求等待账号容量";
   const capacityHint = data.unlimited_capacity
-    ? "当前 / 最大承接 RPM · 含不限速账号"
-    : "当前 / 最大承接 RPM";
+    ? "当前 / 动态承接 RPM · 含不限速账号"
+    : restricted
+      ? `当前 / 动态承接 RPM · ITPM 受限 ${restricted}`
+      : "当前 / 动态最大承接 RPM";
   $("#realtime-rpm-capacity").textContent = capacityHint;
   $("#realtime-rpm-capacity").title = capacityHint;
   const updated = new Date(data.updated_at);
@@ -4624,6 +4667,9 @@ $("#batch-rpm-strategy").addEventListener("change", () =>
     "#batch-rpm-buffer-hint",
   ),
 );
+$("#batch-quota-threshold-enabled").addEventListener("change", (event) => {
+  $("#batch-quota-threshold-percent").disabled = !event.target.checked;
+});
 $("#account-auth-type").addEventListener("change", syncAccountAuthFields);
 $("#account-session-key").addEventListener("input", syncAccountAuthFields);
 $("#proxy-pool-source").addEventListener("change", toggleAPISource);
@@ -4739,6 +4785,12 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
         rpm_strategy: $("#batch-rpm-strategy").value,
         rpm_sticky_buffer: Number($("#batch-rpm-buffer").value || 0),
         strategy_id: strategySelectPayload($("#batch-strategy")),
+        quota_5h_threshold_enabled: $(
+          "#batch-quota-threshold-enabled",
+        ).checked,
+        quota_5h_threshold_percent: Number(
+          $("#batch-quota-threshold-percent").value || 80,
+        ),
       }),
     });
     $("#batch-result-panel").hidden = false;
@@ -5064,6 +5116,10 @@ $("#strategy-rpm-mode").addEventListener("change", () =>
     "#strategy-buffer-hint",
   ),
 );
+$("#strategy-itpm-protection").addEventListener(
+  "change",
+  syncStrategyITPMControls,
+);
 $("#strategy-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -5076,6 +5132,10 @@ $("#strategy-form").addEventListener("submit", async (event) => {
         rpm_limit: Number($("#strategy-rpm").value),
         tpm_limit: Number($("#strategy-tpm").value),
         itpm_limit: Number($("#strategy-itpm").value),
+        itpm_protection_enabled: $("#strategy-itpm-protection").checked,
+        itpm_window_seconds: Number($("#strategy-itpm-window").value),
+        itpm_soft_limit: Number($("#strategy-itpm-soft").value),
+        itpm_hard_limit: Number($("#strategy-itpm-hard").value),
         concurrency_limit: Number($("#strategy-concurrency").value),
         rpm_strategy: $("#strategy-rpm-mode").value,
         rpm_sticky_buffer: Number($("#strategy-buffer").value),

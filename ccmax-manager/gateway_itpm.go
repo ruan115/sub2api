@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +17,10 @@ const (
 	gatewayITPMSmallRequest     int64 = 10_000
 	gatewayITPMReservationTTL         = 30 * time.Minute
 	gatewayITPMAutoQueueTimeout       = 5 * time.Second
-	gatewayITPMSettlementTTL          = 61 * time.Second
+	// gatewayITPMStickyQueueTimeout bounds how long a pinned warm session waits
+	// for its own account's ITPM window to slide before the request gives up
+	// the binding and rebuilds its cache on another account.
+	gatewayITPMStickyQueueTimeout = 15 * time.Second
 )
 
 type gatewayDispatchDemand struct {
@@ -48,16 +53,83 @@ func estimateGatewayDispatchDemand(body []byte, countTokens bool) gatewayDispatc
 	return gatewayDispatchDemand{EstimatedITPM: value, Oversized: value > gatewayITPMLargeRequest}
 }
 
-func gatewayEffectiveITPMLimits(strategyLimit int64) (int64, int64) {
-	hardLimit := gatewayITPMHardLimit
+func gatewayEffectiveITPMLimits(strategyLimit, configuredSoft, configuredHard int64) (int64, int64) {
+	hardLimit := configuredHard
+	if hardLimit <= 0 {
+		hardLimit = gatewayITPMHardLimit
+	}
 	if strategyLimit > 0 && strategyLimit < hardLimit {
 		hardLimit = strategyLimit
 	}
-	softLimit := gatewayITPMSoftLimit
+	softLimit := configuredSoft
+	if softLimit <= 0 {
+		softLimit = gatewayITPMSoftLimit
+	}
 	if hardLimit <= softLimit {
 		softLimit = hardLimit * 2 / 3
 	}
 	return softLimit, hardLimit
+}
+
+func normalizeStrategyITPMConfig(enabled bool, window int, soft, hard, strategyLimit int64) (bool, int, int64, int64) {
+	if window < minStrategyITPMWindowSeconds || window > maxStrategyITPMWindowSeconds {
+		window = defaultStrategyITPMWindowSeconds
+	}
+	soft, hard = gatewayEffectiveITPMLimits(strategyLimit, soft, hard)
+	return enabled, window, soft, hard
+}
+
+type accountITPMQueryer interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+// loadAccountITPMUsage batches accounts by their strategy window. Keeping the
+// cutoff as a bound timestamp works identically on SQLite and MySQL and avoids
+// a correlated usage_logs scan for every candidate on every dispatch attempt.
+func loadAccountITPMUsage(queryer accountITPMQueryer, accountWindows map[int64]int) (map[int64]int64, error) {
+	result := map[int64]int64{}
+	byWindow := map[int][]int64{}
+	for accountID, window := range accountWindows {
+		if accountID <= 0 {
+			continue
+		}
+		if window < minStrategyITPMWindowSeconds || window > maxStrategyITPMWindowSeconds {
+			window = defaultStrategyITPMWindowSeconds
+		}
+		byWindow[window] = append(byWindow[window], accountID)
+	}
+	const queryChunkSize = 400
+	for window, accountIDs := range byWindow {
+		for offset := 0; offset < len(accountIDs); offset += queryChunkSize {
+			end := min(offset+queryChunkSize, len(accountIDs))
+			chunk := accountIDs[offset:end]
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+			args := make([]any, 0, len(chunk)+1)
+			args = append(args, time.Now().UTC().Add(-time.Duration(window)*time.Second).Format(time.RFC3339Nano))
+			for _, accountID := range chunk {
+				args = append(args, accountID)
+			}
+			rows, err := queryer.Query(`SELECT account_id, COALESCE(SUM(input_tokens + cache_creation_tokens), 0)
+				FROM usage_logs WHERE created_at >= ? AND account_id IN (`+placeholders+`) GROUP BY account_id`, args...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var accountID, tokens int64
+				if err := rows.Scan(&accountID, &tokens); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				result[accountID] = tokens
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			rows.Close()
+		}
+	}
+	return result, nil
 }
 
 type localITPMReservation struct {
@@ -69,6 +141,11 @@ type localITPMReservation struct {
 type localITPMReservationStore struct {
 	mu       sync.Mutex
 	accounts map[int64]map[string]localITPMReservation
+}
+
+type accountITPMReservationStatus struct {
+	Tokens    int64
+	Exclusive bool
 }
 
 func (store *localITPMReservationStore) reserve(accountID int64, leaseID string, estimated, current, softLimit, hardLimit int64, sticky, exclusive bool, inflight int) (bool, int64) {
@@ -97,7 +174,7 @@ func (store *localITPMReservationStore) reserve(accountID int64, leaseID string,
 		return false, reserved
 	}
 	if exclusive {
-		if inflight > 0 || reserved > 0 {
+		if inflight > 0 || reserved > 0 || (hardLimit > 0 && current >= hardLimit) {
 			return false, reserved
 		}
 	} else {
@@ -127,6 +204,10 @@ func (store *localITPMReservationStore) release(accountID int64, leaseID string)
 }
 
 func (store *localITPMReservationStore) settle(accountID int64, leaseID string, actual int64) {
+	store.settleFor(accountID, leaseID, actual, time.Duration(defaultStrategyITPMWindowSeconds+1)*time.Second)
+}
+
+func (store *localITPMReservationStore) settleFor(accountID int64, leaseID string, actual int64, ttl time.Duration) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	lease, ok := store.accounts[accountID][leaseID]
@@ -135,7 +216,7 @@ func (store *localITPMReservationStore) settle(accountID int64, leaseID string, 
 	}
 	lease.tokens = actual
 	lease.exclusive = false
-	lease.expiresAt = time.Now().Add(gatewayITPMSettlementTTL)
+	lease.expiresAt = time.Now().Add(ttl)
 	store.accounts[accountID][leaseID] = lease
 }
 
@@ -150,25 +231,62 @@ func (store *localITPMReservationStore) renew(accountID int64, leaseID string) {
 	store.accounts[accountID][leaseID] = lease
 }
 
-func (a *app) reserveGatewayITPM(account *gatewayAccount, demand gatewayDispatchDemand, current, strategyLimit int64, sticky bool, inflight int) (bool, error) {
-	if account == nil || demand.EstimatedITPM <= 0 {
+func (store *localITPMReservationStore) statuses(accountIDs []int64) map[int64]accountITPMReservationStatus {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	result := map[int64]accountITPMReservationStatus{}
+	now := time.Now()
+	for _, accountID := range accountIDs {
+		leases := store.accounts[accountID]
+		status := accountITPMReservationStatus{}
+		for leaseID, lease := range leases {
+			if !lease.expiresAt.After(now) {
+				delete(leases, leaseID)
+				continue
+			}
+			status.Tokens += lease.tokens
+			status.Exclusive = status.Exclusive || lease.exclusive
+		}
+		if len(leases) == 0 {
+			delete(store.accounts, accountID)
+		}
+		if status.Tokens > 0 || status.Exclusive {
+			result[accountID] = status
+		}
+	}
+	return result
+}
+
+func (a *app) accountITPMReservationStatuses(accountIDs []int64) (map[int64]accountITPMReservationStatus, error) {
+	if len(accountIDs) == 0 {
+		return map[int64]accountITPMReservationStatus{}, nil
+	}
+	if a.redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return a.redis.accountITPMReservationStatuses(ctx, accountIDs)
+	}
+	return a.localITPMReservations.statuses(accountIDs), nil
+}
+
+func (a *app) reserveGatewayITPM(account *gatewayAccount, demand gatewayDispatchDemand, current int64, sticky bool, inflight int) (bool, error) {
+	if account == nil || !account.ITPMProtection || demand.EstimatedITPM <= 0 {
 		return true, nil
 	}
 	leaseID, err := secureHex(16)
 	if err != nil {
 		return false, err
 	}
-	softLimit, hardLimit := gatewayEffectiveITPMLimits(strategyLimit)
 	allowed := false
 	if a.redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		allowed, _, err = a.redis.reserveAccountITPM(ctx, account.ID, leaseID, demand.EstimatedITPM, current, softLimit, hardLimit, sticky, demand.Oversized, inflight, gatewayITPMSmallRequest, gatewayITPMReservationTTL)
+		allowed, _, err = a.redis.reserveAccountITPM(ctx, account.ID, leaseID, demand.EstimatedITPM, current, account.ITPMSoftLimit, account.ITPMHardLimit, sticky, demand.Oversized, inflight, gatewayITPMSmallRequest, gatewayITPMReservationTTL)
 		if err != nil {
 			return false, err
 		}
 	} else {
-		allowed, _ = a.localITPMReservations.reserve(account.ID, leaseID, demand.EstimatedITPM, current, softLimit, hardLimit, sticky, demand.Oversized, inflight)
+		allowed, _ = a.localITPMReservations.reserve(account.ID, leaseID, demand.EstimatedITPM, current, account.ITPMSoftLimit, account.ITPMHardLimit, sticky, demand.Oversized, inflight)
 	}
 	if !allowed {
 		return false, nil
@@ -196,7 +314,7 @@ func (a *app) releaseGatewayITPM(account gatewayAccount) {
 
 // settleGatewayITPM is the safety net for a successful upstream response whose
 // usage row could not be committed. Actual uncached input remains visible for
-// one rolling minute; cache_read is deliberately excluded.
+// the strategy's rolling window; cache_read is deliberately excluded.
 func (a *app) settleGatewayITPM(account gatewayAccount, usage tokenUsage) {
 	actual := usage.Input + usage.CacheCreation
 	if account.ID <= 0 || account.ITPMReservationID == "" || actual <= 0 {
@@ -206,12 +324,20 @@ func (a *app) settleGatewayITPM(account gatewayAccount, usage tokenUsage) {
 	if a.redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := a.redis.settleAccountITPM(ctx, account.ID, account.ITPMReservationID, actual, gatewayITPMSettlementTTL); err != nil {
+		if err := a.redis.settleAccountITPM(ctx, account.ID, account.ITPMReservationID, actual, account.itpmSettlementTTL()); err != nil {
 			logDatabaseWriteError("settle gateway ITPM reservation", err)
 		}
 		return
 	}
-	a.localITPMReservations.settle(account.ID, account.ITPMReservationID, actual)
+	a.localITPMReservations.settleFor(account.ID, account.ITPMReservationID, actual, account.itpmSettlementTTL())
+}
+
+func (account gatewayAccount) itpmSettlementTTL() time.Duration {
+	window := account.ITPMWindowSeconds
+	if window < minStrategyITPMWindowSeconds || window > maxStrategyITPMWindowSeconds {
+		window = defaultStrategyITPMWindowSeconds
+	}
+	return time.Duration(window+1) * time.Second
 }
 
 func (a *app) keepGatewayITPMReservation(account gatewayAccount) func() {

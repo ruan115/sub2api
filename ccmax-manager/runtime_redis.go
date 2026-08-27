@@ -272,3 +272,50 @@ func (runtime *redisRuntime) renewAccountITPM(ctx context.Context, accountID int
 	}
 	return nil
 }
+
+func (runtime *redisRuntime) accountITPMReservationStatuses(ctx context.Context, accountIDs []int64) (map[int64]accountITPMReservationStatus, error) {
+	result := map[int64]accountITPMReservationStatus{}
+	if runtime == nil || runtime.client == nil || len(accountIDs) == 0 {
+		return result, nil
+	}
+	type reservationCommands struct {
+		expiry *redis.StringSliceCmd
+		leases *redis.MapStringStringCmd
+	}
+	commands := map[int64]reservationCommands{}
+	pipe := runtime.client.Pipeline()
+	nowMilliseconds := time.Now().UnixMilli()
+	for _, accountID := range accountIDs {
+		if accountID <= 0 {
+			continue
+		}
+		prefix := redisRuntimePrefix + "account-itpm:" + strconv.FormatInt(accountID, 10)
+		commands[accountID] = reservationCommands{
+			expiry: pipe.ZRangeByScore(ctx, prefix+":expiry", &redis.ZRangeBy{Min: strconv.FormatInt(nowMilliseconds, 10), Max: "+inf"}),
+			leases: pipe.HGetAll(ctx, prefix+":leases"),
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("read account ITPM reservations: %w", err)
+	}
+	for accountID, command := range commands {
+		values := command.leases.Val()
+		status := accountITPMReservationStatus{}
+		for _, leaseID := range command.expiry.Val() {
+			value, ok := values[leaseID]
+			if !ok {
+				continue
+			}
+			parts := strings.SplitN(value, ":", 2)
+			tokens, _ := strconv.ParseInt(parts[0], 10, 64)
+			status.Tokens += tokens
+			if len(parts) == 2 && parts[1] == "1" {
+				status.Exclusive = true
+			}
+		}
+		if status.Tokens > 0 || status.Exclusive {
+			result[accountID] = status
+		}
+	}
+	return result, nil
+}

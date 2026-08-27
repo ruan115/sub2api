@@ -181,6 +181,7 @@ func (a *app) migrateProxyFeatures() error {
 			api_key_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
 			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 			expires_at TEXT NOT NULL,
+			last_input_tokens INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (session_hash, api_key_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_dispatch_sessions_expiry ON dispatch_sessions(expires_at)`,

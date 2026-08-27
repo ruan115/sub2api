@@ -83,7 +83,7 @@ type gatewayCapacityError struct {
 }
 
 func (e *gatewayCapacityError) Error() string {
-	return fmt.Sprintf("no gateway account capacity for group %s (model, concurrency, or RPM limit)", strings.ToUpper(e.groupID))
+	return fmt.Sprintf("no gateway account capacity for group %s (model, ITPM reservation, concurrency, or RPM limit)", strings.ToUpper(e.groupID))
 }
 
 func (e *gatewayCapacityError) Unwrap() error {

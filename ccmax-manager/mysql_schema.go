@@ -20,6 +20,10 @@ func (a *app) migrateMySQL() error {
 			rpm_limit INT NOT NULL DEFAULT 0,
 			tpm_limit BIGINT NOT NULL DEFAULT 0,
 			itpm_limit BIGINT NOT NULL DEFAULT 0,
+			itpm_protection_enabled TINYINT(1) NOT NULL DEFAULT 1,
+			itpm_window_seconds INT NOT NULL DEFAULT 60,
+			itpm_soft_limit BIGINT NOT NULL DEFAULT 100000,
+			itpm_hard_limit BIGINT NOT NULL DEFAULT 150000,
 			concurrency_limit INT NOT NULL DEFAULT 0,
 			rpm_strategy VARCHAR(32) NOT NULL DEFAULT 'fixed',
 			rpm_sticky_buffer INT NOT NULL DEFAULT 0,
@@ -342,6 +346,7 @@ func (a *app) migrateMySQL() error {
 			api_key_id BIGINT NOT NULL,
 			account_id BIGINT NOT NULL,
 			expires_at DATETIME(3) NOT NULL,
+			last_input_tokens BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (session_hash, api_key_id),
 			KEY idx_dispatch_sessions_expiry (expires_at),
 			CONSTRAINT fk_dispatch_sessions_key FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE,
@@ -541,6 +546,16 @@ func (a *app) migrateMySQL() error {
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", "itpm_limit", "BIGINT NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	for _, column := range []struct{ name, definition string }{
+		{"itpm_protection_enabled", "TINYINT(1) NOT NULL DEFAULT 1"},
+		{"itpm_window_seconds", "INT NOT NULL DEFAULT 60"},
+		{"itpm_soft_limit", "BIGINT NOT NULL DEFAULT 100000"},
+		{"itpm_hard_limit", "BIGINT NOT NULL DEFAULT 150000"},
+	} {
+		if err := ensureMySQLColumn(a.db.DB, "dispatch_strategies", column.name, column.definition); err != nil {
+			return err
+		}
+	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "rate_limit_downweight_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
@@ -598,6 +613,9 @@ func (a *app) migrateMySQL() error {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "cache_creation_detail_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "dispatch_sessions", "last_input_tokens", "BIGINT NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "rate_limit_reason", "VARCHAR(32) NOT NULL DEFAULT ''"); err != nil {

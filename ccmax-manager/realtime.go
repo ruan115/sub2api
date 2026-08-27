@@ -10,20 +10,31 @@ import (
 const realtimeWindowSeconds = 60
 
 type accountRealtimeLoad struct {
-	AccountID    int64  `json:"account_id"`
-	Name         string `json:"name"`
-	RPM          int64  `json:"rpm"`
-	TPM          int64  `json:"tpm"`
-	ITPM         int64  `json:"itpm"`
-	CacheReadTPM int64  `json:"cache_read_tpm"`
-	OTPM         int64  `json:"otpm"`
-	Inflight     int64  `json:"inflight"`
-	Concurrency  int    `json:"concurrency"`
-	BaseRPM      int    `json:"base_rpm"`
-	EffectiveRPM int    `json:"effective_rpm"`
-	TemporaryRPM int    `json:"temporary_rpm"`
-	Eligible     bool   `json:"eligible"`
-	Active       bool   `json:"active"`
+	AccountID            int64  `json:"account_id"`
+	Name                 string `json:"name"`
+	RPM                  int64  `json:"rpm"`
+	TPM                  int64  `json:"tpm"`
+	ITPM                 int64  `json:"itpm"`
+	ITPMReserved         int64  `json:"itpm_reserved"`
+	ITPMLoad             int64  `json:"itpm_load"`
+	ITPMWindowSeconds    int    `json:"itpm_window_seconds"`
+	ITPMSoftLimit        int64  `json:"itpm_soft_limit"`
+	ITPMHardLimit        int64  `json:"itpm_hard_limit"`
+	ITPMProtection       bool   `json:"itpm_protection_enabled"`
+	ITPMRestricted       bool   `json:"itpm_restricted"`
+	ITPMHardBlocked      bool   `json:"itpm_hard_blocked"`
+	CacheReadTPM         int64  `json:"cache_read_tpm"`
+	OTPM                 int64  `json:"otpm"`
+	Inflight             int64  `json:"inflight"`
+	Concurrency          int    `json:"concurrency"`
+	BaseRPM              int    `json:"base_rpm"`
+	EffectiveRPM         int    `json:"effective_rpm"`
+	TemporaryRPM         int    `json:"temporary_rpm"`
+	Eligible             bool   `json:"eligible"`
+	Active               bool   `json:"active"`
+	baseEligible         bool
+	itpmLegacyLimit      int64
+	itpmReservationIsBig bool
 }
 
 type realtimeLoad struct {
@@ -38,6 +49,8 @@ type realtimeLoad struct {
 	WaitingRequests     int64                 `json:"waiting_requests"`
 	ActiveAccounts      int                   `json:"active_accounts"`
 	EligibleAccounts    int                   `json:"eligible_accounts"`
+	ITPMRestricted      int                   `json:"itpm_restricted_accounts"`
+	ITPMHardBlocked     int                   `json:"itpm_hard_blocked_accounts"`
 	RPMCapacity         int64                 `json:"rpm_capacity"`
 	Unlimited           bool                  `json:"unlimited_capacity"`
 	UpdatedAt           string                `json:"updated_at"`
@@ -72,14 +85,13 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		-- The combined total is kept for context-throughput reporting.
 		SELECT account_id,
 			COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS tpm,
-			COALESCE(SUM(input_tokens + cache_creation_tokens), 0) AS itpm,
 			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tpm,
 			COALESCE(SUM(output_tokens), 0) AS otpm
 		FROM usage_logs
 		WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds')
 		GROUP BY account_id
 	)
-	SELECT a.id, a.name, a.base_rpm, COALESCE(rr.rpm, 0), COALESCE(rt.tpm, 0), COALESCE(rt.itpm, 0), COALESCE(rt.cache_read_tpm, 0), COALESCE(rt.otpm, 0), COALESCE(ai.requests, 0), a.concurrency,
+	SELECT a.id, a.name, a.base_rpm, COALESCE(rr.rpm, 0), COALESCE(rt.tpm, 0), 0, COALESCE(rt.cache_read_tpm, 0), COALESCE(rt.otpm, 0), COALESCE(ai.requests, 0), a.concurrency,
 		COALESCE((SELECT MIN(ds.concurrency_limit)
 			FROM account_groups capacity_ag
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
@@ -90,6 +102,31 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
 			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
 			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?) AND ds.rpm_limit > 0), 0),
+		COALESCE((SELECT MAX(ds.itpm_protection_enabled)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 1),
+		COALESCE((SELECT MAX(ds.itpm_window_seconds)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 60),
+		COALESCE((SELECT MIN(ds.itpm_soft_limit)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 100000),
+		COALESCE((SELECT MIN(ds.itpm_hard_limit)
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 150000),
+		COALESCE((SELECT MIN(NULLIF(ds.itpm_limit, 0))
+			FROM account_groups capacity_ag
+			JOIN groups capacity_g ON capacity_g.id = capacity_ag.group_id
+			JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, capacity_g.strategy_id) AND ds.deleted_at IS NULL
+			WHERE capacity_ag.account_id = a.id AND (? = '' OR capacity_ag.group_id = ?)), 0),
 		CASE WHEN ` + accountStatePredicate("a", "normal") + ` THEN 1 ELSE 0 END,
 		CASE WHEN a.rate_limit_downweight_until IS NOT NULL AND a.rate_limit_downweight_until > ` + nowSQL + `
 			THEN COALESCE((SELECT rpm_limit FROM account_rpm_thresholds threshold WHERE threshold.account_id = a.id AND threshold.reset_at > ` + nowSQL + `), 0)
@@ -101,7 +138,7 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	WHERE ` + strings.Join(where, " AND ") + `
 	ORDER BY COALESCE(rr.rpm, 0) DESC, COALESCE(ai.requests, 0) DESC, a.priority, a.id`
 
-	queryArgs := append([]any{groupID, groupID, groupID, groupID}, args...)
+	queryArgs := append([]any{groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID, groupID}, args...)
 	rows, err := a.db.Query(query, queryArgs...)
 	if err != nil {
 		writeDBError(w, err)
@@ -113,13 +150,18 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
 		Accounts:      []accountRealtimeLoad{},
 	}
+	itpmWindows := map[int64]int{}
 	for rows.Next() {
 		var item accountRealtimeLoad
-		var eligible, strategyConcurrency, strategyRPM int
-		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.ITPM, &item.CacheReadTPM, &item.OTPM, &item.Inflight, &item.Concurrency, &strategyConcurrency, &strategyRPM, &eligible, &item.TemporaryRPM); err != nil {
+		var eligible, strategyConcurrency, strategyRPM, itpmProtection int
+		if err := rows.Scan(&item.AccountID, &item.Name, &item.BaseRPM, &item.RPM, &item.TPM, &item.ITPM, &item.CacheReadTPM, &item.OTPM, &item.Inflight, &item.Concurrency, &strategyConcurrency, &strategyRPM, &itpmProtection, &item.ITPMWindowSeconds, &item.ITPMSoftLimit, &item.ITPMHardLimit, &item.itpmLegacyLimit, &eligible, &item.TemporaryRPM); err != nil {
 			writeDBError(w, err)
 			return
 		}
+		item.ITPMProtection = itpmProtection == 1
+		item.ITPMProtection, item.ITPMWindowSeconds, item.ITPMSoftLimit, item.ITPMHardLimit = normalizeStrategyITPMConfig(item.ITPMProtection, item.ITPMWindowSeconds, item.ITPMSoftLimit, item.ITPMHardLimit, item.itpmLegacyLimit)
+		item.baseEligible = eligible == 1
+		itpmWindows[item.AccountID] = item.ITPMWindowSeconds
 		item.EffectiveRPM = item.BaseRPM
 		// This mirrors gateway candidate resolution: an account-level strategy
 		// wins over the group strategy through COALESCE above, while a zero RPM
@@ -133,12 +175,42 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 		if item.TemporaryRPM > 0 && (item.EffectiveRPM <= 0 || item.TemporaryRPM < item.EffectiveRPM) {
 			item.EffectiveRPM = item.TemporaryRPM
 		}
+		result.Accounts = append(result.Accounts, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	rows.Close()
+	itpmUsage, err := loadAccountITPMUsage(a.db, itpmWindows)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	accountIDs := make([]int64, 0, len(result.Accounts))
+	for _, item := range result.Accounts {
+		accountIDs = append(accountIDs, item.AccountID)
+	}
+	reservations, err := a.accountITPMReservationStatuses(accountIDs)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	for index := range result.Accounts {
+		item := &result.Accounts[index]
+		item.ITPM = itpmUsage[item.AccountID]
+		reservation := reservations[item.AccountID]
+		item.ITPMReserved = reservation.Tokens
+		item.itpmReservationIsBig = reservation.Exclusive
+		item.ITPMLoad = item.ITPM + item.ITPMReserved
+		item.ITPMHardBlocked = item.ITPMProtection && item.ITPMLoad >= item.ITPMHardLimit
+		item.ITPMRestricted = item.ITPMProtection && (item.itpmReservationIsBig || item.ITPMLoad >= item.ITPMSoftLimit)
 		temporaryThresholdReached := item.TemporaryRPM > 0 && item.RPM >= int64(item.TemporaryRPM)
-		item.Eligible = eligible == 1 && !temporaryThresholdReached
+		item.Eligible = item.baseEligible && !temporaryThresholdReached && !item.ITPMRestricted
 		item.Active = item.RPM > 0 || item.Inflight > 0
 		result.RPM += item.RPM
 		result.TPM += item.TPM
-		result.ITPM += item.ITPM
+		result.ITPM += item.ITPMLoad
 		result.CacheReadTPM += item.CacheReadTPM
 		result.OTPM += item.OTPM
 		result.Inflight += item.Inflight
@@ -156,13 +228,14 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 				result.Unlimited = true
 			}
 		}
-		result.Accounts = append(result.Accounts, item)
+		if item.ITPMRestricted {
+			result.ITPMRestricted++
+		}
+		if item.ITPMHardBlocked {
+			result.ITPMHardBlocked++
+		}
 	}
 	result.WaitingRequests = a.realtimeCapacityWaiters(groupID, user)
-	if err := rows.Err(); err != nil {
-		writeDBError(w, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, result)
 }
 
