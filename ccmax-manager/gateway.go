@@ -562,6 +562,12 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			}
 			a.captureGatewayUpstreamState(account.ID, key.GroupID, envelope.Model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), response)
 		}
+		if response.StatusCode == http.StatusBadRequest && extraUsageIdentityDiagnosticArmed() {
+			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+			response.Body.Close()
+			response.Body = io.NopCloser(bytes.NewReader(failureBody))
+			a.captureExtraUsageIdentityDiagnosticOnce(r, key, account, prepared, response.Header, failureBody)
+		}
 		if retryableGatewayStatus(response.StatusCode) {
 			queueRelease()
 			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
@@ -640,6 +646,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(forwardErr, &preOutputErr) {
+			a.captureExtraUsageIdentityDiagnosticOnce(r, key, account, prepared, response.Header, preOutputErr.body)
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
 				if extraUsageFailoverEligible(key.ExtraUsageFailover, preOutputErr.status, preOutputErr.body) {
 					a.captureAccountExtraUsageRejection(account.ID)

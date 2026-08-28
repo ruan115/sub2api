@@ -366,6 +366,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	}
 	if response.StatusCode >= 400 {
 		failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		a.captureExtraUsageIdentityDiagnosticOnce(r, key, account, prepared, response.Header, failureBody)
 		if extraUsageFailoverEligible(key.ExtraUsageFailover, response.StatusCode, failureBody) {
 			if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 				a.captureAccountExtraUsageRejection(account.ID)
@@ -382,6 +383,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	if bootstrapErr != nil {
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(bootstrapErr, &preOutputErr) {
+			a.captureExtraUsageIdentityDiagnosticOnce(r, key, account, prepared, response.Header, preOutputErr.body)
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
 				if extraUsageFailoverEligible(key.ExtraUsageFailover, preOutputErr.status, preOutputErr.body) {
 					a.captureAccountExtraUsageRejection(account.ID)
