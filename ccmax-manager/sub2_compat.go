@@ -12,8 +12,38 @@ import (
 
 const sub2FingerprintExtraKey = "sub2_fingerprint"
 
+const defaultAccountNodeRuntimeVersion = "v24.3.0"
+
 func accountCompatibilityFingerprint(account gatewayAccount) *sub2service.Fingerprint {
 	return account.Fingerprint
+}
+
+// normalizeAccountFingerprintForTLSProfile keeps the HTTP identity coherent
+// with the fixed Node.js 24 TLS profile. ClientID and the per-account platform
+// fields remain stable; only fields that would contradict the transport are
+// normalized.
+func normalizeAccountFingerprintForTLSProfile(fingerprint *sub2service.Fingerprint, profile string) (*sub2service.Fingerprint, bool) {
+	if fingerprint == nil || normalizeAccountTLSProfile(profile) != defaultAccountTLSProfile {
+		return fingerprint, false
+	}
+	next := *fingerprint
+	changed := false
+	if next.StainlessLang != "js" {
+		next.StainlessLang = "js"
+		changed = true
+	}
+	if next.StainlessRuntime != "node" {
+		next.StainlessRuntime = "node"
+		changed = true
+	}
+	if next.StainlessRuntimeVersion != defaultAccountNodeRuntimeVersion {
+		next.StainlessRuntimeVersion = defaultAccountNodeRuntimeVersion
+		changed = true
+	}
+	if !changed {
+		return fingerprint, false
+	}
+	return &next, true
 }
 
 func decodeCompatibilityFingerprint(raw any) *sub2service.Fingerprint {
@@ -66,7 +96,8 @@ func (a *app) ensureGatewayAccountFingerprint(account gatewayAccount, headers ht
 		existing = decodeCompatibilityFingerprint(legacy)
 	}
 	resolved, changed := sub2service.ResolveCCMaxCompatibilityFingerprint(headers, existing)
-	if !changed && existing != nil && !hasLegacy {
+	resolved, normalized := normalizeAccountFingerprintForTLSProfile(resolved, account.TLSProfile)
+	if !changed && !normalized && existing != nil && !hasLegacy {
 		account.Fingerprint = existing
 		return account, nil
 	}
@@ -104,6 +135,7 @@ func (a *app) ensureGatewayAccountFingerprint(account gatewayAccount, headers ht
 
 func seedAccountFingerprint(tx *databaseTx, accountID int64, headers http.Header) error {
 	resolved, _ := sub2service.ResolveCCMaxCompatibilityFingerprint(headers, nil)
+	resolved, _ = normalizeAccountFingerprintForTLSProfile(resolved, defaultAccountTLSProfile)
 	encoded, err := json.Marshal(resolved)
 	if err != nil {
 		return err
@@ -141,6 +173,66 @@ func (a *app) backfillAccountFingerprints() error {
 	defer tx.Rollback()
 	for _, accountID := range accountIDs {
 		if err := seedAccountFingerprint(tx, accountID, nil); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *app) normalizeStoredAccountFingerprints() error {
+	rows, err := a.db.Query(`SELECT account_id, fingerprint_json, tls_profile FROM account_fingerprints ORDER BY account_id`)
+	if err != nil {
+		return err
+	}
+	type fingerprintUpdate struct {
+		accountID int64
+		encoded   string
+		profile   string
+	}
+	updates := make([]fingerprintUpdate, 0)
+	for rows.Next() {
+		var accountID int64
+		var raw, profile string
+		if err := rows.Scan(&accountID, &raw, &profile); err != nil {
+			rows.Close()
+			return err
+		}
+		normalizedProfile := normalizeAccountTLSProfile(profile)
+		var fingerprint sub2service.Fingerprint
+		repaired := false
+		if err := json.Unmarshal([]byte(raw), &fingerprint); err != nil || strings.TrimSpace(fingerprint.ClientID) == "" {
+			resolved, _ := sub2service.ResolveCCMaxCompatibilityFingerprint(nil, nil)
+			fingerprint = *resolved
+			repaired = true
+		}
+		resolved, changed := normalizeAccountFingerprintForTLSProfile(&fingerprint, normalizedProfile)
+		if !repaired && !changed && normalizedProfile == profile {
+			continue
+		}
+		encoded, err := json.Marshal(resolved)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		updates = append(updates, fingerprintUpdate{accountID: accountID, encoded: string(encoded), profile: normalizedProfile})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, update := range updates {
+		if _, err := tx.Exec(`UPDATE account_fingerprints SET fingerprint_json = ?, tls_profile = ?, updated_at = `+nowSQL+` WHERE account_id = ?`, update.encoded, update.profile, update.accountID); err != nil {
 			return err
 		}
 	}

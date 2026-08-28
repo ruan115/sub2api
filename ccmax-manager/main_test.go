@@ -140,6 +140,76 @@ func TestStartupBackfillsStableAccountFingerprints(t *testing.T) {
 	}
 }
 
+func TestStartupNormalizesNode24AccountFingerprints(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	databasePath := filepath.Join(t.TempDir(), "test.db")
+	a, err := newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := a.db.Exec(`INSERT INTO accounts (name) VALUES ('legacy-node26')`)
+	if err != nil {
+		a.db.Close()
+		t.Fatal(err)
+	}
+	accountID, err := result.LastInsertId()
+	if err != nil {
+		a.db.Close()
+		t.Fatal(err)
+	}
+	legacy := map[string]any{
+		"ClientID": "stable-client-id", "UserAgent": "claude-cli/2.1.250 (external, cli)",
+		"StainlessLang": "python", "StainlessPackageVersion": "0.112.1",
+		"StainlessOS": "Windows", "StainlessArch": "x64",
+		"StainlessRuntime": "bun", "StainlessRuntimeVersion": "v26.3.0",
+	}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		a.db.Close()
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO account_fingerprints (account_id, fingerprint_json, tls_profile) VALUES (?, ?, ?)`, accountID, string(encoded), defaultAccountTLSProfile); err != nil {
+		a.db.Close()
+		t.Fatal(err)
+	}
+	if err := a.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err = newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	var raw, profile string
+	if err := a.db.QueryRow(`SELECT fingerprint_json, tls_profile FROM account_fingerprints WHERE account_id = ?`, accountID).Scan(&raw, &profile); err != nil {
+		t.Fatal(err)
+	}
+	var fingerprint struct {
+		ClientID                string
+		UserAgent               string
+		StainlessLang           string
+		StainlessPackageVersion string
+		StainlessOS             string
+		StainlessArch           string
+		StainlessRuntime        string
+		StainlessRuntimeVersion string
+	}
+	if err := json.Unmarshal([]byte(raw), &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint.ClientID != "stable-client-id" || fingerprint.UserAgent != "claude-cli/2.1.250 (external, cli)" ||
+		fingerprint.StainlessPackageVersion != "0.112.1" || fingerprint.StainlessOS != "Windows" || fingerprint.StainlessArch != "x64" {
+		t.Fatalf("stable fingerprint fields changed: %+v", fingerprint)
+	}
+	if fingerprint.StainlessLang != "js" || fingerprint.StainlessRuntime != "node" || fingerprint.StainlessRuntimeVersion != defaultAccountNodeRuntimeVersion {
+		t.Fatalf("fingerprint was not normalized: %+v", fingerprint)
+	}
+	if profile != defaultAccountTLSProfile {
+		t.Fatalf("profile = %q, want %q", profile, defaultAccountTLSProfile)
+	}
+}
+
 func TestAccountAndGroupListsWorkWithSingleDatabaseConnection(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

@@ -31,6 +31,9 @@ func (a *app) migrateSharedData() error {
 	if err := a.backfillAccountFingerprints(); err != nil {
 		return fmt.Errorf("backfill account fingerprints: %w", err)
 	}
+	if err := a.normalizeStoredAccountFingerprints(); err != nil {
+		return fmt.Errorf("normalize account fingerprints: %w", err)
+	}
 	// Proxy assignment history is what makes a single-use address stay burned
 	// after its account is deleted or archived. SQLite maintains it through
 	// triggers and MySQL through recordProxyAssignment, but rows that predate
