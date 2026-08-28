@@ -10,12 +10,12 @@ import (
 // Traffic entering a group is split between the dispatch strategies its
 // accounts are bound to. Each strategy carries a weight and receives that
 // share of the group's recent requests; a strategy that has already taken more
-// than its share is skipped until the rolling window lets it back in.
+// than its share is skipped while another strategy can accept the request.
 //
-// Shares are a routing rule, not a capacity limit: when every eligible strategy
-// is over its share the dispatcher reports no capacity, which hands the request
-// to the group's existing capacity queue rather than spilling traffic into a
-// strategy the operator did not choose for it.
+// Shares are a routing preference, not a capacity limit. If the preferred
+// strategy has no usable account, dispatch retries the same group's other
+// strategies while preserving every model, cooldown, concurrency, RPM/TPM and
+// ITPM constraint.
 type groupStrategyShare struct {
 	StrategyID   int64   `json:"strategy_id"`
 	StrategyName string  `json:"strategy_name"`

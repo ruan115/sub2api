@@ -41,10 +41,9 @@ func TestStrategyOverShareIgnoresUnconfiguredGroups(t *testing.T) {
 	}
 }
 
-// A group whose weighted strategy is over its share must report no capacity so
-// the request lands in the existing capacity queue rather than spilling into a
-// strategy the operator did not pick for it.
-func TestGatewayStrategyShareBlocksOverServedStrategy(t *testing.T) {
+// Strategy weights choose the preferred branch while capacity is available,
+// then fall back inside the same group instead of manufacturing a 503.
+func TestGatewayStrategyShareFallsBackWithinGroup(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, handler := newGatewayTestApp(t)
 	defer a.db.Close()
@@ -90,14 +89,45 @@ func TestGatewayStrategyShareBlocksOverServedStrategy(t *testing.T) {
 	if _, err := a.db.Exec(`INSERT INTO group_strategy_shares (group_id, strategy_id, weight) VALUES ('a', ?, 9)`, other.ID); err != nil {
 		t.Fatal(err)
 	}
+	otherAccount := createGatewayTestAccount(t, a, handler, "share-account-b", "https://other.example.test", 1, nil, map[string]any{"access_token": "token-b"})
+	if _, err := a.db.Exec(`UPDATE accounts SET strategy_id = ? WHERE id = ?`, other.ID, otherAccount.ID); err != nil {
+		t.Fatal(err)
+	}
 	for range 10 {
 		if _, err := a.db.Exec(`INSERT INTO account_rpm_events (account_id) VALUES (?)`, account.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
 
+	selected, err = a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatalf("preferred strategy was not selected: %v", err)
+	}
+	if selected.ID != otherAccount.ID {
+		t.Fatalf("selected account = %d, want preferred strategy account %d", selected.ID, otherAccount.ID)
+	}
+	a.releaseGatewayAccount(selected.ID)
+
+	// Once the preferred strategy cannot accept traffic, the already over-share
+	// strategy is still valid fallback capacity in the same group.
+	if _, err := a.db.Exec(`UPDATE accounts SET schedulable = 0 WHERE id = ?`, otherAccount.ID); err != nil {
+		t.Fatal(err)
+	}
+	selected, err = a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false)
+	if err != nil {
+		t.Fatalf("same-group strategy fallback failed: %v", err)
+	}
+	if selected.ID != account.ID {
+		t.Fatalf("fallback account = %d, want %d", selected.ID, account.ID)
+	}
+	a.releaseGatewayAccount(selected.ID)
+
+	// Relaxing the strategy share must not relax the strategy's actual RPM cap.
+	if _, err := a.db.Exec(`UPDATE dispatch_strategies SET rpm_limit = 1, rpm_strategy = 'fixed' WHERE id = ?`, strategy.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := a.tryAcquireGatewayAccountWithPolicy(key, "", "claude-fable-5", map[int64]bool{}, false); err == nil {
-		t.Fatal("an over-served strategy still received traffic")
+		t.Fatal("strategy fallback bypassed the account RPM capacity limit")
 	}
 }
 

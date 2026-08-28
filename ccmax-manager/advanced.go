@@ -729,9 +729,21 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	if user.Role != "admin" {
 		where = append(where, accountStatePredicate("a", "normal"))
 	}
-	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupIDPattern.MatchString(groupID) {
+	groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id")))
+	if groupIDPattern.MatchString(groupID) {
 		where = append(where, `EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`)
 		whereArgs = append(whereArgs, groupID)
+	} else {
+		groupID = ""
+	}
+	strategyCondition, strategyArgs, err := accountStrategyFilterCondition(r, "a", groupID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strategyCondition != "" {
+		where = append(where, strategyCondition)
+		whereArgs = append(whereArgs, strategyArgs...)
 	}
 	if status := strings.TrimSpace(r.URL.Query().Get("status")); status != "" && user.Role == "admin" {
 		where = append(where, accountStatePredicate("a", status))

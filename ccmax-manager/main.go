@@ -246,6 +246,11 @@ type account struct {
 	DispatchStatus          string         `json:"dispatch_status"`
 }
 
+type accountStrategyOption struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
 type accountInput struct {
 	Name                    string          `json:"name"`
 	Platform                string          `json:"platform"`
@@ -806,6 +811,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PUT /api/purposes/{id}", a.handlePurposeUpdate)
 	mux.HandleFunc("DELETE /api/purposes/{id}", a.handlePurposeDelete)
 	mux.HandleFunc("GET /api/accounts", a.handleAccounts)
+	mux.HandleFunc("GET /api/accounts/strategy-options", a.handleAccountStrategyOptions)
 	mux.HandleFunc("GET /api/accounts/summary", a.handleAccountSummary)
 	mux.HandleFunc("POST /api/accounts", a.handleAccountCreate)
 	mux.HandleFunc("POST /api/accounts/batch-authorize", a.handleBatchAuthorization)
@@ -1753,6 +1759,55 @@ func accountQuotaFilterConditions(r *http.Request, alias string) ([]string, []an
 	return conditions, args, nil
 }
 
+func accountStrategyFilterCondition(r *http.Request, alias, groupID string) (string, []any, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("strategy_id"))
+	if raw == "" {
+		return "", nil, nil
+	}
+	strategyID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || strategyID <= 0 {
+		return "", nil, errors.New("strategy_id must be a positive integer")
+	}
+	if groupID != "" {
+		return `(` + alias + `.strategy_id = ? OR (` + alias + `.strategy_id IS NULL AND EXISTS (
+			SELECT 1 FROM account_groups strategy_ag
+			JOIN groups strategy_group ON strategy_group.id = strategy_ag.group_id
+			WHERE strategy_ag.account_id = ` + alias + `.id AND strategy_ag.group_id = ? AND strategy_group.strategy_id = ?
+		)))`, []any{strategyID, groupID, strategyID}, nil
+	}
+	return `(` + alias + `.strategy_id = ? OR (` + alias + `.strategy_id IS NULL AND EXISTS (
+		SELECT 1 FROM account_groups strategy_ag
+		JOIN groups strategy_group ON strategy_group.id = strategy_ag.group_id
+		WHERE strategy_ag.account_id = ` + alias + `.id AND strategy_group.strategy_id = ?
+	)))`, []any{strategyID, strategyID}, nil
+}
+
+func (a *app) handleAccountStrategyOptions(w http.ResponseWriter, _ *http.Request) {
+	// The account page only needs stable IDs and labels. Returning every active
+	// strategy keeps the filter usable after a batch binding changes which
+	// strategies currently have accounts, without exposing strategy limits.
+	rows, err := a.db.Query(`SELECT id, name FROM dispatch_strategies WHERE deleted_at IS NULL ORDER BY name, id`)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer rows.Close()
+	items := []accountStrategyOption{}
+	for rows.Next() {
+		var item accountStrategyOption
+		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+			writeDBError(w, err)
+			return
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
 func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	where := ` WHERE a.deleted_at IS NULL`
 	args := []any{}
@@ -1777,9 +1832,21 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	if restrictedView {
 		where += ` AND ` + accountStatePredicate("a", "normal")
 	}
-	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupIDPattern.MatchString(groupID) {
+	groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id")))
+	if groupIDPattern.MatchString(groupID) {
 		where += ` AND EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id = a.id AND ag.group_id = ?)`
 		args = append(args, groupID)
+	} else {
+		groupID = ""
+	}
+	strategyCondition, strategyArgs, err := accountStrategyFilterCondition(r, "a", groupID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strategyCondition != "" {
+		where += ` AND ` + strategyCondition
+		args = append(args, strategyArgs...)
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		where += ` AND (CAST(a.id AS CHAR) LIKE ? OR a.name LIKE ? OR a.notes LIKE ? OR a.credential_hint LIKE ? OR a.source_sk_hint LIKE ?

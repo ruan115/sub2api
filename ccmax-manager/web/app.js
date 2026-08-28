@@ -6,6 +6,8 @@ const state = {
   strategies: [],
   strategiesLoaded: false,
   strategiesLoading: null,
+  accountStrategyOptions: [],
+  accountStrategyOptionsLoaded: false,
   accounts: [],
   deadAccounts: [],
   archivedAccounts: [],
@@ -39,6 +41,7 @@ const state = {
   users: [],
   keys: [],
   accountGroup: "",
+  accountStrategy: "",
   accountSearch: "",
   accountStatus: "",
   account5HUtilization: "",
@@ -923,6 +926,7 @@ async function loadAccountPage() {
       order: state.accountSort.order,
     });
     if (state.accountGroup) params.set("group_id", state.accountGroup);
+    if (state.accountStrategy) params.set("strategy_id", state.accountStrategy);
     if (state.accountStatus) params.set("status", state.accountStatus);
     if (state.accountSearch) params.set("search", state.accountSearch);
     if (state.account5HUtilization !== "")
@@ -934,6 +938,7 @@ async function loadAccountPage() {
     if (state.account7DQuotaThreshold)
       params.set("quota_7d_threshold", state.account7DQuotaThreshold);
     const companionLoads = Promise.allSettled([
+      loadAccountStrategyOptions(),
       loadAccountSummary(loadSequence),
       loadRealtime(),
     ]);
@@ -959,6 +964,28 @@ async function loadAccountPage() {
   } finally {
     if (state.accountsLoading === loading) state.accountsLoading = null;
   }
+}
+
+async function loadAccountStrategyOptions() {
+  if (state.accountStrategyOptionsLoaded) return state.accountStrategyOptions;
+  state.accountStrategyOptions = await api("/api/accounts/strategy-options");
+  state.accountStrategyOptionsLoaded = true;
+  const select = $("#account-strategy-filter");
+  const selected = state.accountStrategy;
+  select.innerHTML = `<option value="">全部策略</option>${state.accountStrategyOptions
+    .map(
+      (item) =>
+        `<option value="${item.id}">${escapeHTML(item.name)}</option>`,
+    )
+    .join("")}`;
+  if (state.accountStrategyOptions.some((item) => String(item.id) === selected)) {
+    select.value = selected;
+  } else {
+    state.accountStrategy = "";
+    select.value = "";
+  }
+  select.title = select.selectedOptions[0]?.textContent || "全部策略";
+  return state.accountStrategyOptions;
 }
 
 async function loadDeadPage() {
@@ -1195,6 +1222,7 @@ async function loadAccountSummary(expectedLoadSequence = null) {
   const params = new URLSearchParams();
   if (state.accountSearch) params.set("search", state.accountSearch);
   if (state.accountGroup) params.set("group_id", state.accountGroup);
+  if (state.accountStrategy) params.set("strategy_id", state.accountStrategy);
   if (state.accountStatus) params.set("status", state.accountStatus);
   if (state.account5HUtilization !== "")
     params.set("quota_5h_utilization", state.account5HUtilization);
@@ -1535,6 +1563,7 @@ async function loadStrategies() {
   state.strategiesLoading = (async () => {
     state.strategies = await api("/api/strategies/observe");
     state.strategiesLoaded = true;
+    state.accountStrategyOptionsLoaded = false;
     renderStrategies();
   })();
   try {
@@ -4888,6 +4917,13 @@ $("#account-5h-utilization").addEventListener("input", (event) => {
 });
 $("#account-quota-threshold-filter").addEventListener("change", (event) => {
   state.accountQuotaThreshold = event.target.value;
+  state.selectedAccountIDs.clear();
+  resetPagination("accounts");
+  loadAccountPage();
+});
+$("#account-strategy-filter").addEventListener("change", (event) => {
+  state.accountStrategy = event.target.value;
+  event.target.title = event.target.selectedOptions[0]?.textContent || "全部策略";
   state.selectedAccountIDs.clear();
   resetPagination("accounts");
   loadAccountPage();

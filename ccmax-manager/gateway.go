@@ -566,11 +566,11 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			}
 			a.captureGatewayUpstreamState(account.ID, key.GroupID, envelope.Model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), response)
 		}
-		if response.StatusCode == http.StatusBadRequest && extraUsageIdentityDiagnosticArmed() {
+		if response.StatusCode == http.StatusBadRequest && gatewayRequestDiagnosticArmed() {
 			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 			response.Body.Close()
 			response.Body = io.NopCloser(bytes.NewReader(failureBody))
-			a.captureExtraUsageIdentityDiagnosticOnce(r, key, account, prepared, response.Header, failureBody)
+			a.captureGatewayRequestDiagnosticsOnce(r, key, account, prepared, response.Header, failureBody)
 		}
 		if retryableGatewayStatus(response.StatusCode) {
 			queueRelease()
@@ -650,7 +650,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		}
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(forwardErr, &preOutputErr) {
-			a.captureExtraUsageIdentityDiagnosticOnce(r, key, account, prepared, response.Header, preOutputErr.body)
+			a.captureGatewayRequestDiagnosticsOnce(r, key, account, prepared, response.Header, preOutputErr.body)
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
 				if extraUsageFailoverEligible(key.ExtraUsageFailover, preOutputErr.status, preOutputErr.body) {
 					a.captureAccountExtraUsageRejection(account.ID)
@@ -2367,8 +2367,10 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 	reservationBlocked := map[int64]bool{}
 	var selectedCandidate candidate
 	var selected gatewayAccount
+	allowStrategyFallback := false
 	for {
 		selectedIndex := -1
+		shareBlockedThisPass := 0
 		for index, candidate := range candidates {
 			if reservationBlocked[candidate.account.ID] {
 				continue
@@ -2387,8 +2389,9 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 				diagnostics.Excluded++
 				continue
 			}
-			if strategyOverShare(shareWeights, shareTotalWeight, strategyRPM, groupRPM, candidate.strategyID) {
+			if !allowStrategyFallback && strategyOverShare(shareWeights, shareTotalWeight, strategyRPM, groupRPM, candidate.strategyID) {
 				diagnostics.StrategyShareBlocked++
+				shareBlockedThisPass++
 				continue
 			}
 			if key.StrategyRequiredEnabled && candidate.strategyID == 0 {
@@ -2584,6 +2587,21 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 			}
 		}
 		if selectedIndex < 0 {
+			if !allowStrategyFallback && shareBlockedThisPass > 0 {
+				// Strategy weights select the preferred branch, but they must not turn
+				// usable capacity in another strategy of this group into a 503. Retry
+				// once with only the share gate relaxed; every actual capacity check
+				// above remains active.
+				reservationFailures := diagnostics.ITPMReservationBlocked
+				shareBlocks := diagnostics.StrategyShareBlocked
+				diagnostics = gatewayCapacityDiagnostics{
+					Candidates:             len(candidates),
+					StrategyShareBlocked:   shareBlocks,
+					ITPMReservationBlocked: reservationFailures,
+				}
+				allowStrategyFallback = true
+				continue
+			}
 			return gatewayAccount{}, &gatewayCapacityError{groupID: key.GroupID, diagnostics: diagnostics}
 		}
 		selectedCandidate = candidates[selectedIndex]
@@ -2604,6 +2622,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		if !allowed {
 			diagnostics.ITPMReservationBlocked++
 			reservationBlocked[selected.ID] = true
+			allowStrategyFallback = false
 			continue
 		}
 		break
