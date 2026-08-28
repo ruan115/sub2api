@@ -689,6 +689,7 @@ func relocateCCMaxExtraUsageSystem(body []byte) ([]byte, bool) {
 
 	var billingBlock []byte
 	parts := make([]string, 0, 2)
+	clientSystemSeen := false
 	var cacheControl any
 	system.ForEach(func(_, item gjson.Result) bool {
 		text := strings.TrimSpace(item.Get("text").String())
@@ -698,15 +699,17 @@ func relocateCCMaxExtraUsageSystem(body []byte) ([]byte, bool) {
 			}
 			return true
 		}
-		if text != "" {
-			parts = append(parts, item.Get("text").String())
+		clientSystemSeen = true
+		clientText := strings.TrimSpace(strings.ReplaceAll(item.Get("text").String(), claudeCodeSystemPrompt, ""))
+		if clientText != "" {
+			parts = append(parts, clientText)
 		}
 		if raw := item.Get("cache_control"); raw.Exists() {
 			_ = json.Unmarshal([]byte(raw.Raw), &cacheControl)
 		}
 		return true
 	})
-	if billingBlock == nil || len(parts) == 0 {
+	if billingBlock == nil || !clientSystemSeen {
 		return body, false
 	}
 
@@ -714,32 +717,34 @@ func relocateCCMaxExtraUsageSystem(body []byte) ([]byte, bool) {
 	if !ok {
 		return body, false
 	}
-	instructionBlock := map[string]any{
-		"type": "text",
-		"text": "[System Instructions]\n" + strings.Join(parts, "\n\n"),
-	}
-	if cacheControl != nil {
-		instructionBlock["cache_control"] = cacheControl
-	}
-	instruction, err := json.Marshal(map[string]any{
-		"role":    "user",
-		"content": []any{instructionBlock},
-	})
-	if err != nil {
-		return body, false
-	}
-	acknowledgement, err := json.Marshal(map[string]any{
-		"role": "assistant",
-		"content": []any{map[string]any{
+	messages := make([][]byte, 0, 2)
+	if len(parts) > 0 {
+		instructionBlock := map[string]any{
 			"type": "text",
-			"text": "Understood. I will follow these instructions.",
-		}},
-	})
-	if err != nil {
-		return body, false
+			"text": "[System Instructions]\n" + strings.Join(parts, "\n\n"),
+		}
+		if cacheControl != nil {
+			instructionBlock["cache_control"] = cacheControl
+		}
+		instruction, err := json.Marshal(map[string]any{
+			"role":    "user",
+			"content": []any{instructionBlock},
+		})
+		if err != nil {
+			return body, false
+		}
+		acknowledgement, err := json.Marshal(map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type": "text",
+				"text": "Understood. I will follow these instructions.",
+			}},
+		})
+		if err != nil {
+			return body, false
+		}
+		messages = append(messages, instruction, acknowledgement)
 	}
-
-	messages := [][]byte{instruction, acknowledgement}
 	originalMessages := gjson.GetBytes(out, "messages")
 	if originalMessages.IsArray() {
 		originalMessages.ForEach(func(_, message gjson.Result) bool {

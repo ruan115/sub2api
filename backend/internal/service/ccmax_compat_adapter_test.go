@@ -310,13 +310,13 @@ func TestPrepareCCMaxCompatibilityRequestOriginalModeNormalizesThirdPartySamplin
 }
 
 func TestPrepareCCMaxCompatibilityRetryExtraUsageMovesSystemWithoutIdentityInjection(t *testing.T) {
-	body := []byte(`{"model":"claude-opus-4-8","max_tokens":64,"system":[{"type":"text","text":"Third-party client instructions.","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"claude-opus-4-8","max_tokens":64,"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.\nThird-party client instructions.","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hi"}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
 		Body: body, Model: "claude-opus-4-8", OAuth: true,
 		AccessToken: "token", NormalRequestMode: true,
 	})
 	require.NoError(t, err)
-	require.NotContains(t, string(prepared.Body), claudeCodeSystemPrompt)
+	require.Contains(t, string(prepared.Body), claudeCodeSystemPrompt)
 
 	retry, applied, err := PrepareCCMaxCompatibilityRetry(prepared, CCMaxCompatibilityRetryExtraUsage)
 	require.NoError(t, err)
