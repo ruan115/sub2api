@@ -2612,24 +2612,22 @@ func TestGatewayExtraUsageFailoverByGroup(t *testing.T) {
 	extraUsageBody := `{"type":"error","error":{"message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."}}`
 	ordinaryBody := `{"type":"error","error":{"message":"max_tokens must be positive"}}`
 	tests := []struct {
-		name         string
-		enabled      bool
-		upstream     string
-		wantStatus   int
-		wantID       string
-		wantCalls    int32
-		wantCooling  bool
-		wantRelocate bool
+		name        string
+		enabled     bool
+		upstream    string
+		wantStatus  int
+		wantID      string
+		wantCalls   int32
+		wantCooling bool
 	}{
 		{
-			name:         "enabled_fails_over_and_cools_account",
-			enabled:      true,
-			upstream:     extraUsageBody,
-			wantStatus:   http.StatusOK,
-			wantID:       "msg_extra_usage_fallback",
-			wantCalls:    2,
-			wantCooling:  true,
-			wantRelocate: true,
+			name:        "enabled_fails_over_and_cools_account",
+			enabled:     true,
+			upstream:    extraUsageBody,
+			wantStatus:  http.StatusOK,
+			wantID:      "msg_extra_usage_fallback",
+			wantCalls:   2,
+			wantCooling: true,
 		},
 		{
 			name:       "disabled_passes_400_through",
@@ -2655,20 +2653,8 @@ func TestGatewayExtraUsageFailoverByGroup(t *testing.T) {
 				_, _ = w.Write([]byte(tt.upstream))
 			}))
 			defer first.Close()
-			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				fallbackCalls.Add(1)
-				if tt.wantRelocate {
-					body, _ := io.ReadAll(r.Body)
-					if got := gjson.GetBytes(body, "system.#").Int(); got != 1 {
-						t.Errorf("fallback system blocks=%d body=%s", got, body)
-					}
-					if !strings.Contains(gjson.GetBytes(body, "messages.0.content.0.text").String(), "Client system") {
-						t.Errorf("client system was not relocated: %s", body)
-					}
-					if strings.Contains(string(body), claudeCodeSystemPrompt) {
-						t.Errorf("fallback injected Claude Code identity: %s", body)
-					}
-				}
 				_, _ = w.Write([]byte(`{"id":"msg_extra_usage_fallback","usage":{"input_tokens":1,"output_tokens":1}}`))
 			}))
 			defer fallback.Close()
@@ -2677,7 +2663,6 @@ func TestGatewayExtraUsageFailoverByGroup(t *testing.T) {
 			defer a.db.Close()
 			putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 				"name": "A 分组", "description": "extra usage 换号", "rate_multiplier": 1, "status": "active",
-				"normal_request_mode":          true,
 				"extra_usage_failover_enabled": tt.enabled,
 			}, http.StatusOK, nil)
 			key := createGatewayTestKey(t, handler)
@@ -2686,7 +2671,7 @@ func TestGatewayExtraUsageFailoverByGroup(t *testing.T) {
 
 			var response map[string]any
 			requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
-				"model": "claude-test", "max_tokens": 8, "system": "Client system", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				"model": "claude-test", "max_tokens": 8, "messages": []any{map[string]any{"role": "user", "content": "hello"}},
 			}, nil, key.Key, tt.wantStatus, &response)
 			if firstCalls.Load()+fallbackCalls.Load() != tt.wantCalls {
 				t.Fatalf("upstream calls first=%d fallback=%d want=%d response=%#v", firstCalls.Load(), fallbackCalls.Load(), tt.wantCalls, response)

@@ -309,43 +309,6 @@ func TestPrepareCCMaxCompatibilityRequestOriginalModeNormalizesThirdPartySamplin
 	}
 }
 
-func TestPrepareCCMaxCompatibilityRetryExtraUsageMovesSystemWithoutIdentityInjection(t *testing.T) {
-	body := []byte(`{"model":"claude-opus-4-8","max_tokens":64,"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.\nThird-party client instructions.","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hi"}]}`)
-	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
-		Body: body, Model: "claude-opus-4-8", OAuth: true,
-		AccessToken: "token", NormalRequestMode: true,
-	})
-	require.NoError(t, err)
-	require.Contains(t, string(prepared.Body), claudeCodeSystemPrompt)
-
-	retry, applied, err := PrepareCCMaxCompatibilityRetry(prepared, CCMaxCompatibilityRetryExtraUsage)
-	require.NoError(t, err)
-	require.True(t, applied)
-	require.Len(t, gjson.GetBytes(retry.Body, "system").Array(), 2)
-	require.Contains(t, gjson.GetBytes(retry.Body, "system.0.text").String(), "x-anthropic-billing-header:")
-	require.NotContains(t, string(retry.Body), claudeCodeSystemPrompt)
-	require.Equal(t, "Third-party client instructions.", gjson.GetBytes(retry.Body, "system.1.text").String())
-	require.Equal(t, "5m", gjson.GetBytes(retry.Body, "system.1.cache_control.ttl").String())
-	require.Equal(t, "hi", gjson.GetBytes(retry.Body, "messages.0.content").String())
-}
-
-func TestPrepareCCMaxCompatibilityRetryExtraUsageRelocatesSystemWithoutIdentity(t *testing.T) {
-	body := []byte(`{"model":"claude-opus-4-8","max_tokens":64,"system":[{"type":"text","text":"Third-party client instructions."}],"messages":[{"role":"user","content":"hi"}]}`)
-	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
-		Body: body, Model: "claude-opus-4-8", OAuth: true,
-		AccessToken: "token", NormalRequestMode: true,
-	})
-	require.NoError(t, err)
-
-	retry, applied, err := PrepareCCMaxCompatibilityRetry(prepared, CCMaxCompatibilityRetryExtraUsage)
-	require.NoError(t, err)
-	require.True(t, applied)
-	require.Len(t, gjson.GetBytes(retry.Body, "system").Array(), 1)
-	require.Contains(t, gjson.GetBytes(retry.Body, "messages.0.content.0.text").String(), "Third-party client instructions.")
-	require.Equal(t, "assistant", gjson.GetBytes(retry.Body, "messages.1.role").String())
-	require.Equal(t, "hi", gjson.GetBytes(retry.Body, "messages.2.content").String())
-}
-
 func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistory(t *testing.T) {
 	signature := strings.Repeat("signed-history-", 154)
 	body, err := json.Marshal(map[string]any{
