@@ -387,14 +387,10 @@ func normalizeCCMaxDistilledRequestBody(body []byte, model string, countTokens b
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, fmt.Errorf("invalid Anthropic message request: %w", err)
 	}
-	// Claude Code uses its fixed temperature=1 rather than arbitrary client
-	// sampling controls. Drop client values here; the OAuth normalizer restores
-	// temperature=1 while top_p/top_k remain absent. Keeping third-party values
-	// makes Anthropic classify even an otherwise first-party request as extra use.
-	request.Temperature = nil
-	request.TopP = nil
-	request.TopK = nil
 	if isCCMaxDistilledFable5(model) {
+		request.Temperature = nil
+		request.TopP = nil
+		request.TopK = nil
 		if countTokens {
 			request.Thinking = nil
 		}

@@ -267,11 +267,21 @@ func normalizeClaudeOAuthRequestBody(body []byte, modelID string, opts claudeOAu
 		}
 	}
 
-	// temperature：真实 Claude Code CLI 总是发送 temperature（默认 1，客户端可覆盖）。
-	// 之前的实现直接 delete 会导致 payload 缺字段，与真实 CLI 字节级不一致。
-	// 策略：客户端传了什么就透传；没传则补默认 1。
-	if !gjson.GetBytes(out, "temperature").Exists() {
+	// Server-side mimicry must use Claude Code's fixed sampling shape. Arbitrary
+	// third-party temperature/top_p/top_k values can make an otherwise complete
+	// OAuth identity count as extra usage. Real Claude Code requests do not enter
+	// this normalizer, and account passthrough bypasses compatibility preparation.
+	if current := gjson.GetBytes(out, "temperature"); !current.Exists() || current.Type != gjson.Number || current.Num != 1 {
 		if next, ok := setJSONValueBytes(out, "temperature", 1); ok {
+			out = next
+			modified = true
+		}
+	}
+	for _, path := range []string{"top_p", "top_k"} {
+		if !gjson.GetBytes(out, path).Exists() {
+			continue
+		}
+		if next, err := sjson.DeleteBytes(out, path); err == nil {
 			out = next
 			modified = true
 		}
