@@ -1842,6 +1842,32 @@
               <i></i>
             </label>
           </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>extra usage 400 换号</strong>
+              <small title="默认关闭。开启后，上游返回 Third-party apps now draw from your extra usage 时不把 400 透传给客户端，改为冷却该账号并换号重试；普通 400 仍原样返回。关闭时保持现状">开启后把第三方 extra usage 400 当账号软失败，冷却并换号；关闭时原样透传</small>
+            </div>
+            <label class="compact-toggle" title="extra usage 400 换号">
+              <input
+                id="group-extra-usage-failover"
+                type="checkbox"
+                aria-label="extra usage 400 换号" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>擦除 OpenCode 指纹</strong>
+              <small title="默认关闭。开启后只删除 OpenCode 指纹句，不注入任何替代提示词。重点删除 You are powered by the model named …，以及 OpenCode 身份行、feedback/docs、OhMyOpenCode 块。关闭时原样透传">开启后只擦除 OpenCode 指纹（尤其是 powered by 句），零注入；关闭时原样透传</small>
+            </div>
+            <label class="compact-toggle" title="擦除 OpenCode 指纹">
+              <input
+                id="group-opencode-scrub"
+                type="checkbox"
+                aria-label="擦除 OpenCode 指纹" />
+              <i></i>
+            </label>
+          </div>
           <section class="group-passthrough-panel" aria-labelledby="group-passthrough-title">
             <div class="group-passthrough-head">
               <span class="group-passthrough-icon" aria-hidden="true">

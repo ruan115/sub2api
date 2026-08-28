@@ -109,7 +109,7 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 	// Keep plan metadata current whenever an administrator explicitly refreshes
 	// account quota. Quota remains available even if profile metadata is down.
 	_ = a.syncClaudeAccountProfile(ctx, accountID, account.CredentialsJSON, proxy.String())
-	client, err := clientForProxy(proxy)
+	client, err := clientForAccountProxy(proxy, account)
 	if err != nil {
 		return accountQuota{}, err
 	}
@@ -1387,6 +1387,11 @@ func accountRequiresUpstreamAction(message string) bool {
 	}
 	return strings.Contains(message, "consumer terms") &&
 		(strings.Contains(message, "accept") || strings.Contains(message, "agreement"))
+}
+
+func accountExtraUsageRejected(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(message, "third-party apps") && strings.Contains(message, "extra usage")
 }
 
 func upstreamErrorMessage(body []byte) string {

@@ -2565,6 +2565,99 @@ func TestGatewayOAuth403FailsOverWithoutSameAccountRetry(t *testing.T) {
 	}
 }
 
+func TestGatewayExtraUsageFailoverByGroup(t *testing.T) {
+	extraUsageBody := `{"type":"error","error":{"message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."}}`
+	ordinaryBody := `{"type":"error","error":{"message":"max_tokens must be positive"}}`
+	tests := []struct {
+		name        string
+		enabled     bool
+		upstream    string
+		wantStatus  int
+		wantID      string
+		wantCalls   int32
+		wantCooling bool
+	}{
+		{
+			name:        "enabled_fails_over_and_cools_account",
+			enabled:     true,
+			upstream:    extraUsageBody,
+			wantStatus:  http.StatusOK,
+			wantID:      "msg_extra_usage_fallback",
+			wantCalls:   2,
+			wantCooling: true,
+		},
+		{
+			name:       "disabled_passes_400_through",
+			upstream:   extraUsageBody,
+			wantStatus: http.StatusBadRequest,
+			wantCalls:  1,
+		},
+		{
+			name:       "enabled_ordinary_400_stays_terminal",
+			enabled:    true,
+			upstream:   ordinaryBody,
+			wantStatus: http.StatusBadRequest,
+			wantCalls:  1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CCMAX_AUTH_DISABLED", "1")
+			var firstCalls, fallbackCalls atomic.Int32
+			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				firstCalls.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tt.upstream))
+			}))
+			defer first.Close()
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fallbackCalls.Add(1)
+				_, _ = w.Write([]byte(`{"id":"msg_extra_usage_fallback","usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer fallback.Close()
+
+			a, handler := newGatewayTestApp(t)
+			defer a.db.Close()
+			putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+				"name": "A 分组", "description": "extra usage 换号", "rate_multiplier": 1, "status": "active",
+				"extra_usage_failover_enabled": tt.enabled,
+			}, http.StatusOK, nil)
+			key := createGatewayTestKey(t, handler)
+			blocked := createGatewayTestAccount(t, a, handler, "extra-usage-blocked", first.URL, 0, nil, map[string]any{"access_token": "blocked-token"})
+			createGatewayTestAccount(t, a, handler, "extra-usage-fallback", fallback.URL, 1, nil, map[string]any{"access_token": "fallback-token"})
+
+			var response map[string]any
+			requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+				"model": "claude-test", "max_tokens": 8, "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			}, nil, key.Key, tt.wantStatus, &response)
+			if firstCalls.Load()+fallbackCalls.Load() != tt.wantCalls {
+				t.Fatalf("upstream calls first=%d fallback=%d want=%d response=%#v", firstCalls.Load(), fallbackCalls.Load(), tt.wantCalls, response)
+			}
+			if tt.wantID != "" && response["id"] != tt.wantID {
+				t.Fatalf("response=%#v", response)
+			}
+
+			var status, authStatus, errorMessage string
+			var resetAt sql.NullString
+			if err := a.db.QueryRow(`SELECT status, auth_status, error_message, rate_limit_reset_at FROM accounts WHERE id = ?`, blocked.ID).Scan(&status, &authStatus, &errorMessage, &resetAt); err != nil {
+				t.Fatal(err)
+			}
+			if status != "active" || authStatus == "reauth_required" {
+				t.Fatalf("extra usage changed account state=%q/%q", status, authStatus)
+			}
+			if tt.wantCooling {
+				if !resetAt.Valid || !strings.Contains(errorMessage, "extra usage") {
+					t.Fatalf("expected extra usage cooldown, reset=%v error=%q", resetAt, errorMessage)
+				}
+				return
+			}
+			if resetAt.Valid || errorMessage != "" {
+				t.Fatalf("ordinary/disabled path cooled account reset=%v error=%q", resetAt, errorMessage)
+			}
+		})
+	}
+}
+
 func TestCompatibilityRetriesThinkingSignature400OnSameAccount(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var calls atomic.Int32

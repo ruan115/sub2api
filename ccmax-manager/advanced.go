@@ -53,6 +53,9 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "dispatch_strategies", "itpm_limit", "INTEGER NOT NULL DEFAULT 0 CHECK (itpm_limit >= 0)"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "account_fingerprints", "tls_profile", "TEXT NOT NULL DEFAULT 'nodejs-24'"); err != nil {
+		return err
+	}
 	for _, column := range []struct{ name, definition string }{
 		{"itpm_protection_enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"itpm_window_seconds", "INTEGER NOT NULL DEFAULT 60 CHECK (itpm_window_seconds BETWEEN 1 AND 3600)"},
@@ -130,6 +133,18 @@ func (a *app) migrateAdvancedFeatures() error {
 	// accepting that the client's proxy-detection watermark then reaches
 	// Anthropic.
 	if err := addColumnIfMissing(a.db, "groups", "dateline_normalization_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	// Off by default: enabling it treats Anthropic's "Third-party apps now
+	// draw from your extra usage" 400 as a soft account failure — cooldown
+	// the account and fail over — instead of passing the 400 to the client.
+	if err := addColumnIfMissing(a.db, "groups", "extra_usage_failover_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Off by default: enabling it deletes OpenCode fingerprint lines
+	// (especially "You are powered by the model named ...") without
+	// injecting any replacement system prompt.
+	if err := addColumnIfMissing(a.db, "groups", "opencode_scrub_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	// Warm sessions reserve ITPM by their last settled uncached input instead
@@ -609,6 +624,8 @@ func (a *app) migrateDynamicGroups() error {
 			quota_header_masking_enabled INTEGER NOT NULL DEFAULT 0,
 			cache_creation_detail_enabled INTEGER NOT NULL DEFAULT 0,
 			dateline_normalization_enabled INTEGER NOT NULL DEFAULT 1,
+			extra_usage_failover_enabled INTEGER NOT NULL DEFAULT 0,
+			opencode_scrub_enabled INTEGER NOT NULL DEFAULT 0,
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
 			rate_limit_downweight_enabled INTEGER NOT NULL DEFAULT 1,
 			rate_limit_cooling_threshold INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10),
@@ -630,8 +647,8 @@ func (a *app) migrateDynamicGroups() error {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		)`,
-		`INSERT INTO groups_dynamic (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, dateline_normalization_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at)
-		 SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, dateline_normalization_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at FROM groups`,
+		`INSERT INTO groups_dynamic (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, dateline_normalization_enabled, extra_usage_failover_enabled, opencode_scrub_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at)
+		 SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, dateline_normalization_enabled, extra_usage_failover_enabled, opencode_scrub_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at FROM groups`,
 		`DROP TABLE groups`,
 		`ALTER TABLE groups_dynamic RENAME TO groups`,
 	}

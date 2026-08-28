@@ -3781,6 +3781,10 @@ function openGroup(item = null) {
   $("#group-cache-creation-detail").checked = Boolean(
     item?.cache_creation_detail_enabled,
   );
+  $("#group-extra-usage-failover").checked = Boolean(
+    item?.extra_usage_failover_enabled,
+  );
+  $("#group-opencode-scrub").checked = Boolean(item?.opencode_scrub_enabled);
   // Default on: protects account stealth unless explicitly disabled.
   $("#group-dateline-normalization").checked =
     item?.dateline_normalization_enabled ?? true;
@@ -5433,6 +5437,8 @@ $("#group-form").addEventListener("submit", async (event) => {
         quota_header_masking_enabled: $("#group-quota-header-masking").checked,
         cache_creation_detail_enabled: $("#group-cache-creation-detail")
           .checked,
+        extra_usage_failover_enabled: $("#group-extra-usage-failover").checked,
+        opencode_scrub_enabled: $("#group-opencode-scrub").checked,
         dateline_normalization_enabled: $("#group-dateline-normalization")
           .checked,
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,

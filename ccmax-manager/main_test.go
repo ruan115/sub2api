@@ -46,6 +46,13 @@ func TestAccountPoolRoutingAndBilling(t *testing.T) {
 	if created.Credentials != nil {
 		t.Fatal("account create response must not reveal credentials")
 	}
+	var fingerprintJSON, tlsProfile string
+	if err := a.db.QueryRow(`SELECT fingerprint_json, tls_profile FROM account_fingerprints WHERE account_id = ?`, created.ID).Scan(&fingerprintJSON, &tlsProfile); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fingerprintJSON, "ClientID") || tlsProfile != defaultAccountTLSProfile {
+		t.Fatalf("account fingerprint = %s, tls_profile = %q", fingerprintJSON, tlsProfile)
+	}
 
 	var resolved struct {
 		GroupID string  `json:"group_id"`
@@ -81,6 +88,55 @@ func TestAccountPoolRoutingAndBilling(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("usage count = %d, want 1", count)
+	}
+}
+
+func TestStartupBackfillsStableAccountFingerprints(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	databasePath := filepath.Join(t.TempDir(), "test.db")
+	a, err := newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"legacy-one", "legacy-two"} {
+		if _, err := a.db.Exec(`INSERT INTO accounts (name) VALUES (?)`, name); err != nil {
+			a.db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := a.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err = newApp(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	rows, err := a.db.Query(`SELECT fingerprint_json, tls_profile FROM account_fingerprints ORDER BY account_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	clientIDs := map[string]bool{}
+	for rows.Next() {
+		var raw, profile string
+		if err := rows.Scan(&raw, &profile); err != nil {
+			t.Fatal(err)
+		}
+		var fingerprint struct {
+			ClientID string
+		}
+		if err := json.Unmarshal([]byte(raw), &fingerprint); err != nil {
+			t.Fatal(err)
+		}
+		if fingerprint.ClientID == "" || profile != defaultAccountTLSProfile {
+			t.Fatalf("fingerprint = %s, profile = %q", raw, profile)
+		}
+		clientIDs[fingerprint.ClientID] = true
+	}
+	if len(clientIDs) != 2 {
+		t.Fatalf("unique ClientIDs = %d, want 2", len(clientIDs))
 	}
 }
 
@@ -220,6 +276,58 @@ func TestGroupDatelineNormalizationDefaultsOnAndTogglesOff(t *testing.T) {
 	}, http.StatusOK, &updated)
 	if updated.DatelineNormalization {
 		t.Fatalf("legacy update re-enabled dateline normalization: %+v", updated)
+	}
+}
+
+func TestGroupOpenCodeScrubPersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "擦除 OpenCode 指纹", "rate_multiplier": 1, "status": "active",
+		"opencode_scrub_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.OpenCodeScrub {
+		t.Fatalf("group opencode scrub was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.OpenCodeScrub {
+		t.Fatalf("legacy update reset group opencode scrub: %+v", updated)
+	}
+}
+
+func TestGroupExtraUsageFailoverPersistsAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "extra usage 换号", "rate_multiplier": 1, "status": "active",
+		"extra_usage_failover_enabled": true,
+	}, http.StatusOK, &updated)
+	if !updated.ExtraUsageFailover {
+		t.Fatalf("group extra usage failover was not persisted: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if !updated.ExtraUsageFailover {
+		t.Fatalf("legacy update reset group extra usage failover: %+v", updated)
 	}
 }
 

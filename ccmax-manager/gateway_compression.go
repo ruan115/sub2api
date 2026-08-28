@@ -27,6 +27,12 @@ func (t decompressingRoundTripper) RoundTrip(request *http.Request) (*http.Respo
 	return response, err
 }
 
+func (t decompressingRoundTripper) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 func decompressGatewayResponse(response *http.Response) {
 	if response == nil || response.Body == nil {
 		return

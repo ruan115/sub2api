@@ -36,6 +36,12 @@ const defaultGatewayUpstreamStreamIdleTimeout = 90 * time.Second
 // the next request does not immediately pick it again.
 const gatewayStreamIdleCooldown = 2 * time.Minute
 
+// gatewayExtraUsageCooldown parks an account that just rejected a third-party
+// extra-usage request, so the retry and nearby traffic land elsewhere. The
+// account stays schedulable afterwards: first-party-looking requests on the
+// same org can still succeed.
+const gatewayExtraUsageCooldown = 2 * time.Minute
+
 type gatewayKey struct {
 	ID                         int64
 	UserID                     int64
@@ -63,6 +69,8 @@ type gatewayKey struct {
 	QuotaHeaderMasking         bool
 	CacheCreationDetail        bool
 	DatelineNormalization      bool
+	ExtraUsageFailover         bool
+	OpenCodeScrub              bool
 	OverloadCooldownSeconds    int
 	RateLimitDownweightEnabled bool
 	RateLimitCoolingThreshold  int
@@ -94,6 +102,7 @@ type gatewayAccount struct {
 	UserMsgQueueMode string
 	ProxyID          sql.NullInt64
 	Fingerprint      *sub2service.Fingerprint
+	TLSProfile       string
 	// RPMReserved is true when the RPM event was already inserted inside the
 	// selection transaction, so the caller must not record it again.
 	RPMReserved bool
@@ -141,6 +150,8 @@ type gatewayClaudeCodeIdentityContextKey struct{}
 type gatewayMCPToolNamesContextKey struct{}
 
 type gatewayDatelineNormalizationContextKey struct{}
+
+type gatewayOpenCodeScrubContextKey struct{}
 
 type gatewayFieldPassthroughContextKey struct{}
 
@@ -312,6 +323,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	r = r.WithContext(context.WithValue(r.Context(), gatewayClaudeCodeIdentityContextKey{}, key.ClaudeCodeIdentityEnabled))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayMCPToolNamesContextKey{}, key.MCPToolNamesEnabled))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayDatelineNormalizationContextKey{}, key.DatelineNormalization))
+	r = r.WithContext(context.WithValue(r.Context(), gatewayOpenCodeScrubContextKey{}, key.OpenCodeScrub))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayFieldPassthroughContextKey{}, gatewayFieldPassthrough{
 		ServiceTier:   key.ServiceTierPassthrough,
 		InferenceGeo:  key.InferenceGeoPassthrough,
@@ -488,7 +500,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			lastDispatchError = errors.New("CCMAX account proxy is unavailable")
 			continue
 		}
-		client, clientErr := clientForProxy(proxyURL)
+		client, clientErr := clientForAccountProxy(proxyURL, account)
 		if clientErr != nil {
 			releaseAccount()
 			lastDispatchError = clientErr
@@ -576,6 +588,21 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			}
 			continue
 		}
+		if key.ExtraUsageFailover && response.StatusCode == http.StatusBadRequest {
+			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+			response.Body.Close()
+			if extraUsageFailoverEligible(true, response.StatusCode, failureBody) {
+				queueRelease()
+				releaseAccount()
+				if !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+					a.captureAccountExtraUsageRejection(account.ID)
+				}
+				lastFailure = &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}
+				releaseStickyPin = true
+				continue
+			}
+			response.Body = io.NopCloser(bytes.NewReader(failureBody))
+		}
 		if response.StatusCode >= 400 && !prepared.Passthrough {
 			queueRelease()
 			failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
@@ -614,11 +641,15 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(forwardErr, &preOutputErr) {
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
-				if preOutputErr.status == http.StatusTooManyRequests {
-					_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
+				if extraUsageFailoverEligible(key.ExtraUsageFailover, preOutputErr.status, preOutputErr.body) {
+					a.captureAccountExtraUsageRejection(account.ID)
+				} else {
+					if preOutputErr.status == http.StatusTooManyRequests {
+						_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)
+					}
+					a.captureGatewayUpstreamState(account.ID, key.GroupID, envelope.Model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
+					a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
 				}
-				a.captureGatewayUpstreamState(account.ID, key.GroupID, envelope.Model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
-				a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
 			}
 			lastFailure = &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account, preOutput: true}
 			// Same rule as the header-status path above: rate limiting keeps the
@@ -896,6 +927,11 @@ func gatewayDatelineNormalization(ctx context.Context) bool {
 	return value
 }
 
+func gatewayOpenCodeScrub(ctx context.Context) bool {
+	value, _ := ctx.Value(gatewayOpenCodeScrubContextKey{}).(bool)
+	return value
+}
+
 func gatewayFieldPassthroughConfig(ctx context.Context) gatewayFieldPassthrough {
 	value, _ := ctx.Value(gatewayFieldPassthroughContextKey{}).(gatewayFieldPassthrough)
 	return value
@@ -1107,6 +1143,18 @@ func retryableGatewayStatus(status int) bool {
 	default:
 		return status == 529 || status >= http.StatusInternalServerError
 	}
+}
+
+func extraUsageFailoverEligible(enabled bool, status int, body []byte) bool {
+	return enabled && status == http.StatusBadRequest && accountExtraUsageRejected(upstreamErrorMessage(body))
+}
+
+func (a *app) captureAccountExtraUsageRejection(accountID int64) {
+	until := time.Now().UTC().Add(gatewayExtraUsageCooldown).Format(time.RFC3339Nano)
+	message := fmt.Sprintf("上游拒绝第三方 extra usage，已临时下线 %s", gatewayExtraUsageCooldown)
+	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, updated_at = `+nowSQL+`
+		WHERE id = ? AND (rate_limit_reset_at IS NULL OR rate_limit_reset_at < ?)`, until, message, accountID, until)
+	logDatabaseWriteError("record extra usage cooldown", err)
 }
 
 func doGatewayUpstreamRequest(r *http.Request, client *http.Client, request *http.Request, prepared claudePreparedRequest) (*http.Response, error) {
@@ -1725,11 +1773,11 @@ func bearerOrAPIKey(r *http.Request) string {
 func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
-	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, requestFormatFilter, quotaHeaderMasking, cacheCreationDetail, datelineNormalization, rateLimitDownweight, rateLimitSteppedCooldown, rateLimitDownweightStepped, fiveHourStaggerEnabled, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.request_format_filter_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.dateline_normalization_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.rate_limit_downweight_stepped_cooldown_enabled, g.rate_limit_downweight_base_minutes, g.rate_limit_downweight_step_minutes, g.five_hour_release_stagger_enabled, g.five_hour_release_stagger_min_minutes, g.five_hour_release_stagger_max_minutes, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, requestFormatFilter, quotaHeaderMasking, cacheCreationDetail, datelineNormalization, extraUsageFailover, openCodeScrub, rateLimitDownweight, rateLimitSteppedCooldown, rateLimitDownweightStepped, fiveHourStaggerEnabled, capacityQueueEnabled, strategyRequired int
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.request_format_filter_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.dateline_normalization_enabled, g.extra_usage_failover_enabled, g.opencode_scrub_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.rate_limit_downweight_stepped_cooldown_enabled, g.rate_limit_downweight_base_minutes, g.rate_limit_downweight_step_minutes, g.five_hour_release_stagger_enabled, g.five_hour_release_stagger_min_minutes, g.five_hour_release_stagger_max_minutes, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &requestFormatFilter, &quotaHeaderMasking, &cacheCreationDetail, &datelineNormalization, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &rateLimitDownweightStepped, &key.RateLimitDownweightBase, &key.RateLimitDownweightStep, &fiveHourStaggerEnabled, &key.FiveHourStaggerMin, &key.FiveHourStaggerMax, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &requestFormatFilter, &quotaHeaderMasking, &cacheCreationDetail, &datelineNormalization, &extraUsageFailover, &openCodeScrub, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &rateLimitDownweightStepped, &key.RateLimitDownweightBase, &key.RateLimitDownweightStep, &fiveHourStaggerEnabled, &key.FiveHourStaggerMin, &key.FiveHourStaggerMax, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1
@@ -1745,6 +1793,8 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	key.QuotaHeaderMasking = quotaHeaderMasking == 1
 	key.CacheCreationDetail = cacheCreationDetail == 1
 	key.DatelineNormalization = datelineNormalization == 1
+	key.ExtraUsageFailover = extraUsageFailover == 1
+	key.OpenCodeScrub = openCodeScrub == 1
 	key.RateLimitDownweightEnabled = rateLimitDownweight == 1
 	key.RateLimitSteppedCooldown = rateLimitSteppedCooldown == 1
 	key.RateLimitDownweightStepped = rateLimitDownweightStepped == 1

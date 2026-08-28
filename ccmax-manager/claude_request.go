@@ -88,6 +88,7 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		SpeedPassthrough:          fieldPassthrough.Speed,
 		AnthropicBetaPassthrough:  fieldPassthrough.AnthropicBeta,
 		PreserveClientDateline:    !gatewayDatelineNormalization(r.Context()),
+		OpenCodeScrub:             gatewayOpenCodeScrub(r.Context()),
 	})
 	if err != nil {
 		return claudePreparedRequest{}, err

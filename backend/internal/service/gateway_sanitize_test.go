@@ -12,3 +12,8 @@ func TestSanitizeOpenCodeText_RewritesCanonicalSentence(t *testing.T) {
 	got := sanitizeSystemText(in)
 	require.Equal(t, strings.TrimSpace(claudeCodeSystemPrompt), got)
 }
+
+func TestSanitizeOpenCodeText_LeavesPoweredByWhenNotScrubbing(t *testing.T) {
+	in := "You are powered by the model named claude-opus-4-6. The exact model ID is anthropic/claude-opus-4-6"
+	require.Equal(t, in, sanitizeSystemText(in))
+}

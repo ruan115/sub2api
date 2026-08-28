@@ -45,6 +45,10 @@ type claudeOAuthNormalizeOptions struct {
 	injectMetadata          bool
 	metadataUserID          string
 	stripSystemCacheControl bool
+	// skipSystemSanitize leaves client system text untouched so a later
+	// erase-only OpenCode scrub can delete fingerprints without first
+	// injecting a Claude Code identity sentence.
+	skipSystemSanitize bool
 }
 
 // sanitizeSystemText rewrites only the fixed OpenCode identity sentence (if present).
@@ -152,17 +156,19 @@ func normalizeClaudeOAuthSystemBody(body []byte, opts claudeOAuthNormalizeOption
 
 	switch {
 	case sys.Type == gjson.String:
-		sanitized := sanitizeSystemText(sys.String())
-		if sanitized != sys.String() {
-			if next, ok := setJSONValueBytes(out, "system", sanitized); ok {
-				out = next
-				modified = true
+		if !opts.skipSystemSanitize {
+			sanitized := sanitizeSystemText(sys.String())
+			if sanitized != sys.String() {
+				if next, ok := setJSONValueBytes(out, "system", sanitized); ok {
+					out = next
+					modified = true
+				}
 			}
 		}
 	case sys.IsArray():
 		index := 0
 		sys.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "text" {
+			if item.Get("type").String() == "text" && !opts.skipSystemSanitize {
 				textResult := item.Get("text")
 				if textResult.Exists() && textResult.Type == gjson.String {
 					text := textResult.String()

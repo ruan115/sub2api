@@ -941,6 +941,9 @@ func (a *app) createBatchAuthorizedAccount(input batchAuthorizationInput, authTy
 		return 0, err
 	}
 	accountID, _ := result.LastInsertId()
+	if err := seedAccountFingerprint(tx, accountID, nil); err != nil {
+		return 0, err
+	}
 	poolID := input.ProxyPoolID
 	requestedProxyID := proxyID
 	assignedProxyID, err := assignAccountProxy(tx, accountID, &poolID, &requestedProxyID, false)

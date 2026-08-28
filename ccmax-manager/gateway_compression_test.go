@@ -49,6 +49,45 @@ func TestClientForProxyUsesLongConfigurableTimeoutsAndConnectionCache(t *testing
 	}
 }
 
+func TestClientForAccountProxyUsesIsolatedNodeTLSClients(t *testing.T) {
+	firstAccount := gatewayAccount{ID: 91001, TLSProfile: defaultAccountTLSProfile}
+	secondAccount := gatewayAccount{ID: 91002, TLSProfile: defaultAccountTLSProfile}
+
+	first, err := clientForAccountProxy(nil, firstAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := clientForAccountProxy(nil, firstAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := clientForAccountProxy(nil, secondAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again {
+		t.Fatal("same account did not reuse its upstream transport")
+	}
+	if first == second {
+		t.Fatal("different accounts shared an upstream transport")
+	}
+
+	decompressing, ok := first.Transport.(decompressingRoundTripper)
+	if !ok {
+		t.Fatalf("transport type = %T", first.Transport)
+	}
+	schemes, ok := decompressing.base.(*accountSchemeRoundTripper)
+	if !ok {
+		t.Fatalf("base transport type = %T", decompressing.base)
+	}
+	if schemes.secure == nil || schemes.secure.DialTLSContext == nil {
+		t.Fatal("account HTTPS transport does not use a custom TLS dialer")
+	}
+	if schemes.secure.ForceAttemptHTTP2 {
+		t.Fatal("Node.js 24 profile must keep the captured HTTP/1.1 ALPN")
+	}
+}
+
 func TestClientForProxyDecompressesExplicitAcceptEncoding(t *testing.T) {
 	payload := []byte(`{"id":"msg_compressed","usage":{"input_tokens":17,"output_tokens":4}}`)
 	for _, encoding := range []string{"gzip", "br", "deflate", "zstd"} {

@@ -62,6 +62,8 @@ func (a *app) migrateMySQL() error {
 				quota_header_masking_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				cache_creation_detail_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				dateline_normalization_enabled TINYINT(1) NOT NULL DEFAULT 1,
+				extra_usage_failover_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				opencode_scrub_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
 				rate_limit_downweight_enabled TINYINT(1) NOT NULL DEFAULT 1,
 				rate_limit_cooling_threshold INT NOT NULL DEFAULT 3,
@@ -399,6 +401,7 @@ func (a *app) migrateMySQL() error {
 		`CREATE TABLE IF NOT EXISTS account_fingerprints (
 			account_id BIGINT NOT NULL PRIMARY KEY,
 			fingerprint_json LONGTEXT NOT NULL,
+			tls_profile VARCHAR(64) NOT NULL DEFAULT 'nodejs-24',
 			created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			CONSTRAINT fk_fingerprints_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
@@ -629,6 +632,15 @@ func (a *app) migrateMySQL() error {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "dateline_normalization_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "extra_usage_failover_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "opencode_scrub_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "account_fingerprints", "tls_profile", "VARCHAR(64) NOT NULL DEFAULT 'nodejs-24'"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_sessions", "last_input_tokens", "BIGINT NOT NULL DEFAULT 0"); err != nil {

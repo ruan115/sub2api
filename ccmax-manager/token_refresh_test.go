@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -197,5 +198,42 @@ func TestRefreshInvalidGrantRecoversWhenDatabaseTokenAdvanced(t *testing.T) {
 	}
 	if got.Status != "active" || got.AuthStatus != "valid" {
 		t.Fatalf("refresh race incorrectly invalidated account: %+v", got)
+	}
+}
+
+func TestRefreshAccountOnHoldIsRecordedAsOAuth401(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	var created account
+	putJSON(t, handler, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "account-on-hold", "platform": "anthropic", "auth_type": "oauth",
+		"credentials": map[string]any{"access_token": "held-access", "refresh_token": "held-refresh", "expires_at": time.Now().Add(time.Hour).Unix()},
+		"extra":       map[string]any{}, "status": "active", "schedulable": true, "concurrency": 1,
+		"priority": 10, "rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1, "proxy_id": proxyID,
+	}, http.StatusCreated, &created)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "account_on_hold"})
+	}))
+	defer upstream.Close()
+	previousEndpoint := claudeTokenEndpoint
+	claudeTokenEndpoint = upstream.URL
+	defer func() { claudeTokenEndpoint = previousEndpoint }()
+
+	base := gatewayAccount{ID: created.ID, AuthType: "oauth", CredentialsJSON: `{"access_token":"held-access","refresh_token":"held-refresh"}`, ProxyID: sql.NullInt64{Int64: proxyID, Valid: true}}
+	if _, err := a.refreshGatewayAccountToken(context.Background(), base, true); err == nil {
+		t.Fatal("account_on_hold refresh unexpectedly succeeded")
+	}
+	got, err := a.getAccount(created.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "error" || got.AuthStatus != "reauth_required" || !strings.HasPrefix(got.AuthError, "OAuth 401:") {
+		t.Fatalf("account_on_hold account not classified as OAuth 401: %+v", got)
+	}
+	if cause := accountInvalidationCause(got.AuthError); cause != deauthCauseOAuth401 {
+		t.Fatalf("account_on_hold cause = %q, want %q", cause, deauthCauseOAuth401)
 	}
 }

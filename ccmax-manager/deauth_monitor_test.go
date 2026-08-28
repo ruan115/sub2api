@@ -10,17 +10,18 @@ import (
 
 func TestAccountInvalidationCauseBucketsUpstreamReasons(t *testing.T) {
 	cases := map[string]string{
-		"OAuth 401: This organization has been disabled.":                   deauthCauseOAuth401,
-		"upstream authentication failed: invalid bearer token":              deauthCauseOAuth401,
-		"OAuth access token was rejected and no refresh token is available": deauthCauseOAuth401,
-		"Claude token refresh failed (status 401): invalid_grant":           deauthCauseOAuth401,
-		"Claude token refresh failed (status 400): response was empty":      deauthCauseRefresh,
-		"upstream access forbidden: region is not supported":                deauthCauseForbidden,
-		"upstream account action required: identity verification required":  deauthCauseActionNeed,
-		"account has no OAuth access token":                                 deauthCauseNoCredetial,
-		"管理员手动置为待重新授权":                                                      deauthCauseManual,
-		"":                                                                  deauthCauseOther,
-		"something nobody has seen before":                                  deauthCauseOther,
+		"OAuth 401: This organization has been disabled.":                          deauthCauseOAuth401,
+		"upstream authentication failed: invalid bearer token":                     deauthCauseOAuth401,
+		"OAuth access token was rejected and no refresh token is available":        deauthCauseOAuth401,
+		"Claude token refresh failed (status 401): invalid_grant":                  deauthCauseOAuth401,
+		"Claude token refresh failed (status 400): invalid_grant: account_on_hold": deauthCauseOAuth401,
+		"Claude token refresh failed (status 400): response was empty":             deauthCauseRefresh,
+		"upstream access forbidden: region is not supported":                       deauthCauseForbidden,
+		"upstream account action required: identity verification required":         deauthCauseActionNeed,
+		"account has no OAuth access token":                                        deauthCauseNoCredetial,
+		"管理员手动置为待重新授权":                                                             deauthCauseManual,
+		"":                                                                         deauthCauseOther,
+		"something nobody has seen before":                                         deauthCauseOther,
 	}
 	for reason, want := range cases {
 		if got := accountInvalidationCause(reason); got != want {

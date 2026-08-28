@@ -157,6 +157,23 @@ func (e *claudeRefreshError) permanent() bool {
 	return e.Status == http.StatusBadRequest || e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
 }
 
+func claudeRefreshFailureReason(err error) string {
+	reason := strings.TrimSpace(err.Error())
+	var refreshErr *claudeRefreshError
+	if !errors.As(err, &refreshErr) {
+		return reason
+	}
+	detail := strings.ToLower(strings.TrimSpace(refreshErr.Detail))
+	if refreshErr.Status == http.StatusUnauthorized ||
+		strings.Contains(detail, "invalid_grant") ||
+		strings.Contains(detail, "account_on_hold") ||
+		strings.Contains(detail, "access token has been revoked") ||
+		strings.Contains(detail, "access token was revoked") {
+		return "OAuth 401: " + reason
+	}
+	return reason
+}
+
 func claudeRefreshFailureDetail(body string) string {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -882,11 +899,12 @@ func (a *app) refreshGatewayAccountToken(ctx context.Context, account gatewayAcc
 	if err != nil {
 		var refreshErr *claudeRefreshError
 		if errors.As(err, &refreshErr) && refreshErr.permanent() {
+			failureReason := claudeRefreshFailureReason(err)
 			latest, reloadErr := a.reloadGatewayAccountToken(account)
 			if reloadErr == nil && gatewayAccountTokenAdvanced(latest, gatewayAccountAccessToken(account), refreshToken) {
 				return latest, nil
 			}
-			if !a.markAccountReauthIfRefreshTokenCurrent(account.ID, err.Error(), refreshToken, true) {
+			if !a.markAccountReauthIfRefreshTokenCurrent(account.ID, failureReason, refreshToken, true) {
 				if latest, reloadErr = a.reloadGatewayAccountToken(account); reloadErr == nil && gatewayAccountTokenAdvanced(latest, gatewayAccountAccessToken(account), refreshToken) {
 					return latest, nil
 				}

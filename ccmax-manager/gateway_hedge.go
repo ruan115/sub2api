@@ -326,7 +326,7 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	if err != nil {
 		return gatewayHedgeOutcome{err: errors.New("CCMAX account proxy is unavailable")}
 	}
-	client, err := clientForProxy(proxyURL)
+	client, err := clientForAccountProxy(proxyURL, account)
 	if err != nil {
 		return gatewayHedgeOutcome{err: err}
 	}
@@ -366,6 +366,12 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 	}
 	if response.StatusCode >= 400 {
 		failureBody, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		if extraUsageFailoverEligible(key.ExtraUsageFailover, response.StatusCode, failureBody) {
+			if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
+				a.captureAccountExtraUsageRejection(account.ID)
+			}
+			return gatewayHedgeOutcome{failure: &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}}
+		}
 		if !oauthRefreshHandled && !skipGatewayDefaultErrorHandling(prepared, response.StatusCode) {
 			a.captureAccountUpstreamFailure(account, response.StatusCode, failureBody)
 		}
@@ -377,8 +383,12 @@ func (a *app) executeGatewayHedgeCandidate(r *http.Request, key gatewayKey, body
 		var preOutputErr *gatewayPreOutputStreamError
 		if errors.As(bootstrapErr, &preOutputErr) {
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
-				a.captureGatewayUpstreamState(account.ID, key.GroupID, model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
-				a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
+				if extraUsageFailoverEligible(key.ExtraUsageFailover, preOutputErr.status, preOutputErr.body) {
+					a.captureAccountExtraUsageRejection(account.ID)
+				} else {
+					a.captureGatewayUpstreamState(account.ID, key.GroupID, model, key.OverloadCooldownSeconds, key.rateLimitPolicy(), &http.Response{StatusCode: preOutputErr.status, Header: response.Header.Clone()})
+					a.captureAccountUpstreamFailure(account, preOutputErr.status, preOutputErr.body)
+				}
 			}
 			return gatewayHedgeOutcome{failure: &gatewayUpstreamFailure{status: preOutputErr.status, header: response.Header.Clone(), body: preOutputErr.body, account: account}, err: bootstrapErr}
 		}

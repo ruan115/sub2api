@@ -32,6 +32,7 @@ func decodeCompatibilityFingerprint(raw any) *sub2service.Fingerprint {
 }
 
 func (a *app) ensureGatewayAccountFingerprint(account gatewayAccount, headers http.Header) (gatewayAccount, error) {
+	account.TLSProfile = normalizeAccountTLSProfile(account.TLSProfile)
 	if !gatewayAccountUsesOAuth(account) {
 		return account, nil
 	}
@@ -46,10 +47,11 @@ func (a *app) ensureGatewayAccountFingerprint(account gatewayAccount, headers ht
 		return account, err
 	}
 	account.ExtraJSON = latestExtra
-	var storedJSON string
-	rowErr := a.db.QueryRow(`SELECT fingerprint_json FROM account_fingerprints WHERE account_id = ?`, account.ID).Scan(&storedJSON)
+	var storedJSON, storedTLSProfile string
+	rowErr := a.db.QueryRow(`SELECT fingerprint_json, tls_profile FROM account_fingerprints WHERE account_id = ?`, account.ID).Scan(&storedJSON, &storedTLSProfile)
 	var existing *sub2service.Fingerprint
 	if rowErr == nil {
+		account.TLSProfile = normalizeAccountTLSProfile(storedTLSProfile)
 		var raw any
 		if json.Unmarshal([]byte(storedJSON), &raw) == nil {
 			existing = decodeCompatibilityFingerprint(raw)
@@ -77,8 +79,9 @@ func (a *app) ensureGatewayAccountFingerprint(account gatewayAccount, headers ht
 		return account, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO account_fingerprints (account_id, fingerprint_json) VALUES (?, ?)
-		ON CONFLICT(account_id) DO UPDATE SET fingerprint_json = excluded.fingerprint_json, updated_at = `+nowSQL, account.ID, string(encoded)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO account_fingerprints (account_id, fingerprint_json, tls_profile) VALUES (?, ?, ?)
+		ON CONFLICT(account_id) DO UPDATE SET fingerprint_json = excluded.fingerprint_json, updated_at = `+nowSQL,
+		account.ID, string(encoded), account.TLSProfile); err != nil {
 		return account, err
 	}
 	if hasLegacy {
@@ -97,4 +100,49 @@ func (a *app) ensureGatewayAccountFingerprint(account gatewayAccount, headers ht
 	}
 	account.Fingerprint = resolved
 	return account, nil
+}
+
+func seedAccountFingerprint(tx *databaseTx, accountID int64, headers http.Header) error {
+	resolved, _ := sub2service.ResolveCCMaxCompatibilityFingerprint(headers, nil)
+	encoded, err := json.Marshal(resolved)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT OR IGNORE INTO account_fingerprints (account_id, fingerprint_json, tls_profile) VALUES (?, ?, ?)`,
+		accountID, string(encoded), defaultAccountTLSProfile)
+	return err
+}
+
+func (a *app) backfillAccountFingerprints() error {
+	rows, err := a.db.Query(`SELECT a.id FROM accounts a LEFT JOIN account_fingerprints f ON f.account_id = a.id
+		WHERE a.deleted_at IS NULL AND f.account_id IS NULL ORDER BY a.id`)
+	if err != nil {
+		return err
+	}
+	var accountIDs []int64
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil {
+			rows.Close()
+			return err
+		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, accountID := range accountIDs {
+		if err := seedAccountFingerprint(tx, accountID, nil); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

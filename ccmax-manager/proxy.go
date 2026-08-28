@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	xproxy "golang.org/x/net/proxy"
 )
 
@@ -117,6 +118,7 @@ var proxyTestEndpoint = "https://api.ipify.org?format=json"
 const (
 	defaultUpstreamResponseHeaderTimeout = 15 * time.Minute
 	defaultUpstreamRequestTimeout        = 0
+	defaultAccountTLSProfile             = "nodejs-24"
 	deadProxyPoolKind                    = "dead"
 	deadProxyPoolName                    = "死亡 IP 池"
 	deadProxyReason                      = "死亡账号释放，禁止重新分配"
@@ -124,6 +126,8 @@ const (
 
 type upstreamProxyClientKey struct {
 	proxyURLHash          string
+	accountID             int64
+	tlsProfile            string
 	responseHeaderTimeout time.Duration
 	requestTimeout        time.Duration
 }
@@ -1725,6 +1729,53 @@ func clientForProxy(proxyURL *url.URL) (*http.Client, error) {
 	return client, nil
 }
 
+func clientForAccountProxy(proxyURL *url.URL, account gatewayAccount) (*http.Client, error) {
+	if account.ID <= 0 {
+		return nil, errors.New("account-scoped upstream client requires an account ID")
+	}
+	responseHeaderTimeout := durationFromEnv("CCMAX_UPSTREAM_RESPONSE_HEADER_TIMEOUT", defaultUpstreamResponseHeaderTimeout)
+	requestTimeout := durationFromEnv("CCMAX_UPSTREAM_REQUEST_TIMEOUT", defaultUpstreamRequestTimeout)
+	profileKey := normalizeAccountTLSProfile(account.TLSProfile)
+	key := upstreamProxyClientKey{
+		accountID:             account.ID,
+		tlsProfile:            profileKey,
+		responseHeaderTimeout: responseHeaderTimeout,
+		requestTimeout:        requestTimeout,
+	}
+	if proxyURL != nil {
+		key.proxyURLHash = hashToken(proxyURL.String())
+	}
+	if cached, ok := upstreamProxyClients.Load(key); ok {
+		return cached.(*http.Client), nil
+	}
+
+	client, err := newClientForAccountProxy(proxyURL, profileKey, responseHeaderTimeout, requestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	actual, loaded := upstreamProxyClients.LoadOrStore(key, client)
+	if loaded {
+		client.CloseIdleConnections()
+		return actual.(*http.Client), nil
+	}
+	return client, nil
+}
+
+func normalizeAccountTLSProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", defaultAccountTLSProfile:
+		return defaultAccountTLSProfile
+	default:
+		// Only profiles captured from a real client belong here. Falling back to
+		// the vetted Node.js profile is safer than synthesizing a unique JA3.
+		return defaultAccountTLSProfile
+	}
+}
+
+func accountTLSFingerprintProfile(profileKey string) *tlsfingerprint.Profile {
+	return &tlsfingerprint.Profile{Name: "CCMAX " + normalizeAccountTLSProfile(profileKey)}
+}
+
 func durationFromEnv(key string, fallback time.Duration) time.Duration {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -1738,7 +1789,94 @@ func durationFromEnv(key string, fallback time.Duration) time.Duration {
 }
 
 func newClientForProxy(proxyURL *url.URL, responseHeaderTimeout, requestTimeout time.Duration) (*http.Client, error) {
-	transport := &http.Transport{
+	transport := newUpstreamTransport(responseHeaderTimeout)
+	if proxyURL != nil {
+		switch strings.ToLower(proxyURL.Scheme) {
+		case "http", "https":
+			transport.Proxy = http.ProxyURL(proxyURL)
+		case "socks5", "socks5h":
+			dialContext, err := proxyDialContext(proxyURL)
+			if err != nil {
+				return nil, err
+			}
+			transport.DialContext = dialContext
+		case sshProxyScheme:
+			transport.DialContext = sshProxyDialContext(proxyURL)
+		default:
+			return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
+		}
+	}
+	return &http.Client{Transport: decompressingRoundTripper{base: transport}, Timeout: requestTimeout}, nil
+}
+
+type accountSchemeRoundTripper struct {
+	plain  *http.Transport
+	secure *http.Transport
+}
+
+func (t *accountSchemeRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil {
+		return nil, errors.New("upstream request URL is required")
+	}
+	if strings.EqualFold(request.URL.Scheme, "https") {
+		return t.secure.RoundTrip(request)
+	}
+	return t.plain.RoundTrip(request)
+}
+
+func (t *accountSchemeRoundTripper) CloseIdleConnections() {
+	if t == nil {
+		return
+	}
+	if t.plain != nil {
+		t.plain.CloseIdleConnections()
+	}
+	if t.secure != nil {
+		t.secure.CloseIdleConnections()
+	}
+}
+
+func newClientForAccountProxy(proxyURL *url.URL, profileKey string, responseHeaderTimeout, requestTimeout time.Duration) (*http.Client, error) {
+	plain := newUpstreamTransport(responseHeaderTimeout)
+	secure := newUpstreamTransport(responseHeaderTimeout)
+	secure.ForceAttemptHTTP2 = false
+	profile := accountTLSFingerprintProfile(profileKey)
+
+	var tlsDialContext func(context.Context, string, string) (net.Conn, error)
+	if proxyURL == nil {
+		tlsDialContext = tlsfingerprint.NewDialer(profile, secure.DialContext).DialTLSContext
+	} else {
+		switch strings.ToLower(proxyURL.Scheme) {
+		case "http", "https":
+			// Plain HTTP still uses net/http's proxy support. HTTPS uses a
+			// dedicated CONNECT tunnel so the target handshake is uTLS rather
+			// than Go's crypto/tls handshake.
+			plain.Proxy = http.ProxyURL(proxyURL)
+			tlsDialContext = tlsfingerprint.NewHTTPProxyDialer(profile, proxyURL).DialTLSContext
+		case "socks5", "socks5h":
+			dialContext, err := proxyDialContext(proxyURL)
+			if err != nil {
+				return nil, err
+			}
+			plain.DialContext = dialContext
+			secure.DialContext = dialContext
+			tlsDialContext = tlsfingerprint.NewDialer(profile, dialContext).DialTLSContext
+		case sshProxyScheme:
+			dialContext := sshProxyDialContext(proxyURL)
+			plain.DialContext = dialContext
+			secure.DialContext = dialContext
+			tlsDialContext = tlsfingerprint.NewDialer(profile, dialContext).DialTLSContext
+		default:
+			return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
+		}
+	}
+	secure.DialTLSContext = withTLSHandshakeTimeout(tlsDialContext, 10*time.Second)
+	roundTripper := &accountSchemeRoundTripper{plain: plain, secure: secure}
+	return &http.Client{Transport: decompressingRoundTripper{base: roundTripper}, Timeout: requestTimeout}, nil
+}
+
+func newUpstreamTransport(responseHeaderTimeout time.Duration) *http.Transport {
+	return &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -1748,29 +1886,30 @@ func newClientForProxy(proxyURL *url.URL, responseHeaderTimeout, requestTimeout 
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
-	if proxyURL != nil {
-		switch strings.ToLower(proxyURL.Scheme) {
-		case "http", "https":
-			transport.Proxy = http.ProxyURL(proxyURL)
-		case "socks5", "socks5h":
-			dialer, err := xproxy.FromURL(proxyURL, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second})
-			if err != nil {
-				return nil, err
-			}
-			if contextDialer, ok := dialer.(xproxy.ContextDialer); ok {
-				transport.DialContext = contextDialer.DialContext
-			} else {
-				transport.DialContext = func(_ context.Context, network, address string) (net.Conn, error) {
-					return dialer.Dial(network, address)
-				}
-			}
-		case sshProxyScheme:
-			transport.DialContext = sshProxyDialContext(proxyURL)
-		default:
-			return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
-		}
+}
+
+func proxyDialContext(proxyURL *url.URL) (func(context.Context, string, string) (net.Conn, error), error) {
+	dialer, err := xproxy.FromURL(proxyURL, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second})
+	if err != nil {
+		return nil, err
 	}
-	return &http.Client{Transport: decompressingRoundTripper{base: transport}, Timeout: requestTimeout}, nil
+	if contextDialer, ok := dialer.(xproxy.ContextDialer); ok {
+		return contextDialer.DialContext, nil
+	}
+	return func(_ context.Context, network, address string) (net.Conn, error) {
+		return dialer.Dial(network, address)
+	}, nil
+}
+
+func withTLSHandshakeTimeout(dial func(context.Context, string, string) (net.Conn, error), timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if timeout <= 0 {
+			return dial(ctx, network, address)
+		}
+		handshakeContext, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return dial(handshakeContext, network, address)
+	}
 }
 
 func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyID *int64, auto bool) (*int64, error) {

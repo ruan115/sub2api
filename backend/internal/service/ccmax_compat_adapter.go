@@ -69,6 +69,10 @@ type CCMaxCompatibilityInput struct {
 	// token-parity compatibility check) should enable it, accepting that the
 	// watermark then reaches Anthropic.
 	PreserveClientDateline bool
+	// OpenCodeScrub deletes OpenCode fingerprint lines (especially
+	// "You are powered by the model named ...") without injecting any
+	// replacement system prompt. Default false leaves the client text as-is.
+	OpenCodeScrub bool
 }
 
 // CCMaxCompatibilityPrepared is the exact wire request produced by the
@@ -253,7 +257,10 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 	if input.CountTokens {
 		body = StripEmptyTextBlocks(body)
 		if mimic {
-			body, model = normalizeClaudeOAuthRequestBody(body, model, claudeOAuthNormalizeOptions{stripSystemCacheControl: true})
+			body, model = normalizeClaudeOAuthRequestBody(body, model, claudeOAuthNormalizeOptions{
+				stripSystemCacheControl: true,
+				skipSystemSanitize:      input.OpenCodeScrub,
+			})
 			if toolRewrite = buildCCMaxToolRewrite(body, input); toolRewrite != nil {
 				body = applyToolNameRewriteToBody(body, toolRewrite)
 			} else {
@@ -271,7 +278,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 			} else {
 				body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
 			}
-			opts := claudeOAuthNormalizeOptions{}
+			opts := claudeOAuthNormalizeOptions{skipSystemSanitize: input.OpenCodeScrub}
 			if metadataUserID == "" && input.Fingerprint != nil {
 				userID := strings.TrimSpace(input.ClaudeUserID)
 				if userID == "" {
@@ -302,6 +309,11 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 			}
 		}
 		body = enforceCacheControlLimit(body)
+	}
+	if input.OAuth && input.OpenCodeScrub {
+		if next, changed := anthropicfp.ScrubOpenCode(body); changed {
+			body = next
+		}
 	}
 	if input.NormalRequestMode && input.OAuth {
 		body = defaultEphemeralCacheControlTTL(body, claude.DefaultCacheControlTTL)

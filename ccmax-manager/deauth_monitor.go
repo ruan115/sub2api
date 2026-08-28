@@ -55,7 +55,9 @@ func accountInvalidationCause(reason string) string {
 		strings.Contains(text, "upstream authentication failed"),
 		strings.Contains(text, "access token was rejected"),
 		strings.Contains(text, "access token has been revoked"),
-		strings.Contains(text, "access token was revoked"):
+		strings.Contains(text, "access token was revoked"),
+		strings.Contains(text, "invalid_grant"),
+		strings.Contains(text, "account_on_hold"):
 		return deauthCauseOAuth401
 	case strings.Contains(text, "403"), strings.Contains(text, "forbidden"):
 		return deauthCauseForbidden

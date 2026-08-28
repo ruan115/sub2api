@@ -21,7 +21,7 @@ func TestMySQLQueryRewriteCoversRuntimeSQLiteSyntax(t *testing.T) {
 		`SELECT COALESCE(json_extract(credentials_json, '$.refresh_token'), '') FROM accounts`,
 		`INSERT OR IGNORE INTO feature_migrations (name) VALUES ('migration')`,
 		`INSERT INTO account_model_cooldowns (account_id, model, reset_at) VALUES (?, ?, ?) ON CONFLICT(account_id, model) DO UPDATE SET reset_at = excluded.reset_at, updated_at = ` + nowSQL,
-		`INSERT INTO account_fingerprints (account_id, fingerprint_json) VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET fingerprint_json = excluded.fingerprint_json, updated_at = ` + nowSQL,
+		`INSERT INTO account_fingerprints (account_id, fingerprint_json, tls_profile) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET fingerprint_json = excluded.fingerprint_json, updated_at = ` + nowSQL,
 		`INSERT INTO account_inflight (account_id, requests) VALUES (?, 1) ON CONFLICT(account_id) DO UPDATE SET requests = requests + 1`,
 		`INSERT INTO dispatch_sessions (session_hash, api_key_id, account_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_hash, api_key_id) DO UPDATE SET account_id = excluded.account_id, expires_at = excluded.expires_at`,
 		`INSERT INTO account_rpm_thresholds (account_id, rpm_limit, reset_at) VALUES (?, ?, ?)

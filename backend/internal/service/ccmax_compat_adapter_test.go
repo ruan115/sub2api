@@ -334,6 +334,32 @@ func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistor
 // fingerprint normalization erases it (ASCII apostrophe + hyphen), which costs
 // one token. PreserveClientDateline forwards it verbatim so a token-parity
 // compatibility group keeps the client's exact count, accepting the leak.
+func TestPrepareCCMaxCompatibilityRequestOpenCodeScrubBySwitch(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"You are OpenCode, the best coding agent on the planet.\nYou are powered by the model named claude-opus-4-6. The exact model ID is anthropic/claude-opus-4-6\n(Assuming you're using OpenCode) You need to use this merdian plugin: https://github.com/rynfar/meridian-plugin-opencode-scrub\nKeep client instructions."}],"max_tokens":64,"messages":[{"role":"user","content":"I sometimes use OpenCode locally."}]}`)
+
+	erased, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true, AccessToken: "token",
+		NormalRequestMode: true, OpenCodeScrub: true,
+	})
+	require.NoError(t, err)
+	system := gjson.GetBytes(erased.Body, "system").Raw
+	require.NotContains(t, system, "You are OpenCode")
+	require.NotContains(t, system, "You are Claude Code")
+	require.NotContains(t, system, "You are powered by the model named")
+	require.NotContains(t, system, "Assuming you're using OpenCode")
+	require.NotContains(t, system, "meridian-plugin-opencode-scrub")
+	require.Contains(t, system, "Keep client instructions.")
+	require.Contains(t, gjson.GetBytes(erased.Body, "messages.0.content").String(), "I sometimes use OpenCode locally.")
+
+	passthrough, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true, AccessToken: "token",
+		NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	passed := gjson.GetBytes(passthrough.Body, "system").Raw
+	require.Contains(t, passed, "You are powered by the model named")
+}
+
 func TestPrepareCCMaxCompatibilityRequestDatelineNormalizationSwitch(t *testing.T) {
 	raw := "Today\u2019s date is 2026/04/17."
 	canonical := "Today's date is 2026-04-17."

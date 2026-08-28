@@ -147,6 +147,24 @@ func TestAccountAuthenticationFailureIsTerminal(t *testing.T) {
 	}
 }
 
+func TestAccountExtraUsageRejectedMessages(t *testing.T) {
+	tests := []struct {
+		message string
+		want    bool
+	}{
+		{message: "Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going.", want: true},
+		{message: "THIRD-PARTY APPS NOW DRAW FROM YOUR EXTRA USAGE", want: true},
+		{message: "Third-party apps now draw from extra usage.", want: true},
+		{message: "max_tokens must be positive"},
+		{message: "Identity verification is required to continue."},
+	}
+	for _, tt := range tests {
+		if got := accountExtraUsageRejected(tt.message); got != tt.want {
+			t.Fatalf("accountExtraUsageRejected(%q)=%t want=%t", tt.message, got, tt.want)
+		}
+	}
+}
+
 func TestAccountRequiresUpstreamActionMessages(t *testing.T) {
 	tests := []struct {
 		message string

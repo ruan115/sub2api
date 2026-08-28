@@ -5,12 +5,15 @@ package tlsfingerprint
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
@@ -50,6 +53,15 @@ type HTTPProxyDialer struct {
 type SOCKS5ProxyDialer struct {
 	profile  *Profile
 	proxyURL *url.URL
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(buffer []byte) (int, error) {
+	return c.reader.Read(buffer)
 }
 
 // Default TLS fingerprint values captured from Claude Code (Node.js 24.x)
@@ -197,13 +209,21 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 		}
 	}
 
-	dialer := &net.Dialer{}
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		slog.Debug("tls_fingerprint_http_proxy_connect_failed", "error", err)
 		return nil, fmt.Errorf("connect to proxy: %w", err)
 	}
 	slog.Debug("tls_fingerprint_http_proxy_connected", "proxy_addr", proxyAddr)
+	if strings.EqualFold(d.proxyURL.Scheme, "https") {
+		proxyTLS := tls.Client(conn, &tls.Config{ServerName: d.proxyURL.Hostname(), NextProtos: []string{"http/1.1"}})
+		if err := proxyTLS.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("TLS handshake with HTTPS proxy: %w", err)
+		}
+		conn = proxyTLS
+	}
 
 	// Step 2: Send CONNECT request to establish tunnel
 	req := &http.Request{
@@ -245,6 +265,9 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 		return nil, fmt.Errorf("proxy CONNECT failed: %s", resp.Status)
 	}
 	slog.Debug("tls_fingerprint_http_proxy_tunnel_established")
+	if br.Buffered() > 0 {
+		conn = &bufferedConn{Conn: conn, reader: br}
+	}
 
 	// Step 4: Perform TLS handshake on the tunnel with utls fingerprint
 	return performTLSHandshake(ctx, conn, d.profile, addr)
