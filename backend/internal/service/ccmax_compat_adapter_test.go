@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -123,6 +124,41 @@ func TestPrepareCCMaxCompatibilityRequestUsesOriginalOAuthPipeline(t *testing.T)
 	require.Equal(t, claudeCodeSystemPrompt, gjson.GetBytes(prepared.Body, "system.1.text").String())
 	require.Contains(t, getHeaderRaw(prepared.Headers, "anthropic-beta"), "context-management-2025-06-27")
 	require.Less(t, bytes.Index(prepared.Body, []byte(`"unknown"`)), bytes.Index(prepared.Body, []byte(`"model"`)))
+}
+
+func TestPrepareCCMaxCompatibilityRequestAlignsBillingWithFinalMimicUserAgent(t *testing.T) {
+	fingerprint := &Fingerprint{
+		ClientID:      strings.Repeat("a", 64),
+		UserAgent:     "claude-cli/2.1.247 (external, cli)",
+		StainlessLang: "js", StainlessPackageVersion: "0.94.0", StainlessOS: "Linux",
+		StainlessArch: "arm64", StainlessRuntime: "node", StainlessRuntimeVersion: "v24.3.0",
+	}
+	for _, test := range []struct {
+		name       string
+		configured string
+		want       string
+	}{
+		{name: "built-in mimic version", want: claude.CLICurrentVersion},
+		{name: "group configured version", configured: "2.1.238", want: "2.1.238"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+				Body:          []byte(`{"model":"claude-opus-4-8","system":[{"type":"text","text":"client system"}],"max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+				ClientHeaders: http.Header{"Content-Type": {"application/json"}},
+				Model:         "claude-opus-4-8", Stream: true, OAuth: true, AccessToken: "oauth-token",
+				AccountID: 485, AccountUUID: "11111111-1111-4111-8111-111111111111", Fingerprint: fingerprint,
+				ClaudeCLIVersion: test.configured,
+			})
+			require.NoError(t, err)
+			require.True(t, prepared.Mimic)
+
+			finalVersion := ExtractCLIVersion(getHeaderRaw(prepared.Headers, "User-Agent"))
+			require.Equal(t, test.want, finalVersion)
+			billing := gjson.GetBytes(prepared.Body, "system.0.text").String()
+			require.Contains(t, billing, "cc_version="+finalVersion+".")
+			require.NotContains(t, billing, "cc_version=2.1.247")
+		})
+	}
 }
 
 func TestPrepareCCMaxCompatibilityRequestAppliesGroupFieldPassthrough(t *testing.T) {

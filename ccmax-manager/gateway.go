@@ -55,6 +55,7 @@ type gatewayKey struct {
 	ExpiresAt                  sql.NullString
 	NormalRequestMode          bool
 	ClaudeCodeIdentityEnabled  bool
+	ClaudeCLIVersion           string
 	StreamHedgeEnabled         bool
 	AdaptiveHedgeEnabled       bool
 	RPMDispatchEnabled         bool
@@ -146,6 +147,8 @@ type gatewayProtocolContextKey struct{}
 type gatewayNormalRequestModeContextKey struct{}
 
 type gatewayClaudeCodeIdentityContextKey struct{}
+
+type gatewayClaudeCLIVersionContextKey struct{}
 
 type gatewayMCPToolNamesContextKey struct{}
 
@@ -321,6 +324,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	r = r.WithContext(context.WithValue(r.Context(), gatewayAPIKeyContextKey{}, key.ID))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayNormalRequestModeContextKey{}, key.NormalRequestMode))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayClaudeCodeIdentityContextKey{}, key.ClaudeCodeIdentityEnabled))
+	r = r.WithContext(context.WithValue(r.Context(), gatewayClaudeCLIVersionContextKey{}, key.ClaudeCLIVersion))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayMCPToolNamesContextKey{}, key.MCPToolNamesEnabled))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayDatelineNormalizationContextKey{}, key.DatelineNormalization))
 	r = r.WithContext(context.WithValue(r.Context(), gatewayOpenCodeScrubContextKey{}, key.OpenCodeScrub))
@@ -916,6 +920,11 @@ func gatewayNormalRequestMode(ctx context.Context) bool {
 
 func gatewayClaudeCodeIdentity(ctx context.Context) bool {
 	value, _ := ctx.Value(gatewayClaudeCodeIdentityContextKey{}).(bool)
+	return value
+}
+
+func gatewayClaudeCLIVersion(ctx context.Context) string {
+	value, _ := ctx.Value(gatewayClaudeCLIVersionContextKey{}).(string)
 	return value
 }
 
@@ -1781,10 +1790,10 @@ func (a *app) authenticateGatewayKey(secret string) (gatewayKey, error) {
 	var key gatewayKey
 	var normalRequestMode, claudeCodeIdentity, streamHedgeEnabled, adaptiveHedgeEnabled, mcpToolNames int
 	var serviceTierPassthrough, inferenceGeoPassthrough, speedPassthrough, anthropicBetaPassthrough, rejectAnthropicDowngrade, rejectDistillation, requestFormatFilter, quotaHeaderMasking, cacheCreationDetail, datelineNormalization, extraUsageFailover, openCodeScrub, rateLimitDownweight, rateLimitSteppedCooldown, rateLimitDownweightStepped, fiveHourStaggerEnabled, capacityQueueEnabled, strategyRequired int
-	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.request_format_filter_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.dateline_normalization_enabled, g.extra_usage_failover_enabled, g.opencode_scrub_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.rate_limit_downweight_stepped_cooldown_enabled, g.rate_limit_downweight_base_minutes, g.rate_limit_downweight_step_minutes, g.five_hour_release_stagger_enabled, g.five_hour_release_stagger_min_minutes, g.five_hour_release_stagger_max_minutes, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
+	err := a.db.QueryRow(`SELECT k.id, k.user_id, k.group_id, k.quota, k.quota_used, u.balance, u.rpm_limit, u.allowed_group_ids_json, u.role, k.expires_at, g.normal_request_mode, g.claude_code_identity_enabled, g.claude_cli_version, g.stream_hedge_enabled, g.adaptive_hedge_enabled, g.rpm_dispatch_enabled, g.mcp_tool_names_enabled, g.service_tier_passthrough_enabled, g.inference_geo_passthrough_enabled, g.speed_passthrough_enabled, g.anthropic_beta_passthrough_enabled, g.reject_anthropic_downgrade_enabled, g.reject_distillation_enabled, g.request_format_filter_enabled, g.quota_header_masking_enabled, g.cache_creation_detail_enabled, g.dateline_normalization_enabled, g.extra_usage_failover_enabled, g.opencode_scrub_enabled, g.overload_cooldown_seconds, g.rate_limit_downweight_enabled, g.rate_limit_cooling_threshold, g.rate_limit_wait_seconds, g.rate_limit_stepped_cooldown_enabled, g.rate_limit_cooldown_step_seconds, g.rate_limit_downweight_stepped_cooldown_enabled, g.rate_limit_downweight_base_minutes, g.rate_limit_downweight_step_minutes, g.five_hour_release_stagger_enabled, g.five_hour_release_stagger_min_minutes, g.five_hour_release_stagger_max_minutes, g.capacity_queue_enabled, g.capacity_queue_timeout_seconds, g.strategy_required_enabled
 		FROM api_keys k JOIN users u ON u.id = k.user_id JOIN groups g ON g.id = k.group_id
 		WHERE k.key_hash = ? AND k.status = 'active' AND k.deleted_at IS NULL AND u.status = 'active' AND u.deleted_at IS NULL AND g.status = 'active' AND g.reserve_pool_enabled = 0
-		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &requestFormatFilter, &quotaHeaderMasking, &cacheCreationDetail, &datelineNormalization, &extraUsageFailover, &openCodeScrub, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &rateLimitDownweightStepped, &key.RateLimitDownweightBase, &key.RateLimitDownweightStep, &fiveHourStaggerEnabled, &key.FiveHourStaggerMin, &key.FiveHourStaggerMax, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
+		AND (k.expires_at IS NULL OR k.expires_at > `+nowSQL+`)`, hashToken(secret)).Scan(&key.ID, &key.UserID, &key.GroupID, &key.Quota, &key.QuotaUsed, &key.UserBalance, &key.UserRPM, &key.Allowed, &key.UserRole, &key.ExpiresAt, &normalRequestMode, &claudeCodeIdentity, &key.ClaudeCLIVersion, &streamHedgeEnabled, &adaptiveHedgeEnabled, &key.RPMDispatchEnabled, &mcpToolNames, &serviceTierPassthrough, &inferenceGeoPassthrough, &speedPassthrough, &anthropicBetaPassthrough, &rejectAnthropicDowngrade, &rejectDistillation, &requestFormatFilter, &quotaHeaderMasking, &cacheCreationDetail, &datelineNormalization, &extraUsageFailover, &openCodeScrub, &key.OverloadCooldownSeconds, &rateLimitDownweight, &key.RateLimitCoolingThreshold, &key.RateLimitWaitSeconds, &rateLimitSteppedCooldown, &key.RateLimitCooldownStep, &rateLimitDownweightStepped, &key.RateLimitDownweightBase, &key.RateLimitDownweightStep, &fiveHourStaggerEnabled, &key.FiveHourStaggerMin, &key.FiveHourStaggerMax, &capacityQueueEnabled, &key.CapacityQueueTimeout, &strategyRequired)
 	key.NormalRequestMode = normalRequestMode == 1
 	key.ClaudeCodeIdentityEnabled = claudeCodeIdentity == 1
 	key.StreamHedgeEnabled = streamHedgeEnabled == 1

@@ -51,6 +51,10 @@ type CCMaxCompatibilityInput struct {
 	// prose in the distilled-compatible lane. Billing attribution is always kept.
 	// The default false value avoids injecting the identity sentence.
 	ClaudeCodeIdentityEnabled bool
+	// ClaudeCLIVersion overrides the Claude CLI version as one atomic identity
+	// setting. The final User-Agent and billing attribution block are derived
+	// from this value together; an empty value keeps the built-in behavior.
+	ClaudeCLIVersion string
 	// MCPToolNames rewrites mimicked tool names into the mcp__<server>__<tool>
 	// shape Claude Code uses for MCP servers instead of the Parrot-style opaque
 	// aliases. The default false value preserves the original Sub2API lane.
@@ -293,7 +297,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 					userID,
 					strings.TrimSpace(input.AccountUUID),
 					generateSessionUUID(seed),
-					ExtractCLIVersion(input.Fingerprint.UserAgent),
+					ExtractCLIVersion(ccMaxFinalCLIUserAgent(input, mimic)),
 				)
 			}
 			body, model = normalizeClaudeOAuthRequestBody(body, model, opts)
@@ -493,10 +497,9 @@ func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody [
 	body := stripDeferredToolCacheControl(logicalBody)
 	if input.OAuth && input.Fingerprint != nil {
 		identity := &IdentityService{}
-		if rewritten, err := identity.RewriteUserID(body, input.AccountID, strings.TrimSpace(input.AccountUUID), input.Fingerprint.ClientID, input.Fingerprint.UserAgent); err == nil {
+		if rewritten, err := identity.RewriteUserID(body, input.AccountID, strings.TrimSpace(input.AccountUUID), input.Fingerprint.ClientID, ccMaxFinalCLIUserAgent(input, mimic)); err == nil {
 			body = rewritten
 		}
-		body = syncBillingHeaderVersion(body, input.Fingerprint.UserAgent)
 	}
 
 	gateway := &GatewayService{}
@@ -563,6 +566,13 @@ func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody [
 		if mimic {
 			applyClaudeCodeMimicHeaders(req, input.Stream && !input.CountTokens)
 		}
+		if configuredUA := ccMaxConfiguredCLIUserAgent(input.ClaudeCLIVersion); configuredUA != "" {
+			setHeaderRaw(req.Header, "User-Agent", configuredUA)
+		}
+		// Header defaults and mimicry may override the account fingerprint UA.
+		// Synchronize attribution only after the final wire UA is known so the
+		// two identity signals can never advertise different CLI versions.
+		body = syncBillingHeaderVersion(body, getHeaderRaw(req.Header, "User-Agent"))
 	}
 	deleteHeaderAllForms(req.Header, "anthropic-beta")
 	if setBeta {
@@ -575,6 +585,34 @@ func finalizeCCMaxCompatibilityWire(input CCMaxCompatibilityInput, logicalBody [
 	}
 
 	return body, req.Header, nil
+}
+
+func ccMaxConfiguredCLIUserAgent(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return ""
+	}
+	userAgent := "claude-cli/" + version + " (external, cli)"
+	if ExtractCLIVersion(userAgent) != version {
+		return ""
+	}
+	return userAgent
+}
+
+func ccMaxFinalCLIUserAgent(input CCMaxCompatibilityInput, mimic bool) string {
+	if configured := ccMaxConfiguredCLIUserAgent(input.ClaudeCLIVersion); configured != "" {
+		return configured
+	}
+	if mimic {
+		return claude.DefaultHeaders["User-Agent"]
+	}
+	if input.Fingerprint != nil && ExtractCLIVersion(input.Fingerprint.UserAgent) != "" {
+		return input.Fingerprint.UserAgent
+	}
+	if incoming := input.ClientHeaders.Get("User-Agent"); ExtractCLIVersion(incoming) != "" {
+		return incoming
+	}
+	return claude.DefaultHeaders["User-Agent"]
 }
 
 func IsCCMaxCompatibilitySignatureError(body []byte, model string) bool {

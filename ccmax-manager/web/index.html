@@ -1779,6 +1779,24 @@
           </div>
           <div class="group-mode-setting">
             <div>
+              <strong>Claude CLI 版本</strong>
+              <small title="统一控制出站 User-Agent 与 billing attribution 的 cc_version">终端升级后填新版本，同时更新 UA 与 billing</small>
+            </div>
+            <label class="compact-version" title="Claude CLI 版本">
+              <input
+                id="group-claude-cli-version"
+                type="text"
+                pattern="[0-9]+\.[0-9]+\.[0-9]+"
+                maxlength="32"
+                value="2.1.220"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Claude CLI 版本"
+                required />
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
               <strong>拒绝 Anthropic 静默模型降级</strong>
               <small title="开启后，Fable 5 或 Opus 5 被上游降级为 Opus 4.8 时向客户端返回错误；关闭时正常透传">开启后，Fable 5 或 Opus 5 被上游降级为 Opus 4.8 时向客户端返回错误；关闭时正常透传</small>
             </div>

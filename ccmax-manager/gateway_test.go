@@ -279,6 +279,49 @@ func TestOAuthGatewayCanEnableGroupClaudeCodeIdentity(t *testing.T) {
 	}
 }
 
+func TestOAuthGatewayGroupClaudeCLIVersionAlignsWireIdentity(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	type capture struct {
+		userAgent string
+		billing   string
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		captured <- capture{
+			userAgent: r.Header.Get("User-Agent"),
+			billing:   gjson.GetBytes(body, "system.0.text").String(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_cli_version","type":"message","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	a, handler := newGatewayTestApp(t)
+	defer a.db.Close()
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "CLI 版本", "rate_multiplier": 1,
+		"status": "active", "normal_request_mode": true, "claude_cli_version": "2.1.238",
+	}, http.StatusOK, nil)
+	key := createGatewayTestKey(t, handler)
+	createGatewayTestAccount(t, a, handler, "cli-version", upstream.URL, 0, nil, map[string]any{
+		"access_token": "oauth-token", "account_uuid": "account-uuid",
+	})
+
+	requestJSON(t, handler, http.MethodPost, "/v1/messages", map[string]any{
+		"model": "claude-fable-5", "max_tokens": 64,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}, nil, key.Key, http.StatusOK, nil)
+
+	wire := <-captured
+	if wire.userAgent != "claude-cli/2.1.238 (external, cli)" {
+		t.Fatalf("wire User-Agent = %q", wire.userAgent)
+	}
+	if !strings.Contains(wire.billing, "cc_version=2.1.238.") {
+		t.Fatalf("wire billing = %q", wire.billing)
+	}
+}
+
 func TestDistilledCompatibilityAccountFailoverKeepsRequestedModel(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	models := make(chan string, 2)

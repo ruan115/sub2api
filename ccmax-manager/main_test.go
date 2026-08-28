@@ -401,6 +401,37 @@ func TestGroupExtraUsageFailoverPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	}
 }
 
+func TestGroupClaudeCLIVersionPersistsValidatesAndSurvivesLegacyUpdate(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "CLI 版本", "rate_multiplier": 1, "status": "active",
+		"claude_cli_version": "2.1.238",
+	}, http.StatusOK, &updated)
+	if updated.ClaudeCLIVersion != "2.1.238" {
+		t.Fatalf("group Claude CLI version = %q", updated.ClaudeCLIVersion)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if updated.ClaudeCLIVersion != "2.1.238" {
+		t.Fatalf("legacy update reset Claude CLI version: %+v", updated)
+	}
+
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "非法版本", "rate_multiplier": 1, "status": "active",
+		"claude_cli_version": "2.1",
+	}, http.StatusBadRequest, nil)
+}
+
 func TestGroupCacheCreationDetailPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))

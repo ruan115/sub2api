@@ -6,12 +6,13 @@ import (
 	"net/http"
 	"strings"
 
+	sub2claude "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	sub2service "github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 const (
 	claudeAPIVersion       = "2023-06-01"
-	claudeCLIVersion       = "2.1.220"
+	claudeCLIVersion       = sub2claude.CLICurrentVersion
 	claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
 )
 
@@ -82,6 +83,7 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		ForceNonClaudeCode:        gatewayOpenAIChatRequest(r.Context()),
 		NormalRequestMode:         gatewayNormalRequestMode(r.Context()),
 		ClaudeCodeIdentityEnabled: gatewayClaudeCodeIdentity(r.Context()),
+		ClaudeCLIVersion:          gatewayClaudeCLIVersion(r.Context()),
 		MCPToolNames:              accountMCPToolNames(account, gatewayMCPToolNames(r.Context())),
 		ServiceTierPassthrough:    fieldPassthrough.ServiceTier,
 		InferenceGeoPassthrough:   fieldPassthrough.InferenceGeo,

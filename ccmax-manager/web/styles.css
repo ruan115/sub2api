@@ -897,6 +897,17 @@ svg {
 .group-mode-setting .compact-toggle {
   flex: 0 0 auto;
 }
+.group-mode-setting .compact-version {
+  flex: 0 0 112px;
+}
+.group-mode-setting .compact-version input {
+  width: 112px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  text-align: center;
+  white-space: nowrap;
+}
 .group-passthrough-panel {
   min-height: 324px;
   overflow: hidden;

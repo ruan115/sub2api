@@ -48,6 +48,7 @@ func (a *app) migrateMySQL() error {
 			monthly_limit_usd DECIMAL(24,12) NULL,
 			normal_request_mode TINYINT(1) NOT NULL DEFAULT 0,
 			claude_code_identity_enabled TINYINT(1) NOT NULL DEFAULT 0,
+			claude_cli_version VARCHAR(32) NOT NULL DEFAULT '2.1.220',
 			stream_hedge_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			adaptive_hedge_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			rpm_dispatch_enabled TINYINT(1) NOT NULL DEFAULT 1,
@@ -635,6 +636,9 @@ func (a *app) migrateMySQL() error {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "extra_usage_failover_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "claude_cli_version", "VARCHAR(32) NOT NULL DEFAULT '2.1.220'"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "opencode_scrub_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
