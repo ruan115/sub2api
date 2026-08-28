@@ -84,11 +84,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if fingerprint != nil {
-		body = syncBillingHeaderVersion(body, fingerprint.UserAgent)
-	}
-
 	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===
 	//
 	// 顺序约束：
@@ -188,6 +183,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 账号级请求头覆写（仅 anthropic/openai api_key 账号启用时生效；OAuth 路径 no-op）。
 	// 放在所有 header 逻辑之后，确保配置值对同名头拥有最终决定权。
 	account.ApplyHeaderOverrides(req.Header)
+
+	// Billing attribution must be derived from the final wire User-Agent and the
+	// final message body. This remains necessary when fingerprint lookup is
+	// unavailable because OAuth mimic headers still establish a CLI identity.
+	if tokenType == "oauth" {
+		body = syncRequestBillingHeaderVersion(req, body)
+	}
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
 	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
