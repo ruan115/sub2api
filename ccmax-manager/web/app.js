@@ -3781,6 +3781,9 @@ function openGroup(item = null) {
   $("#group-cache-creation-detail").checked = Boolean(
     item?.cache_creation_detail_enabled,
   );
+  // Default on: protects account stealth unless explicitly disabled.
+  $("#group-dateline-normalization").checked =
+    item?.dateline_normalization_enabled ?? true;
   $("#group-mcp-tool-names").checked = Boolean(item?.mcp_tool_names_enabled);
   $("#group-passthrough-service-tier").checked = Boolean(
     item?.service_tier_passthrough_enabled,
@@ -5429,6 +5432,8 @@ $("#group-form").addEventListener("submit", async (event) => {
         request_format_filter_enabled: $("#group-request-format-filter").checked,
         quota_header_masking_enabled: $("#group-quota-header-masking").checked,
         cache_creation_detail_enabled: $("#group-cache-creation-detail")
+          .checked,
+        dateline_normalization_enabled: $("#group-dateline-normalization")
           .checked,
         stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
         adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,

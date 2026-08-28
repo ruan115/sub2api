@@ -1829,6 +1829,19 @@
               <i></i>
             </label>
           </div>
+          <div class="group-mode-setting">
+            <div>
+              <strong>日期行反指纹规范化</strong>
+              <small title="默认开启，保护账号隐蔽。开启后把客户端 “Today's date is …” 里的引号变体与日期分隔符规范成 ASCII，抹除客户端在检测到非官方入口时埋下的代理探测水印；关闭后原样透传该水印（会向上游泄露“客户端已知被代理”的信号），仅在需要与客户端逐 token 对齐的兼容测试分组关闭">默认开启抹除代理探测水印；关闭后原样透传，仅用于逐 token 兼容测试分组</small>
+            </div>
+            <label class="compact-toggle" title="日期行反指纹规范化">
+              <input
+                id="group-dateline-normalization"
+                type="checkbox"
+                aria-label="日期行反指纹规范化" />
+              <i></i>
+            </label>
+          </div>
           <section class="group-passthrough-panel" aria-labelledby="group-passthrough-title">
             <div class="group-passthrough-head">
               <span class="group-passthrough-icon" aria-hidden="true">

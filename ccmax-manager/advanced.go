@@ -124,6 +124,14 @@ func (a *app) migrateAdvancedFeatures() error {
 	if err := addColumnIfMissing(a.db, "groups", "cache_creation_detail_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// On by default: the anti-fingerprint dateline normalization stays active
+	// for every group. Disable it only for a group that must forward the
+	// client's exact token count (e.g. an external token-parity check),
+	// accepting that the client's proxy-detection watermark then reaches
+	// Anthropic.
+	if err := addColumnIfMissing(a.db, "groups", "dateline_normalization_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	// Warm sessions reserve ITPM by their last settled uncached input instead
 	// of the full body estimate, so the sticky account is not evicted by a
 	// projection the prompt cache will absorb.
@@ -600,6 +608,7 @@ func (a *app) migrateDynamicGroups() error {
 			request_format_filter_enabled INTEGER NOT NULL DEFAULT 0,
 			quota_header_masking_enabled INTEGER NOT NULL DEFAULT 0,
 			cache_creation_detail_enabled INTEGER NOT NULL DEFAULT 0,
+			dateline_normalization_enabled INTEGER NOT NULL DEFAULT 1,
 			overload_cooldown_seconds INTEGER NOT NULL DEFAULT 10 CHECK (overload_cooldown_seconds BETWEEN 1 AND 600),
 			rate_limit_downweight_enabled INTEGER NOT NULL DEFAULT 1,
 			rate_limit_cooling_threshold INTEGER NOT NULL DEFAULT 3 CHECK (rate_limit_cooling_threshold BETWEEN 1 AND 10),
@@ -621,8 +630,8 @@ func (a *app) migrateDynamicGroups() error {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		)`,
-		`INSERT INTO groups_dynamic (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at)
-		 SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at FROM groups`,
+		`INSERT INTO groups_dynamic (id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, dateline_normalization_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at)
+		 SELECT id, name, description, rate_multiplier, daily_limit_usd, monthly_limit_usd, normal_request_mode, claude_code_identity_enabled, stream_hedge_enabled, adaptive_hedge_enabled, rpm_dispatch_enabled, mcp_tool_names_enabled, service_tier_passthrough_enabled, inference_geo_passthrough_enabled, speed_passthrough_enabled, anthropic_beta_passthrough_enabled, reject_anthropic_downgrade_enabled, reject_distillation_enabled, request_format_filter_enabled, quota_header_masking_enabled, cache_creation_detail_enabled, dateline_normalization_enabled, overload_cooldown_seconds, rate_limit_downweight_enabled, rate_limit_cooling_threshold, rate_limit_wait_seconds, rate_limit_stepped_cooldown_enabled, rate_limit_cooldown_step_seconds, rate_limit_downweight_stepped_cooldown_enabled, rate_limit_downweight_base_minutes, rate_limit_downweight_step_minutes, five_hour_release_stagger_enabled, five_hour_release_stagger_min_minutes, five_hour_release_stagger_max_minutes, capacity_queue_enabled, capacity_queue_timeout_seconds, strategy_required_enabled, strategy_id, reserve_pool_enabled, status, created_at, updated_at FROM groups`,
 		`DROP TABLE groups`,
 		`ALTER TABLE groups_dynamic RENAME TO groups`,
 	}

@@ -61,6 +61,14 @@ type CCMaxCompatibilityInput struct {
 	InferenceGeoPassthrough  bool
 	SpeedPassthrough         bool
 	AnthropicBetaPassthrough bool
+	// PreserveClientDateline skips NormalizeDateline, forwarding the client's
+	// original "Today's date is ..." sentence (apostrophe variant and date
+	// separator) verbatim. Default false keeps the anti-fingerprint
+	// normalization that erases the client's proxy-detection watermark. Only a
+	// group that must preserve the client's exact token count (e.g. an external
+	// token-parity compatibility check) should enable it, accepting that the
+	// watermark then reaches Anthropic.
+	PreserveClientDateline bool
 }
 
 // CCMaxCompatibilityPrepared is the exact wire request produced by the
@@ -288,7 +296,7 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 				body = applyToolsLastCacheBreakpoint(body)
 			}
 		}
-		if input.OAuth {
+		if input.OAuth && !input.PreserveClientDateline {
 			if next, _, changed := anthropicfp.NormalizeDateline(body); changed {
 				body = next
 			}

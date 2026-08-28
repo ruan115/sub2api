@@ -329,6 +329,51 @@ func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistor
 	require.Equal(t, "thinking", gjson.GetBytes(prepared.Body, "messages.1.content.0.type").String())
 }
 
+// The client embeds a proxy-detection watermark in the "Today's date is ..."
+// sentence (curly apostrophe U+2019 + slash date). By default the anti-
+// fingerprint normalization erases it (ASCII apostrophe + hyphen), which costs
+// one token. PreserveClientDateline forwards it verbatim so a token-parity
+// compatibility group keeps the client's exact count, accepting the leak.
+func TestPrepareCCMaxCompatibilityRequestDatelineNormalizationSwitch(t *testing.T) {
+	raw := "Today\u2019s date is 2026/04/17."
+	canonical := "Today's date is 2026-04-17."
+	makeBody := func() []byte {
+		body, err := json.Marshal(map[string]any{
+			"model":      "claude-fable-5",
+			"max_tokens": 64,
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "<system-reminder>\n" + raw + "\n</system-reminder>"},
+				}},
+			},
+		})
+		require.NoError(t, err)
+		return body
+	}
+
+	fp := &Fingerprint{ClientID: strings.Repeat("a", 64), UserAgent: "claude-cli/2.1.250 (external, cli)"}
+
+	// Default: normalization on → watermark erased.
+	normalized, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: makeBody(), Model: "claude-fable-5", OAuth: true, AccessToken: "token",
+		NormalRequestMode: true, Fingerprint: fp,
+	})
+	require.NoError(t, err)
+	normText := gjson.GetBytes(normalized.Body, "messages.0.content.0.text").String()
+	require.Contains(t, normText, canonical)
+	require.NotContains(t, normText, raw)
+
+	// PreserveClientDateline: normalization off → watermark forwarded verbatim.
+	preserved, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: makeBody(), Model: "claude-fable-5", OAuth: true, AccessToken: "token",
+		NormalRequestMode: true, Fingerprint: fp, PreserveClientDateline: true,
+	})
+	require.NoError(t, err)
+	presText := gjson.GetBytes(preserved.Body, "messages.0.content.0.text").String()
+	require.Contains(t, presText, raw)
+	require.NotContains(t, presText, canonical)
+}
+
 func TestPrepareCCMaxCompatibilityRequestNormalModePreservesExplicitCacheTTL(t *testing.T) {
 	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"one hour","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"default","cache_control":{"type":"ephemeral"}}],"max_tokens":64,"tools":[{"name":"read_file","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{

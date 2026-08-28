@@ -61,6 +61,7 @@ func (a *app) migrateMySQL() error {
 				request_format_filter_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				quota_header_masking_enabled TINYINT(1) NOT NULL DEFAULT 0,
 				cache_creation_detail_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				dateline_normalization_enabled TINYINT(1) NOT NULL DEFAULT 1,
 				overload_cooldown_seconds INT NOT NULL DEFAULT 10,
 				rate_limit_downweight_enabled TINYINT(1) NOT NULL DEFAULT 1,
 				rate_limit_cooling_threshold INT NOT NULL DEFAULT 3,
@@ -625,6 +626,9 @@ func (a *app) migrateMySQL() error {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "groups", "cache_creation_detail_enabled", "TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "groups", "dateline_normalization_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "dispatch_sessions", "last_input_tokens", "BIGINT NOT NULL DEFAULT 0"); err != nil {

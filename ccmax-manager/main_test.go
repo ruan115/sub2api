@@ -185,6 +185,44 @@ func TestGroupQuotaHeaderMaskingPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	}
 }
 
+func TestGroupDatelineNormalizationDefaultsOnAndTogglesOff(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	handler := a.routes()
+
+	// Seeded groups default to normalization ON (anti-fingerprint protection).
+	var groups []group
+	putJSON(t, handler, http.MethodGet, "/api/groups", nil, http.StatusOK, &groups)
+	if len(groups) == 0 {
+		t.Fatal("no seeded groups")
+	}
+	for _, g := range groups {
+		if !g.DatelineNormalization {
+			t.Fatalf("group %s defaulted dateline normalization off: %+v", g.ID, g)
+		}
+	}
+
+	// Disabling persists, and a legacy save that omits the field keeps it off.
+	var updated group
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "逐 token 兼容测试", "rate_multiplier": 1, "status": "active",
+		"dateline_normalization_enabled": false,
+	}, http.StatusOK, &updated)
+	if updated.DatelineNormalization {
+		t.Fatalf("group dateline normalization was not disabled: %+v", updated)
+	}
+	putJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"name": "A 分组", "description": "旧页面保存", "rate_multiplier": 1, "status": "active",
+	}, http.StatusOK, &updated)
+	if updated.DatelineNormalization {
+		t.Fatalf("legacy update re-enabled dateline normalization: %+v", updated)
+	}
+}
+
 func TestGroupCacheCreationDetailPersistsAndSurvivesLegacyUpdate(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	a, err := newApp(filepath.Join(t.TempDir(), "test.db"))
