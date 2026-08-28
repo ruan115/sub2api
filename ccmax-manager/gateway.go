@@ -461,6 +461,14 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			writeError(w, http.StatusBadRequest, prepareErr.Error())
 			return
 		}
+		if formatErr := validatePreparedFilteredRequestFormat(key.RequestFormatFilter, prepared); formatErr != nil {
+			releaseAccount()
+			message := formatErr.Error()
+			clearGatewayErrorAccount(w)
+			attributeGatewayErrorEvent(w, requestFormatBlockedCategory, http.StatusBadRequest, message)
+			writeAnthropicGatewayError(w, http.StatusBadRequest, "invalid_request_error", message)
+			return
+		}
 		prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
 		prepared.MaskQuotaHeaders = key.QuotaHeaderMasking
 		prepared.CacheCreationDetail = key.CacheCreationDetail

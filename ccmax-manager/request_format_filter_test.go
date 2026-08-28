@@ -38,6 +38,20 @@ func TestValidateFilteredRequestFormat(t *testing.T) {
 	}
 }
 
+func TestValidatePreparedFilteredRequestFormatRejectsInvalidCompatibilitySystem(t *testing.T) {
+	prepared := claudePreparedRequest{Body: []byte(`{
+		"model":"claude-opus-5",
+		"system":[{"type":"text","text":"billing"},"client system"],
+		"messages":[{"role":"user","content":"hello"}]
+	}`)}
+	if err := validatePreparedFilteredRequestFormat(true, prepared); err == nil || !strings.Contains(err.Error(), "system.1") {
+		t.Fatalf("prepared validation error=%v, want system.1", err)
+	}
+	if err := validatePreparedFilteredRequestFormat(false, prepared); err != nil {
+		t.Fatalf("disabled prepared validation error=%v", err)
+	}
+}
+
 func TestGatewayRequestFormatFilterRejectsBeforeAccountDispatch(t *testing.T) {
 	t.Setenv("CCMAX_AUTH_DISABLED", "1")
 	var upstreamCalls atomic.Int64

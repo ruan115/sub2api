@@ -48,3 +48,14 @@ func validateFilteredRequestFormat(body []byte) error {
 	}
 	return nil
 }
+
+// validatePreparedFilteredRequestFormat closes the gap between the client
+// payload and the final compatibility payload. Adapter transformations must
+// never turn a request that passed the ingress check into an invalid Anthropic
+// shape that consumes account RPM upstream.
+func validatePreparedFilteredRequestFormat(enabled bool, prepared claudePreparedRequest) error {
+	if !enabled {
+		return nil
+	}
+	return validateFilteredRequestFormat(prepared.Body)
+}

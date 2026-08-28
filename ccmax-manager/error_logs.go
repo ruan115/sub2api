@@ -622,6 +622,10 @@ func (w *gatewayErrorResponseWriter) setGatewayAccountID(accountID int64) {
 	}
 }
 
+func (w *gatewayErrorResponseWriter) clearGatewayAccountID() {
+	w.accountID = 0
+}
+
 func (w *gatewayErrorResponseWriter) setGatewayErrorEvent(category string, status int, message string) {
 	if strings.TrimSpace(category) == "" {
 		return
@@ -650,6 +654,10 @@ type gatewayErrorAccountSetter interface {
 	setGatewayAccountID(int64)
 }
 
+type gatewayErrorAccountClearer interface {
+	clearGatewayAccountID()
+}
+
 type gatewayErrorEventSetter interface {
 	setGatewayErrorEvent(string, int, string)
 }
@@ -673,6 +681,24 @@ func attributeGatewayErrorAccount(w http.ResponseWriter, accountID int64) {
 	for w != nil {
 		if setter, ok := w.(gatewayErrorAccountSetter); ok {
 			setter.setGatewayAccountID(accountID)
+			return
+		}
+		unwrapper, ok := w.(responseWriterUnwrapper)
+		if !ok {
+			return
+		}
+		next := unwrapper.Unwrap()
+		if next == w {
+			return
+		}
+		w = next
+	}
+}
+
+func clearGatewayErrorAccount(w http.ResponseWriter) {
+	for w != nil {
+		if clearer, ok := w.(gatewayErrorAccountClearer); ok {
+			clearer.clearGatewayAccountID()
 			return
 		}
 		unwrapper, ok := w.(responseWriterUnwrapper)
