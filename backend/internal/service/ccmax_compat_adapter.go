@@ -689,10 +689,13 @@ func relocateCCMaxExtraUsageSystem(body []byte) ([]byte, bool) {
 
 	var billingBlock []byte
 	parts := make([]string, 0, 2)
+	clientBlocks := make([][]byte, 0, 2)
 	clientSystemSeen := false
+	identityRemoved := false
 	var cacheControl any
 	system.ForEach(func(_, item gjson.Result) bool {
-		text := strings.TrimSpace(item.Get("text").String())
+		rawText := item.Get("text").String()
+		text := strings.TrimSpace(rawText)
 		if strings.HasPrefix(text, claudeCodeBillingHeaderPrefix) && strings.Contains(text, claudeCodeEntrypointMarker) {
 			if billingBlock == nil {
 				billingBlock = append([]byte(nil), item.Raw...)
@@ -700,9 +703,20 @@ func relocateCCMaxExtraUsageSystem(body []byte) ([]byte, bool) {
 			return true
 		}
 		clientSystemSeen = true
-		clientText := strings.TrimSpace(strings.ReplaceAll(item.Get("text").String(), claudeCodeSystemPrompt, ""))
+		clientText := rawText
+		clientBlock := []byte(item.Raw)
+		if strings.Contains(clientText, claudeCodeSystemPrompt) {
+			identityRemoved = true
+			clientText = strings.TrimSpace(strings.ReplaceAll(clientText, claudeCodeSystemPrompt, ""))
+			if clientText != "" {
+				if next, err := sjson.SetBytes(clientBlock, "text", clientText); err == nil {
+					clientBlock = next
+				}
+			}
+		}
 		if clientText != "" {
 			parts = append(parts, clientText)
+			clientBlocks = append(clientBlocks, clientBlock)
 		}
 		if raw := item.Get("cache_control"); raw.Exists() {
 			_ = json.Unmarshal([]byte(raw.Raw), &cacheControl)
@@ -711,6 +725,14 @@ func relocateCCMaxExtraUsageSystem(body []byte) ([]byte, bool) {
 	})
 	if billingBlock == nil || !clientSystemSeen {
 		return body, false
+	}
+	if identityRemoved {
+		items := append([][]byte{billingBlock}, clientBlocks...)
+		out, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(items))
+		if !ok {
+			return body, false
+		}
+		return enforceCacheControlLimit(out), true
 	}
 
 	out, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw([][]byte{billingBlock}))
