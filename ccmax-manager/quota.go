@@ -1355,10 +1355,11 @@ func (a *app) captureAccountUpstreamFailure(account gatewayAccount, status int, 
 func accountAuthenticationFailureIsTerminal(message string) bool {
 	message = strings.ToLower(strings.TrimSpace(message))
 	return strings.Contains(message, "access token has been revoked") ||
-		strings.Contains(message, "access token was revoked")
+		strings.Contains(message, "access token was revoked") ||
+		strings.Contains(message, "invalid authentication credentials")
 }
 
-func (a *app) reclassifyRevokedOAuthAccounts() error {
+func (a *app) reclassifyTerminalOAuth401Accounts() error {
 	_, err := a.db.Exec(`UPDATE accounts SET
 		` + accumulateAccountSurvivalSQL + `,
 		auth_status = 'reauth_required',
@@ -1370,10 +1371,11 @@ func (a *app) reclassifyRevokedOAuthAccounts() error {
 		WHERE deleted_at IS NULL
 			AND status != 'disabled'
 			AND (LOWER(auth_error) LIKE '%access token has been revoked%'
-				OR LOWER(auth_error) LIKE '%access token was revoked%')
+				OR LOWER(auth_error) LIKE '%access token was revoked%'
+				OR LOWER(auth_error) LIKE '%invalid authentication credentials%')
 			AND (status != 'error' OR auth_status != 'reauth_required' OR invalidated_at IS NULL)`)
 	if err != nil {
-		return fmt.Errorf("reclassify revoked OAuth accounts: %w", err)
+		return fmt.Errorf("reclassify terminal OAuth 401 accounts: %w", err)
 	}
 	return nil
 }

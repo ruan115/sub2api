@@ -52,7 +52,7 @@ func (a *app) migrateSharedData() error {
 	if _, err := a.db.Exec(`UPDATE accounts SET onboarded_at = COALESCE(auth_checked_at, created_at) WHERE onboarded_at IS NULL AND auth_status = 'valid'`); err != nil {
 		return fmt.Errorf("initialize account onboarding time: %w", err)
 	}
-	if err := a.reclassifyRevokedOAuthAccounts(); err != nil {
+	if err := a.reclassifyTerminalOAuth401Accounts(); err != nil {
 		return err
 	}
 	if _, err := a.db.Exec(`UPDATE accounts SET invalidated_at = NULL WHERE onboarded_at IS NULL AND status != 'error'`); err != nil {
