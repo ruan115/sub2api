@@ -368,6 +368,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 	// at that point availability and rate-limit safety outweigh cache affinity.
 	pinLarge := !countTokens && gatewayRequestHoldsLargeCache(len(body))
 	releaseStickyPin := false
+	extraUsageSystemFallback := false
 	for len(excluded) < maxAccountAttempts {
 		if pinLarge && !releaseStickyPin && stickyAlreadyTried(excluded, a.gatewayStickyAccountID(key.ID, session)) {
 			// The pinned account is the only one allowed and it has already failed
@@ -460,6 +461,19 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			releaseAccount()
 			writeError(w, http.StatusBadRequest, prepareErr.Error())
 			return
+		}
+		if extraUsageSystemFallback && prepared.Compat != nil {
+			retryCompat, applied, retryErr := sub2service.PrepareCCMaxCompatibilityRetry(prepared.Compat, sub2service.CCMaxCompatibilityRetryExtraUsage)
+			if retryErr != nil {
+				releaseAccount()
+				lastDispatchError = retryErr
+				continue
+			}
+			if applied {
+				prepared.Body = retryCompat.Body
+				prepared.Model = retryCompat.Model
+				prepared.Compat = retryCompat
+			}
 		}
 		prepared.RejectAnthropicDowngrade = key.RejectAnthropicDowngrade
 		prepared.MaskQuotaHeaders = key.QuotaHeaderMasking
@@ -608,6 +622,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 					a.captureAccountExtraUsageRejection(account.ID)
 				}
 				lastFailure = &gatewayUpstreamFailure{status: response.StatusCode, header: response.Header.Clone(), body: failureBody, account: account}
+				extraUsageSystemFallback = true
 				releaseStickyPin = true
 				continue
 			}
@@ -654,6 +669,7 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 			if !skipGatewayDefaultErrorHandling(prepared, preOutputErr.status) {
 				if extraUsageFailoverEligible(key.ExtraUsageFailover, preOutputErr.status, preOutputErr.body) {
 					a.captureAccountExtraUsageRejection(account.ID)
+					extraUsageSystemFallback = true
 				} else {
 					if preOutputErr.status == http.StatusTooManyRequests {
 						_, _ = a.ensureReserveCapacity(key.GroupID, envelope.Model, "rate_limit", excluded)

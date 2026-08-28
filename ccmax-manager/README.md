@@ -114,7 +114,7 @@ OAuth 账号不是原样直通：真实 Claude Code 请求保留客户端 system
 
 分组的“蒸馏兼容模式”与账号的“原始请求完整透传”互相独立。蒸馏兼容模式关闭时保持 Sub2API 原版 CCMAX 行为；开启后保留客户端 `system`、消息、工具、工具选择、停止序列和流式设置，并过滤目标渠道不接受的未知顶层参数；Fable 5 继续使用服务端 adaptive thinking。两种兼容链路在服务端模拟 Claude Code 时都会将客户端采样配置规范为固定 `temperature=1`，同时删除 `top_p` 与 `top_k`。缓存断点未提供 `ttl` 时默认使用 `5m`，客户端显式提供 `5m` 或 `1h` 时原样保留。蒸馏兼容模式始终保留 billing attribution；独立的“Claude Code 身份句”开关默认关闭，只有显式开启后才注入 `You are Claude Code, Anthropic's official CLI for Claude.`。每个 A/B 分组还能分别允许 `service_tier`、`inference_geo`、`speed` 与客户端 `anthropic-beta` 透传，四项默认关闭；启用 beta 透传时仍会保留 OAuth 必需标记。直连 OAuth 的响应会原样保留 thinking signature，最终 usage 会包含 `iterations`。原始透传优先级更高，开启原始透传的账号不执行上述兼容变换。
 
-分组可独立开启“请求格式过滤网”。开启后，网关会在账号选择前拒绝同时包含 `temperature` 与 `top_p` 的请求，以及结构不合法的 Anthropic `system` 内容块，直接返回 HTTP 400 `invalid_request_error` 并记录为 `request_format_blocked`。该过滤不会删除或修正参数，也不会占用账号并发、记录账号 RPM 或访问上游；默认关闭以保持现有请求行为。
+分组可独立开启“请求格式过滤网”。开启后，网关会在账号选择前拒绝同时包含 `temperature` 与 `top_p` 的请求，以及结构不合法的 Anthropic `system` 内容块，直接返回 HTTP 400 `invalid_request_error` 并记录为 `request_format_blocked`。该过滤不会删除或修正参数，也不会占用账号并发、记录账号 RPM 或访问上游；默认关闭以保持现有请求行为。分组开启 `extra usage 400 换号` 后，首个账号若被上游判定为第三方 extra usage，第二个账号会收到保留 billing、但将客户端 system 移入消息的兼容主体；该回退不注入 Claude Code 身份句，也不增加账号尝试上限，原本成功的请求不受影响。
 
 账号凭证 JSON 支持：
 
