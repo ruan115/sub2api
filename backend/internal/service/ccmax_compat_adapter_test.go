@@ -302,6 +302,33 @@ func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistor
 	require.Len(t, gjson.GetBytes(prepared.Body, "system").Array(), 3)
 }
 
+func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistoryWithoutTopLevelThinking(t *testing.T) {
+	signature := strings.Repeat("signed-history-", 154)
+	body, err := json.Marshal(map[string]any{
+		"model":      "claude-fable-5",
+		"max_tokens": 23333,
+		"stream":     false,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Use the previous context."},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "", "signature": signature},
+				map[string]any{"type": "text", "text": "Previous response."},
+			}},
+			map[string]any{"role": "user", "content": "Continue."},
+		},
+	})
+	require.NoError(t, err)
+
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-fable-5", OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "adaptive", gjson.GetBytes(prepared.Body, "thinking.type").String())
+	require.Equal(t, signature, gjson.GetBytes(prepared.Body, "messages.1.content.0.signature").String())
+	require.Equal(t, "thinking", gjson.GetBytes(prepared.Body, "messages.1.content.0.type").String())
+}
+
 func TestPrepareCCMaxCompatibilityRequestNormalModePreservesExplicitCacheTTL(t *testing.T) {
 	body := []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"one hour","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"default","cache_control":{"type":"ephemeral"}}],"max_tokens":64,"tools":[{"name":"read_file","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
 	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{

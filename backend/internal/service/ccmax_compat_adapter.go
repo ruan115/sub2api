@@ -310,13 +310,17 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 			model = mapped
 		}
 	}
+	// Establish the distilled Fable thinking contract before filtering history.
+	// A valid signed thinking block must remain usable even when the client omits
+	// the top-level thinking field; FilterThinkingBlocks uses that field to decide
+	// whether signed history is valid.
+	if input.NormalRequestMode && isCCMaxDistilledFable5(input.Model) {
+		body = applyCCMaxDistilledFableControls(body, !input.CountTokens)
+	}
 	if !input.CountTokens {
 		body = StripEmptyTextBlocks(body)
 		body = FilterWebSearchHistoryBlocks(body, model)
 		body = FilterThinkingBlocks(body, model)
-	}
-	if input.NormalRequestMode && isCCMaxDistilledFable5(input.Model) {
-		body = applyCCMaxDistilledFableControls(body, !input.CountTokens)
 	}
 	body = applyCCMaxFieldPassthrough(body, input)
 
