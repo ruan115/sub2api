@@ -281,6 +281,20 @@ func TestPrepareCCMaxCompatibilityRequestNormalModeMatchesDistilledRequestSurfac
 	require.Contains(t, getHeaderRaw(prepared.Headers, "anthropic-beta"), "claude-code-20250219")
 }
 
+func TestPrepareCCMaxCompatibilityRequestNormalModeDropsSamplingForOpus(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-8","max_tokens":64,"temperature":0.7,"top_p":0.8,"top_k":20,"messages":[{"role":"user","content":"hi"}]}`)
+	prepared, err := PrepareCCMaxCompatibilityRequest(CCMaxCompatibilityInput{
+		Body: body, Model: "claude-opus-4-8", OAuth: true,
+		AccessToken: "token", NormalRequestMode: true,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, gjson.GetBytes(prepared.Body, "temperature").Int())
+	for _, path := range []string{"top_p", "top_k"} {
+		require.False(t, gjson.GetBytes(prepared.Body, path).Exists(), path)
+	}
+	require.Equal(t, "claude-opus-4-8", prepared.Model)
+}
+
 func TestPrepareCCMaxCompatibilityRequestNormalModePreservesSignedThinkingHistory(t *testing.T) {
 	signature := strings.Repeat("signed-history-", 154)
 	body, err := json.Marshal(map[string]any{
