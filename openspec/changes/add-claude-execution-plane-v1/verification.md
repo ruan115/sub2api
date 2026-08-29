@@ -307,7 +307,8 @@ used.
 | Node command execution | PASS | create/start/drain/stop/destroy/inspect are deadline-bound, epoch-exact and idempotent; local slot capacity fails closed and delayed old-epoch revocation cannot stop a newer generation |
 | Long-lived control stream | PASS (library) | sorted hello capabilities, immediate/periodic heartbeat, bounded command workers/results, cancellation and bounded reconnect backoff are covered over a real bufconn bidi gRPC stream |
 | Secure worker process | PASS | `fake=true` retains the tagged local E2E path; `fake=false` constructs a process-local recipient, real onboarding engine and secure activator; oauth/setup/API-key headers are derived only from the acknowledged in-memory credential with strict normalized JSON validation |
-| Repeated race tests | PASS | credential, worker, service, host-agent and provider suites passed `-race -count=10`; targeted package vet and diff checks passed |
+| Repeated race tests | PASS | host-agent and worker suites passed `-race -count=10`; the earlier credential/service/provider hardening suites also passed repeated race runs |
+| Full regression gates | PASS | execution-plane `make check` passed unit, full race, vet, Buf lint and generated drift; CCMAX `go test ./...` and repository diff checks passed |
 
 Task 5.5 remains unchecked. The NodeControl protocol still needs an additive
 orchestrator/host-agent key-discovery and encrypted activation command, and the
