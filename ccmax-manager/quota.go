@@ -83,7 +83,7 @@ func (a *app) refreshAccountQuota(ctx context.Context, accountID int64) (account
 	var proxyID sql.NullInt64
 	var stored accountQuota
 	var fiveReset, sevenReset, sampled sql.NullString
-	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, proxy_id, quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at, quota_sampled_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).
+	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, proxy_id, quota_5h_utilization, quota_5h_reset_at, quota_7d_utilization, quota_7d_reset_at, quota_sampled_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), accountID).
 		Scan(&authType, &credentialsJSON, &proxyID, &stored.FiveHour.Utilization, &fiveReset, &stored.SevenDay.Utilization, &sevenReset, &sampled); err != nil {
 		return accountQuota{}, err
 	}

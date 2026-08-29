@@ -25,18 +25,22 @@ var panelPages = []string{"overview", "accounts", "dead", "onboarding", "daily",
 type authContextKey struct{}
 
 type panelUser struct {
-	ID              int64             `json:"id"`
-	Username        string            `json:"username"`
-	Name            string            `json:"name"`
-	Role            string            `json:"role"`
-	Status          string            `json:"status"`
-	AllowedGroupIDs []string          `json:"allowed_group_ids"`
-	VisiblePages    []string          `json:"visible_pages"`
-	AccountView     accountViewConfig `json:"account_view"`
-	Balance         *float64          `json:"balance"`
-	RPM             int               `json:"rpm_limit"`
-	CreatedAt       string            `json:"created_at"`
-	UpdatedAt       string            `json:"updated_at"`
+	ID               int64             `json:"id"`
+	Username         string            `json:"username"`
+	Name             string            `json:"name"`
+	Role             string            `json:"role"`
+	Status           string            `json:"status"`
+	AllowedGroupIDs  []string          `json:"allowed_group_ids"`
+	VisiblePages     []string          `json:"visible_pages"`
+	AccountView      accountViewConfig `json:"account_view"`
+	Balance          *float64          `json:"balance"`
+	RPM              int               `json:"rpm_limit"`
+	Consumed         float64           `json:"consumed"`
+	UsageRequests    int64             `json:"usage_requests"`
+	ActiveKeyCount   int64             `json:"active_key_count"`
+	ArchivedKeyCount int64             `json:"archived_key_count"`
+	CreatedAt        string            `json:"created_at"`
+	UpdatedAt        string            `json:"updated_at"`
 }
 
 type userInput struct {
@@ -53,20 +57,35 @@ type userInput struct {
 }
 
 type apiKeyRecord struct {
-	ID         int64   `json:"id"`
-	UserID     int64   `json:"user_id"`
-	Username   string  `json:"username"`
-	Name       string  `json:"name"`
-	KeyPrefix  string  `json:"key_prefix"`
-	Key        string  `json:"key,omitempty"`
-	GroupID    string  `json:"group_id"`
-	Status     string  `json:"status"`
-	Quota      float64 `json:"quota"`
-	QuotaUsed  float64 `json:"quota_used"`
-	ExpiresAt  string  `json:"expires_at"`
-	LastUsedAt string  `json:"last_used_at"`
-	CreatedAt  string  `json:"created_at"`
-	UpdatedAt  string  `json:"updated_at"`
+	ID              int64   `json:"id"`
+	UserID          int64   `json:"user_id"`
+	Username        string  `json:"username"`
+	Name            string  `json:"name"`
+	KeyPrefix       string  `json:"key_prefix"`
+	Key             string  `json:"key,omitempty"`
+	GroupID         string  `json:"group_id"`
+	Status          string  `json:"status"`
+	Quota           float64 `json:"quota"`
+	QuotaUsed       float64 `json:"quota_used"`
+	ExpiresAt       string  `json:"expires_at"`
+	LastUsedAt      string  `json:"last_used_at"`
+	DeletedAt       string  `json:"deleted_at"`
+	Archived        bool    `json:"archived"`
+	UsageRequests   int64   `json:"usage_requests"`
+	UsageBilledCost float64 `json:"usage_billed_cost"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
+type userAccessDetails struct {
+	User       panelUser      `json:"user"`
+	Keys       []apiKeyRecord `json:"keys"`
+	Usage      []usageLog     `json:"usage"`
+	Totals     billingTotals  `json:"totals"`
+	UsagePage  int            `json:"usage_page"`
+	UsageSize  int            `json:"usage_page_size"`
+	UsageTotal int64          `json:"usage_total"`
+	UsagePages int            `json:"usage_total_pages"`
 }
 
 type apiKeyInput struct {
@@ -431,7 +450,12 @@ func expiredSessionCookie() *http.Cookie {
 }
 
 func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, currentUser(r))
+	user := currentUser(r)
+	if err := a.populateUserAccessSummary(&user, user.Role == "admin"); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
 }
 
 func (a *app) scanUser(row scanner) (panelUser, error) {
@@ -440,18 +464,53 @@ func (a *app) scanUser(row scanner) (panelUser, error) {
 	var balance sql.NullFloat64
 	err := row.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt)
 	if err == nil {
-		_ = json.Unmarshal([]byte(allowed), &item.AllowedGroupIDs)
-		_ = json.Unmarshal([]byte(visible), &item.VisiblePages)
-		_ = json.Unmarshal([]byte(accountView), &item.AccountView)
-		item.Balance = floatPointer(balance)
-		item.VisiblePages = normalizedVisiblePages(item.Role, item.VisiblePages)
-		item.AccountView = normalizeAccountView(item.Role, item.AccountView)
+		finishScannedUser(&item, allowed, visible, accountView, balance)
 	}
 	return item, err
 }
 
+func finishScannedUser(item *panelUser, allowed, visible, accountView string, balance sql.NullFloat64) {
+	_ = json.Unmarshal([]byte(allowed), &item.AllowedGroupIDs)
+	_ = json.Unmarshal([]byte(visible), &item.VisiblePages)
+	_ = json.Unmarshal([]byte(accountView), &item.AccountView)
+	item.Balance = floatPointer(balance)
+	item.VisiblePages = normalizedVisiblePages(item.Role, item.VisiblePages)
+	item.AccountView = normalizeAccountView(item.Role, item.AccountView)
+}
+
+func (a *app) populateUserAccessSummary(item *panelUser, includeArchived bool) error {
+	err := a.db.QueryRow(`SELECT
+		COALESCE((SELECT SUM(billed_cost) FROM usage_logs WHERE user_id = ?), 0),
+		(SELECT COUNT(*) FROM usage_logs WHERE user_id = ?),
+		(SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND deleted_at IS NULL AND status = 'active'),
+		(SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND deleted_at IS NOT NULL)`,
+		item.ID, item.ID, item.ID, item.ID).Scan(&item.Consumed, &item.UsageRequests, &item.ActiveKeyCount, &item.ArchivedKeyCount)
+	if err != nil {
+		return err
+	}
+	if !includeArchived {
+		item.ArchivedKeyCount = 0
+	}
+	return nil
+}
+
 func (a *app) handleUsers(w http.ResponseWriter, _ *http.Request) {
-	rows, err := a.db.Query(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE deleted_at IS NULL ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'readonly_admin' THEN 1 ELSE 2 END, id`)
+	rows, err := a.db.Query(`SELECT u.id, u.username, u.name, u.role, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.account_view_json, u.balance, u.rpm_limit, u.created_at, u.updated_at,
+		COALESCE(usage_summary.billed_cost, 0), COALESCE(usage_summary.request_count, 0),
+		COALESCE(key_summary.active_count, 0), COALESCE(key_summary.archived_count, 0)
+		FROM users u
+		LEFT JOIN (
+			SELECT user_id, SUM(billed_cost) AS billed_cost, COUNT(*) AS request_count
+			FROM usage_logs WHERE user_id IS NOT NULL GROUP BY user_id
+		) usage_summary ON usage_summary.user_id = u.id
+		LEFT JOIN (
+			SELECT user_id,
+				SUM(CASE WHEN deleted_at IS NULL AND status = 'active' THEN 1 ELSE 0 END) AS active_count,
+				SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END) AS archived_count
+			FROM api_keys GROUP BY user_id
+		) key_summary ON key_summary.user_id = u.id
+		WHERE u.deleted_at IS NULL
+		ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'readonly_admin' THEN 1 ELSE 2 END, u.id`)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -459,14 +518,107 @@ func (a *app) handleUsers(w http.ResponseWriter, _ *http.Request) {
 	defer rows.Close()
 	items := []panelUser{}
 	for rows.Next() {
-		item, err := a.scanUser(rows)
+		var item panelUser
+		var allowed, visible, accountView string
+		var balance sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt, &item.Consumed, &item.UsageRequests, &item.ActiveKeyCount, &item.ArchivedKeyCount); err != nil {
+			writeDBError(w, err)
+			return
+		}
+		finishScannedUser(&item, allowed, visible, accountView, balance)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (a *app) handleUserAccessDetails(w http.ResponseWriter, r *http.Request) {
+	if currentUser(r).Role != "admin" {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := a.populateUserAccessSummary(&item, true); err != nil {
+		writeDBError(w, err)
+		return
+	}
+
+	keyRows, err := a.db.Query(apiKeyColumns+`,
+		COALESCE(key_usage.request_count, 0), COALESCE(key_usage.billed_cost, 0)
+		FROM api_keys k JOIN users u ON u.id = k.user_id
+		LEFT JOIN (
+			SELECT api_key_id, COUNT(*) AS request_count, SUM(billed_cost) AS billed_cost
+			FROM usage_logs WHERE user_id = ? AND api_key_id IS NOT NULL GROUP BY api_key_id
+		) key_usage ON key_usage.api_key_id = k.id
+		WHERE k.user_id = ?
+		ORDER BY CASE WHEN k.deleted_at IS NULL THEN 0 ELSE 1 END, k.id DESC`, id, id)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer keyRows.Close()
+	keys := []apiKeyRecord{}
+	for keyRows.Next() {
+		key, err := scanAPIKeyWithUsage(keyRows)
 		if err != nil {
 			writeDBError(w, err)
 			return
 		}
-		items = append(items, item)
+		keys = append(keys, key)
 	}
-	writeJSON(w, http.StatusOK, items)
+	if err := keyRows.Err(); err != nil {
+		writeDBError(w, err)
+		return
+	}
+
+	page, pageSize, offset := detailPaginationFromRequest(r)
+	filters := usageFilters{UserID: id, Limit: pageSize, Offset: offset}
+	usage, err := a.listUsage(filters)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	usageTotal, err := a.countUsage(filters)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	totals, err := a.queryTotalsFiltered(usageFilters{UserID: id})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, userAccessDetails{
+		User: item, Keys: keys, Usage: usage, Totals: totals,
+		UsagePage: page, UsageSize: pageSize, UsageTotal: usageTotal, UsagePages: totalPages(usageTotal, pageSize),
+	})
+}
+
+func detailPaginationFromRequest(r *http.Request) (page, pageSize, offset int) {
+	page, pageSize = 1, 10
+	if value, err := strconv.Atoi(r.URL.Query().Get("usage_page")); err == nil && value > 0 {
+		page = value
+	}
+	if value, err := strconv.Atoi(r.URL.Query().Get("usage_page_size")); err == nil && value > 0 {
+		pageSize = min(value, 50)
+	}
+	offset = (page - 1) * pageSize
+	return
 }
 
 func normalizeUserInput(input *userInput, requirePassword bool) error {
@@ -611,8 +763,12 @@ func (a *app) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
-	query := apiKeySelect + ` WHERE k.deleted_at IS NULL`
+	includeArchived := user.Role == "admin" && strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_archived")), "true")
+	query := apiKeySelect + ` WHERE 1 = 1`
 	args := []any{}
+	if !includeArchived {
+		query += ` AND k.deleted_at IS NULL`
+	}
 	if user.Role == "user" {
 		query += ` AND k.user_id = ?`
 		args = append(args, user.ID)
@@ -780,7 +936,9 @@ func (a *app) handleAPIKeyDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-const apiKeySelect = `SELECT k.id, k.user_id, u.username, k.name, k.key_prefix, k.key_secret, COALESCE(k.group_id, ''), k.status, k.quota, k.quota_used, k.expires_at, k.last_used_at, k.created_at, k.updated_at FROM api_keys k JOIN users u ON u.id = k.user_id`
+const apiKeyColumns = `SELECT k.id, k.user_id, u.username, k.name, k.key_prefix, k.key_secret, COALESCE(k.group_id, ''), k.status, k.quota, k.quota_used, k.expires_at, k.last_used_at, k.created_at, k.updated_at, k.deleted_at`
+
+const apiKeySelect = apiKeyColumns + ` FROM api_keys k JOIN users u ON u.id = k.user_id`
 
 func (a *app) getAPIKey(id int64) (apiKeyRecord, error) {
 	return scanAPIKey(a.db.QueryRow(apiKeySelect+` WHERE k.id = ? AND k.deleted_at IS NULL`, id))
@@ -788,10 +946,23 @@ func (a *app) getAPIKey(id int64) (apiKeyRecord, error) {
 
 func scanAPIKey(row scanner) (apiKeyRecord, error) {
 	var item apiKeyRecord
-	var expires, lastUsed sql.NullString
-	err := row.Scan(&item.ID, &item.UserID, &item.Username, &item.Name, &item.KeyPrefix, &item.Key, &item.GroupID, &item.Status, &item.Quota, &item.QuotaUsed, &expires, &lastUsed, &item.CreatedAt, &item.UpdatedAt)
+	var expires, lastUsed, deleted sql.NullString
+	err := row.Scan(&item.ID, &item.UserID, &item.Username, &item.Name, &item.KeyPrefix, &item.Key, &item.GroupID, &item.Status, &item.Quota, &item.QuotaUsed, &expires, &lastUsed, &item.CreatedAt, &item.UpdatedAt, &deleted)
 	item.ExpiresAt = nullText(expires)
 	item.LastUsedAt = nullText(lastUsed)
+	item.DeletedAt = nullText(deleted)
+	item.Archived = item.DeletedAt != ""
+	return item, err
+}
+
+func scanAPIKeyWithUsage(row scanner) (apiKeyRecord, error) {
+	var item apiKeyRecord
+	var expires, lastUsed, deleted sql.NullString
+	err := row.Scan(&item.ID, &item.UserID, &item.Username, &item.Name, &item.KeyPrefix, &item.Key, &item.GroupID, &item.Status, &item.Quota, &item.QuotaUsed, &expires, &lastUsed, &item.CreatedAt, &item.UpdatedAt, &deleted, &item.UsageRequests, &item.UsageBilledCost)
+	item.ExpiresAt = nullText(expires)
+	item.LastUsedAt = nullText(lastUsed)
+	item.DeletedAt = nullText(deleted)
+	item.Archived = item.DeletedAt != ""
 	return item, err
 }
 

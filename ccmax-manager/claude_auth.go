@@ -303,7 +303,7 @@ func normalizeClaudeAuthMode(mode string) (authType, browserScope, apiScope stri
 
 func (a *app) accountProxyString(accountID int64) (string, error) {
 	var proxyID *int64
-	if err := a.db.QueryRow(`SELECT proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&proxyID); err != nil {
+	if err := a.db.QueryRow(`SELECT proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), accountID).Scan(&proxyID); err != nil {
 		return "", err
 	}
 	if proxyID == nil {
@@ -338,6 +338,17 @@ func claudeReqClient(proxyURL string) (*req.Client, error) {
 func (a *app) handleAccountAuthURL(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if err := a.requireLegacyCredentialOwner(r.Context(), accountID); err != nil {
+		if writeRuntimeCredentialOwnerError(w, err) {
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "account not found")
+			return
+		}
+		writeDBError(w, err)
 		return
 	}
 	var input struct {
@@ -375,6 +386,17 @@ func (a *app) handleAccountAuthURL(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleAccountOAuthExchange(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if err := a.requireLegacyCredentialOwner(r.Context(), accountID); err != nil {
+		if writeRuntimeCredentialOwnerError(w, err) {
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "account not found")
+			return
+		}
+		writeDBError(w, err)
 		return
 	}
 	var input struct {
@@ -420,6 +442,9 @@ func (a *app) handleAccountOAuthExchange(w http.ResponseWriter, r *http.Request)
 	}
 	if err := a.saveAuthorizedClaudeToken(accountID, authType, token, leaseOwner); err != nil {
 		a.recordAuthorization(&accountID, nil, "", "oauth", false, err.Error(), token.SubscriptionType, requestIP(r))
+		if writeRuntimeCredentialOwnerError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
@@ -430,6 +455,17 @@ func (a *app) handleAccountOAuthExchange(w http.ResponseWriter, r *http.Request)
 func (a *app) handleAccountSessionAuth(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if err := a.requireLegacyCredentialOwner(r.Context(), accountID); err != nil {
+		if writeRuntimeCredentialOwnerError(w, err) {
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "account not found")
+			return
+		}
+		writeDBError(w, err)
 		return
 	}
 	var input struct {
@@ -472,6 +508,9 @@ func (a *app) handleAccountSessionAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.saveAuthorizedClaudeToken(accountID, authType, token, leaseOwner, sourceSKHint(input.SessionKey)); err != nil {
 		a.recordAuthorization(&accountID, nil, "", "session_key", false, err.Error(), token.SubscriptionType, requestIP(r))
+		if writeRuntimeCredentialOwnerError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
@@ -683,7 +722,7 @@ func (a *app) syncClaudeAccountProfile(ctx context.Context, accountID int64, cre
 	if err := enrichClaudeTokenProfile(ctx, token, proxyURL); err != nil {
 		return err
 	}
-	_, err := a.db.Exec(`UPDATE accounts SET subscription_type = CASE WHEN ? = '' THEN subscription_type ELSE ? END, rate_limit_tier = CASE WHEN ? = '' THEN rate_limit_tier ELSE ? END, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, token.SubscriptionType, token.SubscriptionType, token.RateLimitTier, token.RateLimitTier, accountID)
+	_, err := a.db.Exec(`UPDATE accounts SET subscription_type = CASE WHEN ? = '' THEN subscription_type ELSE ? END, rate_limit_tier = CASE WHEN ? = '' THEN rate_limit_tier ELSE ? END, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), token.SubscriptionType, token.SubscriptionType, token.RateLimitTier, token.RateLimitTier, accountID)
 	return err
 }
 
@@ -711,7 +750,12 @@ func (a *app) saveAuthorizedClaudeToken(accountID int64, authType string, token 
 func (a *app) saveClaudeTokenWithCondition(accountID int64, authType string, token *claudeTokenInfo, preserveRefresh bool, condition *claudeTokenSaveCondition, sourceHints ...string) error {
 	var currentCredentials string
 	var previousOnboarded, previousInvalidated sql.NullString
-	if err := a.db.QueryRow(`SELECT credentials_json, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&currentCredentials, &previousOnboarded, &previousInvalidated); err != nil {
+	if err := a.db.QueryRow(`SELECT credentials_json, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), accountID).Scan(&currentCredentials, &previousOnboarded, &previousInvalidated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if ownerErr := a.requireLegacyCredentialOwner(context.Background(), accountID); errors.Is(ownerErr, errRuntimeCredentialOwner) {
+				return ownerErr
+			}
+		}
 		return err
 	}
 	if condition != nil && condition.ExpectedCredentials != nil && currentCredentials != *condition.ExpectedCredentials {
@@ -751,7 +795,7 @@ func (a *app) saveClaudeTokenWithCondition(accountID int64, authType string, tok
 		rateLimitStateUpdate = ``
 	}
 	isReauthorization := !preserveRefresh && previousOnboarded.Valid
-	query := `UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = CASE WHEN ? = '' THEN source_sk_hint ELSE ? END, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = ` + nowSQL + `, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, reauthorized_at = CASE WHEN ? THEN ` + nowSQL + ` ELSE reauthorized_at END, reauthorization_count = reauthorization_count + CASE WHEN ? THEN 1 ELSE 0 END, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN ` + nowSQL + ` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', ` + rateLimitStateUpdate + schedulingUpdate + ` updated_at = ` + nowSQL + ` WHERE id = ? AND deleted_at IS NULL`
+	query := `UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = CASE WHEN ? = '' THEN source_sk_hint ELSE ? END, auth_status = 'valid', rate_limit_reset_at = CASE WHEN auth_error LIKE 'OAuth 401:%' OR auth_error LIKE 'token refresh retry exhausted:%' THEN NULL ELSE rate_limit_reset_at END, auth_error = '', auth_checked_at = ` + nowSQL + `, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, reauthorized_at = CASE WHEN ? THEN ` + nowSQL + ` ELSE reauthorized_at END, reauthorization_count = reauthorization_count + CASE WHEN ? THEN 1 ELSE 0 END, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN ` + nowSQL + ` ELSE onboarded_at END, invalidated_at = NULL, error_message = '', ` + rateLimitStateUpdate + schedulingUpdate + ` updated_at = ` + nowSQL + ` WHERE id = ? AND deleted_at IS NULL AND ` + legacyExecutionPredicate("accounts")
 	args := []any{authType, string(credentialsJSON), credentialHint(string(credentialsJSON)), sourceHint, sourceHint, expiresAt, subscription, rateLimitTier, isReauthorization, isReauthorization, accountID}
 	if condition != nil {
 		if condition.ExpectedCredentials != nil {
@@ -764,11 +808,17 @@ func (a *app) saveClaudeTokenWithCondition(accountID int64, authType string, tok
 		}
 	}
 	result, err := a.db.Exec(query, args...)
-	if err == nil && condition != nil {
+	if err == nil {
 		if affected, affectedErr := result.RowsAffected(); affectedErr != nil {
 			err = affectedErr
 		} else if affected == 0 {
-			err = errAccountTokenLeaseLost
+			if ownerErr := a.requireLegacyCredentialOwner(context.Background(), accountID); errors.Is(ownerErr, errRuntimeCredentialOwner) {
+				err = ownerErr
+			} else if condition != nil {
+				err = errAccountTokenLeaseLost
+			} else {
+				err = sql.ErrNoRows
+			}
 		}
 	}
 	if err == nil && !preserveRefresh {
@@ -803,10 +853,10 @@ func (a *app) markAccountReauthIfCurrent(accountID int64, reason, expectedRefres
 	}
 	defer tx.Rollback()
 	var invalidated sql.NullString
-	if err := tx.QueryRow(`SELECT invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&invalidated); err != nil {
+	if err := tx.QueryRow(`SELECT invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), accountID).Scan(&invalidated); err != nil {
 		return false
 	}
-	query := `UPDATE accounts SET ` + accumulateAccountSurvivalSQL + `, auth_status = 'reauth_required', auth_error = ?, auth_checked_at = ` + nowSQL + `, invalidated_at = COALESCE(invalidated_at, ` + nowSQL + `), error_message = ?, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END, updated_at = ` + nowSQL + ` WHERE id = ?`
+	query := `UPDATE accounts SET ` + accumulateAccountSurvivalSQL + `, auth_status = 'reauth_required', auth_error = ?, auth_checked_at = ` + nowSQL + `, invalidated_at = COALESCE(invalidated_at, ` + nowSQL + `), error_message = ?, status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END, updated_at = ` + nowSQL + ` WHERE id = ? AND ` + legacyExecutionPredicate("accounts")
 	args := []any{reason, reason, accountID}
 	if conditional {
 		if expectedCredentials != "" {
@@ -941,7 +991,7 @@ func (a *app) refreshGatewayAccountToken(ctx context.Context, account gatewayAcc
 }
 
 func (a *app) reloadGatewayAccountToken(account gatewayAccount) (gatewayAccount, error) {
-	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL`, account.ID).Scan(&account.AuthType, &account.CredentialsJSON, &account.ProxyID); err != nil {
+	if err := a.db.QueryRow(`SELECT auth_type, credentials_json, proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), account.ID).Scan(&account.AuthType, &account.CredentialsJSON, &account.ProxyID); err != nil {
 		return account, err
 	}
 	return account, nil

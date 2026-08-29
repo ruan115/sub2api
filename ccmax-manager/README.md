@@ -67,6 +67,13 @@ go run .
 | `CCMAX_ADDR`                 | `127.0.0.1:8088`   | HTTP 监听地址                                 |
 | `CCMAX_MYSQL_DSN`            | 无，必填           | MySQL DSN；生产服务唯一持久化数据库           |
 | `CCMAX_REDIS_ADDR`           | 空                 | 可选 Redis 地址，仅用于临时调度协调           |
+| `CCMAX_EXECUTION_DATAPLANE_ENABLED` | `false` | 启用新执行面的 mTLS gRPC 客户端；未启用时不改变 legacy 流量 |
+| `CCMAX_EXECUTION_CA_FILE` | 空 | 执行面内部 CA PEM；启用 data-plane 时必填 |
+| `CCMAX_EXECUTION_CLIENT_CERT_FILE` | 空 | CCMAX mTLS 客户端证书 PEM；启用时必填 |
+| `CCMAX_EXECUTION_CLIENT_KEY_FILE` | 空 | CCMAX mTLS 客户端私钥 PEM；启用时必填 |
+| `CCMAX_EXECUTION_SERVER_NAME` | 空 | host-agent 服务证书名称；启用时必填 |
+| `CCMAX_EXECUTION_ROUTE_TTL` | `10s` | 本地 slot route cache 上限，最大允许 `1m` |
+| `CCMAX_EXECUTION_ROUTE_CACHE_SIZE` | `2048` | 本地 slot route cache 最大条目数 |
 | `CCMAX_ADMIN_USER`           | `admin`            | 首次初始化的管理员用户名                      |
 | `CCMAX_ADMIN_PASSWORD`       | `ccmax-admin`      | 首次初始化的管理员密码                        |
 | `CCMAX_AUTH_DISABLED`        | `false`            | 仅用于本机测试；设为 `1` 会关闭管理端认证     |
@@ -79,6 +86,12 @@ go run .
 | `CCMAX_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `15m` | 等待上游响应头的最长时间，覆盖长非流请求      |
 | `CCMAX_UPSTREAM_REQUEST_TIMEOUT` | `0` | 上游请求总时限；`0` 表示由请求上下文控制      |
 | `CCMAX_STREAM_HEARTBEAT_INTERVAL` | `10s` | 流式首事件和事件间隔期间发送 SSE 注释心跳，避免客户端误判超时 |
+
+新执行面设置使用独立管理接口，避免旧版账号/分组编辑页面在保存其他字段时意外改动灰度开关：
+
+- `GET/PUT /api/groups/{id}/execution`：分组执行策略、queue/reject 和镜像通道；
+- `GET/PUT /api/accounts/{id}/execution`：账号 allowed/preferred modes 与 1/3/3 并发限制，并只读返回 migration/runtime/mode health；
+- 旧账号默认 `legacy`。账号进入 `migrating/migrated` 后，CCMAX 的 OAuth、Session Key、批量授权和 Token refresh 不再拥有其明文凭证，也不会回退旧链路。
 
 ## API 调度
 

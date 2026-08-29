@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package execution.v1;
+
+option go_package = "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1";
+
+import "google/protobuf/timestamp.proto";
+
+service NodeControlService {
+  rpc EnrollNode(EnrollNodeRequest) returns (EnrollNodeResponse);
+  rpc RenewNodeCertificate(RenewNodeCertificateRequest) returns (RenewNodeCertificateResponse);
+  rpc Control(stream NodeControlServiceControlRequest) returns (stream NodeControlServiceControlResponse);
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message Capacity {
+  uint32 max_slots = 1;
+  uint32 max_active_cli = 2;
+  uint32 max_active_api = 3;
+  uint32 max_active_total = 4;
+  uint64 allocatable_cpu_millis = 5;
+  uint64 allocatable_memory_bytes = 6;
+}
+
+message EnrollNodeRequest {
+  string enrollment_token = 1;
+  string node_id = 2;
+  string public_key_pem = 3;
+  map<string, string> labels = 4;
+  ProtocolVersion protocol_version = 5;
+  repeated string capabilities = 6;
+}
+
+message EnrollNodeResponse {
+  string node_id = 1;
+  string certificate_pem = 2;
+  string ca_certificate_pem = 3;
+  google.protobuf.Timestamp certificate_expires_at = 4;
+}
+
+message RenewNodeCertificateRequest {
+  string node_id = 1;
+  string public_key_pem = 2;
+}
+
+message RenewNodeCertificateResponse {
+  string node_id = 1;
+  string certificate_pem = 2;
+  string ca_certificate_pem = 3;
+  google.protobuf.Timestamp certificate_expires_at = 4;
+}
+
+message NodeHello {
+  string node_id = 1;
+  ProtocolVersion protocol_version = 2;
+  repeated string capabilities = 3;
+  Capacity capacity = 4;
+  map<string, string> labels = 5;
+}
+
+message SlotObservation {
+  string slot_id = 1;
+  string provider_ref = 2;
+  uint64 execution_epoch = 3;
+  string actual_state = 4;
+  bool healthy = 5;
+  string reason = 6;
+  string image_digest = 7;
+}
+
+message NodeHeartbeat {
+  string node_id = 1;
+  google.protobuf.Timestamp observed_at = 2;
+  uint32 active_cli = 3;
+  uint32 active_api = 4;
+  uint32 active_total = 5;
+  uint32 allocated_slots = 6;
+  repeated SlotObservation slots = 7;
+  uint64 allocated_cpu_millis = 8;
+  uint64 allocated_memory_bytes = 9;
+}
+
+message CommandResult {
+  string command_id = 1;
+  bool succeeded = 2;
+  string error_code = 3;
+  string error_message = 4;
+  SlotObservation slot = 5;
+}
+
+message NodeControlServiceControlRequest {
+  oneof event {
+    NodeHello hello = 1;
+    NodeHeartbeat heartbeat = 2;
+    CommandResult command_result = 3;
+  }
+}
+
+enum SlotCommandAction {
+  SLOT_COMMAND_ACTION_UNSPECIFIED = 0;
+  SLOT_COMMAND_ACTION_CREATE = 1;
+  SLOT_COMMAND_ACTION_START = 2;
+  SLOT_COMMAND_ACTION_DRAIN = 3;
+  SLOT_COMMAND_ACTION_STOP = 4;
+  SLOT_COMMAND_ACTION_DESTROY = 5;
+  SLOT_COMMAND_ACTION_INSPECT = 6;
+}
+
+message SlotCommand {
+  string command_id = 1;
+  SlotCommandAction action = 2;
+  string slot_id = 3;
+  string account_id = 4;
+  uint64 execution_epoch = 5;
+  string image_digest = 6;
+  google.protobuf.Timestamp deadline = 7;
+  map<string, string> metadata = 8;
+}
+
+message RevokeEpochCommand {
+  string command_id = 1;
+  string slot_id = 2;
+  uint64 execution_epoch = 3;
+  string reason = 4;
+}
+
+message NodeControlServiceControlResponse {
+  oneof event {
+    SlotCommand slot_command = 1;
+    RevokeEpochCommand revoke_epoch = 2;
+  }
+}

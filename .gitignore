@@ -132,6 +132,9 @@ deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/prd/
+docs/prd/*
+!docs/prd/claude-execution-plane-v1.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
@@ -146,3 +149,5 @@ output/
 
 # Vitest / Vite cache at repo root
 .vite/
+.playwright-cli/
+execution-plane/.local-build/

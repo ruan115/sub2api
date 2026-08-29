@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
@@ -53,65 +54,79 @@ var distillationNegationReversals = regexp.MustCompile(`(?is)\b(?:except|but|onl
 // isDistillationProbeRequest intentionally recognizes only high-confidence
 // prompt/tool extraction requests. It does not classify traffic by RPM or
 // token volume, which would reject legitimate batch workloads.
-func isDistillationProbeRequest(body []byte) bool {
+type distillationProbeMatch struct {
+	Source string
+	RuleID string
+}
+
+type distillationCandidateText struct {
+	Source string
+	Text   string
+}
+
+func detectDistillationProbeRequest(body []byte) (distillationProbeMatch, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	var payload map[string]any
 	if decoder.Decode(&payload) != nil {
-		return false
+		return distillationProbeMatch{}, false
 	}
-	for _, text := range distillationCandidateTexts(payload) {
-		if isDistillationProbeText(text) {
-			return true
+	for _, candidate := range distillationCandidateTexts(payload) {
+		if ruleID, matched := matchDistillationProbeText(candidate.Text); matched {
+			return distillationProbeMatch{Source: candidate.Source, RuleID: ruleID}, true
 		}
 	}
-	return false
+	return distillationProbeMatch{}, false
 }
 
-func distillationCandidateTexts(payload map[string]any) []string {
-	texts := make([]string, 0, 8)
-	appendDistillationText(&texts, payload["prompt"])
-	// The client-supplied system block is inspected too: OpenAI-style requests
-	// arrive here with their system role already folded into this field.
-	appendDistillationText(&texts, payload["system"])
-	appendDistillationToolTexts(&texts, payload["tools"])
+func isDistillationProbeRequest(body []byte) bool {
+	_, matched := detectDistillationProbeRequest(body)
+	return matched
+}
+
+func distillationCandidateTexts(payload map[string]any) []distillationCandidateText {
+	texts := make([]distillationCandidateText, 0, 4)
+	appendDistillationDirectText(&texts, "prompt", payload["prompt"])
 	messages, _ := payload["messages"].([]any)
-	for _, raw := range messages {
+
+	// Only the most recent actionable user turn expresses the current request.
+	// Older conversation history, system prompts, tool descriptions, documents,
+	// tool results and thinking blocks are data or client configuration. Treating
+	// them as live extraction instructions caused normal Agent transcripts and
+	// uploaded request fixtures to be rejected.
+	for index := len(messages) - 1; index >= 0; index-- {
+		raw := messages[index]
 		message, _ := raw.(map[string]any)
 		if !strings.EqualFold(strings.TrimSpace(stringValue(message["role"])), "user") {
 			continue
 		}
-		appendDistillationText(&texts, message["content"])
+		current := make([]distillationCandidateText, 0, 2)
+		appendDistillationDirectText(&current, "messages.user", message["content"])
+		if len(current) == 0 {
+			continue
+		}
+		texts = append(texts, current...)
+		break
 	}
+
 	// A trailing assistant turn is a prefill the model continues from, so it
 	// carries user intent. Earlier assistant turns are real history and stay
 	// exempt.
 	if len(messages) > 0 {
 		if last, ok := messages[len(messages)-1].(map[string]any); ok {
 			if strings.EqualFold(strings.TrimSpace(stringValue(last["role"])), "assistant") {
-				appendDistillationText(&texts, last["content"])
+				appendDistillationDirectText(&texts, "messages.assistant_prefill", last["content"])
 			}
 		}
 	}
 	return texts
 }
 
-func appendDistillationToolTexts(target *[]string, value any) {
-	tools, _ := value.([]any)
-	for _, raw := range tools {
-		tool, _ := raw.(map[string]any)
-		if tool == nil {
-			continue
-		}
-		appendDistillationText(target, tool["description"])
-	}
-}
-
-func appendDistillationText(target *[]string, value any) {
+func appendDistillationDirectText(target *[]distillationCandidateText, source string, value any) {
 	switch typed := value.(type) {
 	case string:
 		if text := strings.TrimSpace(typed); text != "" {
-			*target = append(*target, text)
+			*target = append(*target, distillationCandidateText{Source: source, Text: text})
 		}
 	case []any:
 		for _, item := range typed {
@@ -120,35 +135,23 @@ func appendDistillationText(target *[]string, value any) {
 				continue
 			}
 			blockType := strings.ToLower(strings.TrimSpace(stringValue(block["type"])))
-			// Real tool output and binary attachments stay exempt: grepping a
-			// codebase legitimately surfaces this vocabulary.
-			if blockType == "tool_result" || blockType == "image" {
-				continue
-			}
-			if blockType == "document" {
-				if source, ok := block["source"].(map[string]any); ok {
-					if strings.EqualFold(strings.TrimSpace(stringValue(source["type"])), "text") {
-						appendDistillationText(target, source["data"])
-					}
-				}
-				continue
-			}
-			if blockType == "thinking" {
-				appendDistillationText(target, block["thinking"])
-				continue
-			}
 			if blockType == "" || blockType == "text" || blockType == "input_text" {
-				appendDistillationText(target, block["text"])
-				appendDistillationText(target, block["content"])
+				appendDistillationDirectText(target, source, block["text"])
+				appendDistillationDirectText(target, source, block["content"])
 			}
 		}
 	}
 }
 
 func isDistillationProbeText(text string) bool {
+	_, matched := matchDistillationProbeText(text)
+	return matched
+}
+
+func matchDistillationProbeText(text string) (string, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return false
+		return "", false
 	}
 	if len(text) > 256<<10 {
 		text = text[:256<<10]
@@ -157,24 +160,30 @@ func isDistillationProbeText(text string) bool {
 	// is never rewritten by the guard.
 	text = normalizeDistillationText(text)
 	for _, sentence := range splitDistillationSentences(text) {
-		if !matchesDistillationProbe(sentence) {
+		ruleID, matched := matchDistillationProbe(sentence)
+		if !matched {
 			continue
 		}
 		if isDistillationSafetyGuidance(sentence) {
 			continue
 		}
-		return true
+		return ruleID, true
 	}
-	return false
+	return "", false
 }
 
 func matchesDistillationProbe(text string) bool {
-	for _, pattern := range distillationProbePatterns {
+	_, matched := matchDistillationProbe(text)
+	return matched
+}
+
+func matchDistillationProbe(text string) (string, bool) {
+	for index, pattern := range distillationProbePatterns {
 		if pattern.MatchString(text) {
-			return true
+			return fmt.Sprintf("pattern_%02d", index+1), true
 		}
 	}
-	return false
+	return "", false
 }
 
 // isDistillationSafetyGuidance exempts sentences that tell the model *not* to

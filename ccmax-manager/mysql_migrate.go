@@ -33,6 +33,9 @@ var mysqlMigrationTables = []string{
 	"proxies",
 	"users",
 	"accounts",
+	"account_mode_health",
+	"runtime_outbox",
+	"runtime_operation_audit",
 	"account_groups",
 	"purposes",
 	"model_prices",
@@ -57,6 +60,7 @@ var mysqlAppendOnlyMigrationTables = map[string]bool{
 	"gateway_error_logs":       true,
 	"account_lifecycle_events": true,
 	"reserve_activation_logs":  true,
+	"runtime_operation_audit":  true,
 }
 
 func migrateSQLiteToMySQL(sourcePath string, target *database, resetTarget, incremental bool) (mysqlMigrationReport, error) {

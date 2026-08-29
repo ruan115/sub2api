@@ -180,7 +180,7 @@ func (a *app) accountHealthIDs(requestedIDs []int64, manual bool) ([]int64, int,
 	}
 	query := `SELECT a.id, a.auth_type, a.auth_status, a.credentials_json, a.proxy_id
 		FROM accounts a
-		WHERE a.deleted_at IS NULL AND a.status != 'disabled'`
+		WHERE a.deleted_at IS NULL AND a.status != 'disabled' AND ` + legacyExecutionPredicate("a")
 	args := make([]any, 0, len(requested))
 	if len(requested) > 0 {
 		placeholders := make([]string, 0, len(requested))

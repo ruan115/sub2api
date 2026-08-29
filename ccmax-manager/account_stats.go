@@ -761,7 +761,10 @@ func (a *app) exchangeBatchClaudeSessionKey(ctx context.Context, sessionKey, sco
 
 func (a *app) accountAuthorizationProxy(accountID int64) (int64, string, error) {
 	var proxyID sql.NullInt64
-	if err := a.db.QueryRow(`SELECT proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&proxyID); err != nil {
+	if err := a.requireLegacyCredentialOwner(context.Background(), accountID); err != nil {
+		return 0, "", err
+	}
+	if err := a.db.QueryRow(`SELECT proxy_id FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), accountID).Scan(&proxyID); err != nil {
 		return 0, "", err
 	}
 	if !proxyID.Valid {
@@ -982,7 +985,12 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 	}
 	defer tx.Rollback()
 	var previousOnboarded, previousInvalidated sql.NullString
-	if err := tx.QueryRow(`SELECT onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&previousOnboarded, &previousInvalidated); err != nil {
+	if err := tx.QueryRow(`SELECT onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND `+legacyExecutionPredicate("accounts"), accountID).Scan(&previousOnboarded, &previousInvalidated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if ownerErr := a.requireLegacyCredentialOwner(context.Background(), accountID); errors.Is(ownerErr, errRuntimeCredentialOwner) {
+				return ownerErr
+			}
+		}
 		return err
 	}
 	expiresAt := time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339Nano)
@@ -1000,12 +1008,16 @@ func (a *app) updateBatchAuthorizedAccount(accountID int64, input batchAuthoriza
 		quota7DThresholdPercent = *input.Quota7DThresholdPercent
 	}
 	result, err := tx.Exec(`UPDATE accounts SET auth_type = ?, credentials_json = ?, credential_hint = ?, source_sk_hint = ?, auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), quota_7d_threshold_enabled = COALESCE(?, quota_7d_threshold_enabled), quota_7d_threshold_percent = COALESCE(?, quota_7d_threshold_percent), reauthorized_at = CASE WHEN ? THEN `+nowSQL+` ELSE reauthorized_at END, reauthorization_count = reauthorization_count + CASE WHEN ? THEN 1 ELSE 0 END, onboarded_at = CASE WHEN onboarded_at IS NULL OR invalidated_at IS NOT NULL THEN `+nowSQL+` ELSE onboarded_at END, invalidated_at = NULL, archived_at = NULL, archived_proxy_id = NULL, error_message = '', rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL, rate_limit_downweight_until = NULL, status = 'active', schedulable = 1, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		AND `+legacyExecutionPredicate("accounts")+`
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`,
 		authType, string(encoded), credentialHint(string(encoded)), sourceSKHint(sessionKey), expiresAt, token.SubscriptionType, token.RateLimitTier, quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent, previousOnboarded.Valid, previousOnboarded.Valid, accountID, leaseOwner)
 	if err != nil {
 		return err
 	}
 	if updated, _ := result.RowsAffected(); updated == 0 {
+		if ownerErr := a.requireLegacyCredentialOwner(context.Background(), accountID); errors.Is(ownerErr, errRuntimeCredentialOwner) {
+			return ownerErr
+		}
 		return sql.ErrNoRows
 	}
 	if _, err := tx.Exec(`DELETE FROM account_rpm_thresholds WHERE account_id = ?`, accountID); err != nil {

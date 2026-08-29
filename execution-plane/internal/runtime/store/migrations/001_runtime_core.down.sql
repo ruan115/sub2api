@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS reconciliation_runs;
+DROP TABLE IF EXISTS node_command_results;
+DROP TABLE IF EXISTS node_drain_jobs;
+DROP TABLE IF EXISTS image_releases;
+DROP TABLE IF EXISTS provisioning_jobs;
+DROP TABLE IF EXISTS runtime_sessions;
+DROP TABLE IF EXISTS credential_leases;
+DROP TABLE IF EXISTS credential_versions;
+DROP TABLE IF EXISTS credential_vault;
+DROP TABLE IF EXISTS execution_leases;
+DROP TABLE IF EXISTS slot_assignments;
+DROP TABLE IF EXISTS slots;
+DROP TABLE IF EXISTS node_certificates;
+DROP TABLE IF EXISTS node_enrollments;
+DROP TABLE IF EXISTS nodes;

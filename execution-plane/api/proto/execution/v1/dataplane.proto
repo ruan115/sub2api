@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package execution.v1;
+
+option go_package = "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1";
+
+service ExecutionDataPlaneService {
+  rpc Execute(stream ExecuteRequest) returns (stream ExecuteResponse);
+  rpc CountTokens(CountTokensRequest) returns (CountTokensResponse);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_CLI_NATIVE = 1;
+  EXECUTION_MODE_OAUTH_API = 2;
+}
+
+message BeginExecution {
+  string request_id = 1;
+  string account_id = 2;
+  ExecutionMode mode = 3;
+  string session_key = 4;
+  bytes anthropic_request_json = 5;
+  map<string, string> request_headers = 6;
+  string slot_id = 7;
+  uint64 execution_epoch = 8;
+  uint64 route_generation = 9;
+}
+
+message ToolResult {
+  string tool_use_id = 1;
+  bytes content_json = 2;
+  bool is_error = 3;
+}
+
+message CancelExecution {
+  string reason = 1;
+}
+
+message ExecuteRequest {
+  oneof event {
+    BeginExecution begin = 1;
+    ToolResult tool_result = 2;
+    CancelExecution cancel = 3;
+  }
+}
+
+message ResponseHeaders {
+  int32 status_code = 1;
+  map<string, string> headers = 2;
+}
+
+message ResponseBodyChunk {
+  bytes data = 1;
+}
+
+message ToolUseRequired {
+  repeated bytes tool_use_blocks_json = 1;
+  string resume_token = 2;
+}
+
+message ExecutionCompleted {
+  string upstream_request_id = 1;
+  bytes usage_json = 2;
+}
+
+message ExecutionError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  bool response_started = 4;
+}
+
+message ExecuteResponse {
+  oneof event {
+    ResponseHeaders headers = 1;
+    ResponseBodyChunk body_chunk = 2;
+    ToolUseRequired tool_use = 3;
+    ExecutionCompleted completed = 4;
+    ExecutionError error = 5;
+  }
+}
+
+message CountTokensRequest {
+  string request_id = 1;
+  string account_id = 2;
+  ExecutionMode mode = 3;
+  bytes anthropic_request_json = 4;
+  string slot_id = 5;
+  uint64 execution_epoch = 6;
+  uint64 route_generation = 7;
+}
+
+message CountTokensResponse {
+  int32 status_code = 1;
+  bytes anthropic_response_json = 2;
+  string upstream_request_id = 3;
+}
+
+message ListModelsRequest {}
+
+message Model {
+  string id = 1;
+  string display_name = 2;
+  repeated ExecutionMode modes = 3;
+}
+
+message ListModelsResponse {
+  repeated Model models = 1;
+}

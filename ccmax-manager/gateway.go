@@ -286,10 +286,13 @@ func (a *app) handleClaudeGateway(w http.ResponseWriter, r *http.Request, countT
 		writeError(w, http.StatusBadRequest, "invalid Anthropic message request")
 		return
 	}
-	if key.RejectDistillation && isDistillationProbeRequest(body) {
-		attributeGatewayErrorEvent(w, "distillation_blocked", distillationRejectedStatus, "Not allowed")
-		writeAnthropicGatewayError(w, distillationRejectedStatus, "permission_error", "Not allowed")
-		return
+	if key.RejectDistillation {
+		if match, blocked := detectDistillationProbeRequest(body); blocked {
+			attributeGatewayErrorEvent(w, "distillation_blocked", distillationRejectedStatus,
+				fmt.Sprintf("Distillation probe blocked · source=%s · rule=%s", match.Source, match.RuleID))
+			writeAnthropicGatewayError(w, distillationRejectedStatus, "permission_error", "Not allowed")
+			return
+		}
 	}
 	if key.RequestFormatFilter {
 		if formatErr := validateFilteredRequestFormat(body); formatErr != nil {
@@ -2211,7 +2214,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
 		LEFT JOIN groups g ON g.id = ag.group_id
 		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
-		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND `+accountStatePredicate("a", "normal")+`
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND `+legacyExecutionPredicate("a")+` AND `+accountStatePredicate("a", "normal")+`
 		`+orderClause, freshCutoff, modelCooldownKey(requestedModel), key.GroupID, stickyID)
 	if err != nil {
 		return gatewayAccount{}, err
@@ -2361,6 +2364,7 @@ func (a *app) tryAcquireGatewayAccountPinned(key gatewayKey, sessionHash, reques
 			// dead proxy — means the account is not coming back on its own.
 			_ = tx.QueryRow(`SELECT COUNT(*) FROM accounts a
 				WHERE a.id = ? AND a.deleted_at IS NULL AND a.archived_at IS NULL
+				AND `+legacyExecutionPredicate("a")+`
 				AND a.status = 'active' AND a.schedulable = 1 AND a.auth_status = 'valid'
 				AND a.invalidated_at IS NULL
 				AND (a.expires_at IS NULL OR a.expires_at > `+nowSQL+`)

@@ -24,6 +24,9 @@ const state = {
   prices: [],
   pricingSync: null,
   billing: null,
+  billingAccountModels: {},
+  billingAccountModelsLoading: new Set(),
+  expandedBillingAccountID: 0,
   usage: [],
   audits: [],
   cacheAudits: [],
@@ -40,6 +43,9 @@ const state = {
 	archivedProxies: [],
   users: [],
   keys: [],
+  userDetails: {},
+  expandedUserID: 0,
+  userDetailsLoading: new Set(),
   accountGroup: "",
   accountStrategy: "",
   accountSearch: "",
@@ -209,6 +215,12 @@ const paginationTables = {
   users: { body: "users-body", size: 10, render: renderAccess },
   keys: { body: "keys-body", size: 20, render: renderAccess },
   prices: { body: "prices-body", size: 20, render: renderPriceTable },
+  billingBreakdown: {
+    body: "breakdown-list",
+    footer: "breakdown-pagination",
+    size: 20,
+    render: renderBreakdown,
+  },
   usage: { body: "usage-body", size: 20, render: renderBilling },
   audit: { body: "audit-body", size: 20, render: renderAudit },
   cacheAudit: {
@@ -225,10 +237,12 @@ function resetPagination(key) {
 function renderPagination(key, total, page, pageSize, totalPages) {
   const config = paginationTables[key];
   const tableWrap = document.getElementById(config.body)?.closest(".table-wrap");
-  if (!tableWrap) return;
-  let footer = tableWrap.parentElement.querySelector(
-    `.table-pagination[data-pagination="${key}"]`,
-  );
+  let footer = config.footer
+    ? document.getElementById(config.footer)
+    : tableWrap?.parentElement.querySelector(
+        `.table-pagination[data-pagination="${key}"]`,
+      );
+  if (!tableWrap && !footer) return;
   if (!footer) {
     footer = document.createElement("div");
     footer.className = "table-pagination";
@@ -236,8 +250,11 @@ function renderPagination(key, total, page, pageSize, totalPages) {
     tableWrap.insertAdjacentElement("afterend", footer);
   }
   footer.hidden = total === 0;
+  const freezeButton = tableWrap
+    ? `<button type="button" class="pagination-freeze" data-table-freeze="${key}" title="固定前后行"><i data-lucide="pin"></i></button>`
+    : "";
   footer.innerHTML = `
-    <div class="pagination-meta"><span class="pagination-summary">共 <b>${total.toLocaleString("zh-CN")}</b> 条</span><button type="button" class="pagination-freeze" data-table-freeze="${key}" title="固定前后行"><i data-lucide="pin"></i></button></div>
+    <div class="pagination-meta"><span class="pagination-summary">共 <b>${total.toLocaleString("zh-CN")}</b> 条</span>${freezeButton}</div>
     <div class="pagination-controls">
       <label class="pagination-size"><span>每页</span><select data-pagination-size="${key}" aria-label="${key} 每页条数">${[10, 20, 50, 100]
         .map(
@@ -251,7 +268,7 @@ function renderPagination(key, total, page, pageSize, totalPages) {
       <button type="button" data-pagination-key="${key}" data-page-step="1" title="下一页" aria-label="下一页" ${page >= totalPages ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>
     </div>`;
   refreshIcons(footer);
-  window.requestAnimationFrame(() => applyTableFreeze(key));
+  if (tableWrap) window.requestAnimationFrame(() => applyTableFreeze(key));
 }
 
 function loadTableFreezeSettings() {
@@ -354,6 +371,7 @@ async function loadServerPage(key) {
   if (key === "accounts") return loadAccountPage();
   if (key === "dead") return loadDeadPage();
   if (key === "usage") return loadUsagePage();
+  if (key === "billingBreakdown") return loadBillingSummary();
   if (key === "audit") return loadAudit();
   if (key === "cacheAudit") return loadCacheAudit();
   if (key === "authorization") return loadAuthorization();
@@ -1073,14 +1091,24 @@ async function loadPricingInventory() {
 
 async function loadAccessInventory() {
   if (!canView("access")) return;
+  const expandedUserID = state.expandedUserID;
   if (state.me.role === "user") {
     state.me = await api("/api/me");
     $("#identity-name").textContent = state.me.name || state.me.username;
   }
   state.keys = await api("/api/api-keys");
-  if (isAdmin()) state.users = await api("/api/users");
+  if (isAdmin()) {
+    state.users = await api("/api/users");
+    state.userDetails = {};
+  }
   renderAccess();
   populateSelects();
+  if (
+    isAdmin() &&
+    expandedUserID &&
+    state.users.some((item) => item.id === expandedUserID)
+  )
+    await loadUserAccessDetails(expandedUserID, 1);
 }
 
 async function loadRealtime() {
@@ -1183,9 +1211,54 @@ function billingFilterParams(includePagination = false) {
 
 async function loadBillingSummary() {
   const params = billingFilterParams(false);
-  params.set("breakdown", state.breakdown === "key" ? "api_key" : state.breakdown);
+  params.set(
+    "breakdown",
+    state.breakdown === "key" ? "api_key" : state.breakdown,
+  );
+  for (const [key, value] of Object.entries(
+    paginationParams("billingBreakdown"),
+  ))
+    params.set(key, value);
   state.billing = await api(`/api/billing?${params}`);
+  setServerPagination("billingBreakdown", {
+    total: state.billing.breakdown_total,
+    page: state.billing.breakdown_page,
+    page_size: state.billing.breakdown_page_size,
+    total_pages: state.billing.breakdown_total_pages,
+  });
+  state.expandedBillingAccountID = 0;
+  state.billingAccountModels = {};
   renderBilling();
+}
+
+async function loadBillingAccountModels(accountID, page = 1) {
+  const id = Number(accountID);
+  if (!id || state.billingAccountModelsLoading.has(id)) return;
+  state.billingAccountModelsLoading.add(id);
+  renderBreakdown();
+  try {
+    const params = billingFilterParams(false);
+    params.set("page", String(page));
+    params.set("page_size", "20");
+    state.billingAccountModels[id] = await api(
+      `/api/billing/accounts/${id}/models?${params}`,
+    );
+  } finally {
+    state.billingAccountModelsLoading.delete(id);
+    renderBreakdown();
+  }
+}
+
+async function toggleBillingAccountModels(accountID) {
+  const id = Number(accountID);
+  if (state.expandedBillingAccountID === id) {
+    state.expandedBillingAccountID = 0;
+    renderBreakdown();
+    return;
+  }
+  state.expandedBillingAccountID = id;
+  renderBreakdown();
+  if (!state.billingAccountModels[id]) await loadBillingAccountModels(id, 1);
 }
 
 async function loadUsagePage() {
@@ -3027,18 +3100,133 @@ function syncProxySelection(scope = filteredProxies()) {
   $("#delete-proxies-batch").disabled = !isAdmin() || selected.length === 0;
 }
 
+async function loadUserAccessDetails(userID, page = 1) {
+  const id = Number(userID);
+  if (!id || state.userDetailsLoading.has(id)) return;
+  state.userDetailsLoading.add(id);
+  renderAccess();
+  try {
+    state.userDetails[id] = await api(
+      `/api/users/${id}/access-details?usage_page=${Math.max(1, Number(page) || 1)}&usage_page_size=10`,
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.userDetailsLoading.delete(id);
+    renderAccess();
+  }
+}
+
+async function toggleUserAccessDetails(userID) {
+  const id = Number(userID);
+  if (!id) return;
+  if (state.expandedUserID === id) {
+    state.expandedUserID = 0;
+    renderAccess();
+    return;
+  }
+  state.expandedUserID = id;
+  renderAccess();
+  if (!state.userDetails[id]) await loadUserAccessDetails(id, 1);
+}
+
+function userAccessDetailMarkup(userID) {
+  const id = Number(userID);
+  const loading = state.userDetailsLoading.has(id);
+  const detail = state.userDetails[id];
+  if (loading && !detail)
+    return `<div class="user-detail-loading"><i data-lucide="loader-circle"></i><span>正在加载用户消费与 SK 归档…</span></div>`;
+  if (!detail)
+    return `<div class="user-detail-loading"><span>暂无可展示数据</span></div>`;
+
+  const keys = detail.keys || [];
+  const usage = detail.usage || [];
+  const keyRows = keys.length
+    ? keys
+        .map((key) => {
+          const archived = Boolean(key.archived);
+          const status = archived
+            ? ["已归档", "off"]
+            : key.status === "active"
+              ? ["启用", "ok"]
+              : ["已禁用", "off"];
+          const secret = key.key || `${key.key_prefix}••••••••`;
+          return `<tr class="${archived ? "archived-key-row" : ""}">
+            <td><span class="row-title truncate-cell" title="${escapeHTML(key.name)}">${escapeHTML(key.name)}</span><span class="row-subtitle mono">${escapeHTML(key.key_prefix)}</span></td>
+            <td><div class="user-key-secret"><code title="${escapeHTML(secret)}">${escapeHTML(secret)}</code>${key.key ? `<button type="button" data-copy-user-key="${key.id}" data-user-id="${id}" title="复制完整 SK" aria-label="复制完整 SK"><i data-lucide="copy"></i></button>` : ""}</div></td>
+            <td>${groupMark(key.group_id, "pill")}</td>
+            <td class="num mono">${money(key.usage_billed_cost ?? key.quota_used)}</td>
+            <td class="num mono">${Number(key.usage_requests || 0).toLocaleString("zh-CN")}</td>
+            <td class="mono" title="${escapeHTML(dateTime(key.last_used_at))}">${dateTime(key.last_used_at)}</td>
+            <td><span class="pill ${status[1]}">${status[0]}</span>${archived ? `<span class="row-subtitle mono" title="${escapeHTML(dateTime(key.deleted_at))}">${dateTime(key.deleted_at)}</span>` : ""}</td>
+          </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="7" class="user-detail-empty">该用户还没有 SK</td></tr>`;
+
+  const usageRows = usage.length
+    ? usage
+        .map((item) => {
+          const cache = Number(item.cache_creation_tokens || 0) + Number(item.cache_read_tokens || 0);
+          return `<tr>
+            <td><span class="row-title mono truncate-cell" title="${escapeHTML(item.request_id)}">${escapeHTML(item.request_id)}</span><span class="row-subtitle mono">${dateTime(item.created_at)}</span></td>
+            <td><span class="row-title truncate-cell" title="${escapeHTML(item.api_key_name || "已归档 SK")}">${escapeHTML(item.api_key_name || "已归档 SK")}</span><span class="row-subtitle mono">${escapeHTML(item.api_key_prefix || "—")}</span></td>
+            <td><span class="row-title mono truncate-cell" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</span><span class="row-subtitle">${groupMark(item.group_id, "text")}</span></td>
+            <td class="num mono" title="输入 / 输出 / 缓存">${compact(item.input_tokens)} / ${compact(item.output_tokens)} / ${compact(cache)}</td>
+            <td class="num mono">${money(item.billed_cost)}</td>
+            <td class="num mono">${Number(item.duration_ms || 0).toLocaleString("zh-CN")} ms</td>
+            <td><span class="row-title truncate-cell" title="${escapeHTML(item.account_name || "—")}">${escapeHTML(item.account_name || "—")}</span></td>
+          </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="7" class="user-detail-empty">该用户还没有消费记录</td></tr>`;
+
+  const page = Number(detail.usage_page || 1);
+  const pages = Number(detail.usage_total_pages || 1);
+  return `<div class="user-access-detail">
+    <div class="user-detail-metrics">
+      <div><span>累计消费</span><strong>${money(detail.totals?.billed_cost || 0)}</strong></div>
+      <div><span>请求总数</span><strong>${Number(detail.totals?.requests || 0).toLocaleString("zh-CN")}</strong></div>
+      <div><span>有效 SK</span><strong>${Number(detail.user?.active_key_count || 0).toLocaleString("zh-CN")}</strong></div>
+      <div><span>归档 SK</span><strong>${Number(detail.user?.archived_key_count || 0).toLocaleString("zh-CN")}</strong></div>
+      <div><span>Token</span><strong>${compact(Number(detail.totals?.input_tokens || 0) + Number(detail.totals?.output_tokens || 0) + Number(detail.totals?.cache_tokens || 0))}</strong></div>
+    </div>
+    <section class="user-detail-section">
+      <header><div><span>API KEYS</span><strong>有效与归档 SK</strong></div><small>归档项仅超级管理员可见，不能恢复或编辑</small></header>
+      <div class="user-detail-table-wrap"><table><thead><tr><th>名称</th><th>完整 SK</th><th>分组</th><th class="num">已消费</th><th class="num">请求数</th><th>最后调用</th><th>状态</th></tr></thead><tbody>${keyRows}</tbody></table></div>
+    </section>
+    <section class="user-detail-section user-usage-section">
+      <header><div><span>USAGE LOG</span><strong>用户消费流水</strong></div><small>共 ${Number(detail.usage_total || 0).toLocaleString("zh-CN")} 条</small></header>
+      <div class="user-detail-table-wrap"><table><thead><tr><th>请求 / 时间</th><th>调用 SK</th><th>模型 / 分组</th><th class="num">输入 / 输出 / 缓存</th><th class="num">计费</th><th class="num">耗时</th><th>上游账号</th></tr></thead><tbody>${usageRows}</tbody></table></div>
+      <footer class="user-detail-pagination"><span>第 ${page} / ${pages} 页</span><div><button type="button" data-user-usage-page="${page - 1}" data-user-id="${id}" title="上一页" ${page <= 1 || loading ? "disabled" : ""}><i data-lucide="chevron-left"></i></button><button type="button" data-user-usage-page="${page + 1}" data-user-id="${id}" title="下一页" ${page >= pages || loading ? "disabled" : ""}><i data-lucide="chevron-right"></i></button></div></footer>
+    </section>
+  </div>`;
+}
+
 function renderAccess() {
   const admin = isAdmin();
   const canManageKeys = admin || state.me.role === "user";
   $("#user-toolbar").hidden = !admin;
   $("#users-panel").hidden = !admin;
-  if (admin)
-    $("#users-body").innerHTML = paginatedItems("users", state.users)
-      .map(
-        (item) =>
-          `<tr><td><span class="row-title">${escapeHTML(item.name || item.username)}</span><span class="row-subtitle mono">${escapeHTML(item.username)}</span></td><td><span class="pill">${roleName(item.role)}</span></td><td><div class="group-pills">${item.allowed_group_ids.map((id) => groupMark(id, "pill")).join("")}</div></td><td class="num mono">${item.balance == null ? "不限" : money(item.balance)}</td><td class="num mono">${item.rpm_limit || "∞"}</td><td><span class="pill ${item.status === "active" ? "ok" : "off"}">${item.status === "active" ? "启用" : "停用"}</span></td><td class="mono">${dateTime(item.created_at)}</td><td class="actions"><span class="row-actions"><button data-edit-user="${item.id}" title="编辑用户"><i data-lucide="square-pen"></i></button>${item.id === state.me.id ? "" : `<button class="danger" data-delete-user="${item.id}" title="删除用户"><i data-lucide="trash-2"></i></button>`}</span></td></tr>`,
-      )
+  if (admin) {
+    const visibleUsers = paginatedItems("users", state.users);
+    $("#users-body").innerHTML = visibleUsers
+      .map((item) => {
+        const open = state.expandedUserID === item.id;
+        return `<tr class="user-summary-row ${open ? "is-open" : ""}" data-user-row="${item.id}" aria-expanded="${open}">
+          <td><button type="button" class="user-accordion-trigger" data-user-toggle="${item.id}" aria-expanded="${open}" title="${open ? "收起用户明细" : "展开用户明细"}"><span class="user-trigger-icon"><i data-lucide="chevron-right"></i></span><span class="user-trigger-copy"><strong title="${escapeHTML(item.name || item.username)}">${escapeHTML(item.name || item.username)}</strong><small class="mono" title="${escapeHTML(item.username)}">${escapeHTML(item.username)} · ${Number(item.active_key_count || 0)} 个有效 SK</small></span></button></td>
+          <td><span class="pill">${roleName(item.role)}</span></td>
+          <td><div class="group-pills">${item.allowed_group_ids.map((id) => groupMark(id, "pill")).join("")}</div></td>
+          <td class="num mono">${item.balance == null ? "不限" : money(item.balance)}</td>
+          <td class="num mono user-consumed">${money(item.consumed || 0)}<span>${Number(item.usage_requests || 0).toLocaleString("zh-CN")} 次</span></td>
+          <td class="num mono">${item.rpm_limit || "∞"}</td>
+          <td><span class="pill ${item.status === "active" ? "ok" : "off"}">${item.status === "active" ? "启用" : "停用"}</span></td>
+          <td class="mono">${dateTime(item.created_at)}</td>
+          <td class="actions"><span class="row-actions"><button data-edit-user="${item.id}" title="编辑用户"><i data-lucide="square-pen"></i></button>${item.id === state.me.id ? "" : `<button class="danger" data-delete-user="${item.id}" title="删除用户"><i data-lucide="trash-2"></i></button>`}</span></td>
+        </tr><tr class="user-detail-row" ${open ? "" : "hidden"}><td colspan="9">${open ? userAccessDetailMarkup(item.id) : ""}</td></tr>`;
+      })
       .join("");
+  }
   $("#keys-empty").hidden = state.keys.length > 0;
   $("#keys-body").innerHTML = paginatedItems("keys", state.keys)
     .map(
@@ -3050,7 +3238,7 @@ function renderAccess() {
   const balanceSummary = $("#user-balance-summary");
   balanceSummary.hidden = state.me.role !== "user";
   if (!balanceSummary.hidden)
-    balanceSummary.textContent = `可支配余额 ${state.me.balance == null ? "不限" : money(state.me.balance)}`;
+    balanceSummary.textContent = `可支配额度 ${state.me.balance == null ? "不限" : money(state.me.balance)} · 已消费 ${money(state.me.consumed || 0)}`;
   refreshIcons($("#view-access"));
 }
 
@@ -3264,14 +3452,80 @@ function renderBreakdown() {
   };
   const rows = map[state.breakdown] || [];
   const maxValue = Math.max(...rows.map((item) => item.billed_cost), 0);
-  $("#breakdown-list").innerHTML = rows.length
-    ? rows
-        .map(
-          (item) =>
-            `<div class="breakdown-row"><div><strong>${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}</strong><small>${item.requests} 次请求</small></div><div class="breakdown-bar"><span style="width:${maxValue ? Math.max((item.billed_cost / maxValue) * 100, 2) : 0}%"></span></div><div class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</div></div>`,
-        )
-        .join("")
-    : '<div class="empty-state"><strong>暂无拆分数据</strong></div>';
+  if (state.breakdown === "account") {
+    $("#breakdown-list").innerHTML = rows.length
+      ? rows
+          .map((item) => billingAccountBreakdownMarkup(item, maxValue))
+          .join("")
+      : '<div class="empty-state"><strong>暂无账户账单</strong></div>';
+  } else {
+    $("#breakdown-list").innerHTML = rows.length
+      ? rows
+          .map(
+            (item) =>
+              `<div class="breakdown-row"><div><strong title="${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}">${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}</strong><small>${item.requests} 次请求</small></div><div class="breakdown-bar"><span style="width:${maxValue ? Math.max((item.billed_cost / maxValue) * 100, 2) : 0}%"></span></div><div class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</div></div>`,
+          )
+          .join("")
+      : '<div class="empty-state"><strong>暂无拆分数据</strong></div>';
+  }
+  const page = state.serverPagination.billingBreakdown;
+  if (page)
+    renderPagination(
+      "billingBreakdown",
+      page.total,
+      page.page,
+      page.pageSize,
+      page.totalPages,
+    );
+  refreshIcons($("#breakdown-list"));
+}
+
+function billingAccountBreakdownMarkup(item, maxValue) {
+  const accountID = Number(item.key);
+  const expanded = state.expandedBillingAccountID === accountID;
+  const width = maxValue
+    ? Math.max((item.billed_cost / maxValue) * 100, 2)
+    : 0;
+  return `<section class="billing-account-accordion ${expanded ? "expanded" : ""}">
+    <button type="button" class="billing-account-summary" data-billing-account="${accountID}" aria-expanded="${expanded}">
+      <span class="billing-account-identity"><strong title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</strong><small>#${accountID} · ${item.requests.toLocaleString("zh-CN")} 次请求</small></span>
+      <span class="breakdown-bar" aria-hidden="true"><span style="width:${width}%"></span></span>
+      <span class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</span>
+      <i data-lucide="chevron-down" class="billing-account-chevron"></i>
+    </button>
+    ${expanded ? billingAccountModelsMarkup(accountID) : ""}
+  </section>`;
+}
+
+function billingAccountModelsMarkup(accountID) {
+  if (state.billingAccountModelsLoading.has(accountID))
+    return '<div class="billing-model-loading"><span class="loading-spinner"></span><span>正在统计模型账单</span></div>';
+  const payload = state.billingAccountModels[accountID];
+  if (!payload)
+    return '<div class="billing-model-loading"><span>展开后按需加载模型统计</span></div>';
+  if (!payload.items?.length)
+    return '<div class="billing-model-loading"><span>当前筛选区间没有模型用量</span></div>';
+  const rows = payload.items
+    .map((item) => {
+      const cacheTokens =
+        item.cache_creation_tokens + item.cache_read_tokens;
+      const priceTitle = `输入 ${money(item.input_per_million)}/1M\n输出 ${money(item.output_per_million)}/1M\n缓存写入 ${money(item.cache_creation_per_million)}/1M\n缓存读取 ${money(item.cache_read_per_million)}/1M`;
+      return `<tr>
+        <td><span class="row-title mono" title="${escapeHTML(item.model)}">${escapeHTML(item.model)}</span></td>
+        <td class="num mono">${item.requests.toLocaleString("zh-CN")}</td>
+        <td><span class="billing-model-stack mono"><span>入 ${compact(item.input_tokens)}</span><span>出 ${compact(item.output_tokens)}</span><span>缓存 ${compact(cacheTokens)}</span></span></td>
+        <td class="internal-cost-column"><span class="billing-model-stack mono" title="${escapeHTML(priceTitle)}"><span>入 ${money(item.input_per_million)}/1M</span><span>出 ${money(item.output_per_million)}/1M</span><span>缓存 ${money(item.cache_read_per_million)}/1M</span></span></td>
+        <td class="num mono">${money(item.billed_cost)}</td>
+        <td class="num mono internal-cost-column">${money(item.actual_cost)}</td>
+      </tr>`;
+    })
+    .join("");
+  const totalPages = Number(payload.total_pages || 1);
+  const page = Number(payload.page || 1);
+  return `<div class="billing-model-detail">
+    <div class="table-wrap"><table class="billing-model-table"><thead><tr><th>模型</th><th class="num">请求数</th><th>Token</th><th class="internal-cost-column">历史有效单价</th><th class="num">计费</th><th class="num internal-cost-column">成本</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="billing-model-footer"><span>共 ${Number(payload.total || 0).toLocaleString("zh-CN")} 个模型</span><div><button type="button" data-billing-model-page="${page - 1}" data-billing-model-account="${accountID}" ${page <= 1 ? "disabled" : ""} title="上一页"><i data-lucide="chevron-left"></i></button><span>${page} / ${totalPages}</span><button type="button" data-billing-model-page="${page + 1}" data-billing-model-account="${accountID}" ${page >= totalPages ? "disabled" : ""} title="下一页"><i data-lucide="chevron-right"></i></button></div></div>
+  </div>`;
 }
 function usageAccountSKCell(item) {
   if (!item.account_sk_hint)
@@ -4063,6 +4317,19 @@ function findLoadedAccount(id) {
 }
 
 document.addEventListener("click", async (event) => {
+  const userToggleButton = event.target.closest("button[data-user-toggle]");
+  if (userToggleButton) {
+    await toggleUserAccessDetails(userToggleButton.dataset.userToggle);
+    return;
+  }
+  const userSummaryRow = event.target.closest("tr[data-user-row]");
+  if (
+    userSummaryRow &&
+    !event.target.closest("button, a, input, select, textarea, label")
+  ) {
+    await toggleUserAccessDetails(userSummaryRow.dataset.userRow);
+    return;
+  }
   const target = event.target.closest("button, [data-select-pool]");
   if (!target) {
     if (!event.target.closest("#account-action-menu")) closeAccountActionMenu();
@@ -4084,12 +4351,30 @@ document.addEventListener("click", async (event) => {
     return;
   }
   closeAccountActionMenu();
+  if (target.dataset.billingAccount) {
+    await toggleBillingAccountModels(target.dataset.billingAccount);
+    return;
+  }
+  if (target.dataset.billingModelPage) {
+    await loadBillingAccountModels(
+      Number(target.dataset.billingModelAccount),
+      Number(target.dataset.billingModelPage),
+    );
+    return;
+  }
   if (target.dataset.paginationKey) {
     const key = target.dataset.paginationKey;
     state.paginationPages[key] =
       Number(state.paginationPages[key] || 1) + Number(target.dataset.pageStep);
     if (state.serverPagination[key]) await loadServerPage(key);
     else paginationTables[key].render();
+    return;
+  }
+  if (target.dataset.userUsagePage) {
+    await loadUserAccessDetails(
+      Number(target.dataset.userId),
+      Number(target.dataset.userUsagePage),
+    );
     return;
   }
   if (target.dataset.paginationGo) {
@@ -4177,6 +4462,9 @@ document.addEventListener("click", async (event) => {
   }
   if (target.dataset.breakdown) {
     state.breakdown = target.dataset.breakdown;
+    resetPagination("billingBreakdown");
+    state.expandedBillingAccountID = 0;
+    state.billingAccountModels = {};
     $$("#breakdown-tabs button").forEach((node) =>
       node.classList.toggle(
         "active",
@@ -4300,6 +4588,16 @@ document.addEventListener("click", async (event) => {
       } catch (error) {
         toast(error.message, "error");
       }
+      return;
+    }
+    if (target.dataset.copyUserKey) {
+      const detail = state.userDetails[Number(target.dataset.userId)];
+      const item = detail?.keys?.find(
+        (value) => value.id === Number(target.dataset.copyUserKey),
+      );
+      if (!item?.key) throw new Error("归档 SK 数据不可用");
+      await copyToClipboard(item.key);
+      toast("SK 已复制");
       return;
     }
     if (target.dataset.toggleKey) {
@@ -4805,6 +5103,7 @@ $("#add-price").addEventListener("click", () => openPrice());
 $("#record-usage").addEventListener("click", openUsage);
 $("#apply-billing-filters").addEventListener("click", () => {
   resetPagination("usage");
+  resetPagination("billingBreakdown");
   loadBilling();
 });
 $("#apply-audit-filters").addEventListener("click", () => {
@@ -4838,6 +5137,7 @@ for (const [selector, key, loader] of [
     if (event.key !== "Enter") return;
     event.preventDefault();
     resetPagination(key);
+    if (selector === "#billing-search") resetPagination("billingBreakdown");
     loader();
   });
 }

@@ -52,7 +52,7 @@ func (a *app) migrateSharedData() error {
 	if err := a.migrateDeadProxyAssignments(); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE accounts SET auth_status = 'valid' WHERE auth_status = 'unknown' AND credentials_json != '{}'`); err != nil {
+	if _, err := a.db.Exec(`UPDATE accounts SET auth_status = 'valid' WHERE auth_status = 'unknown' AND credentials_json != '{}' AND ` + legacyExecutionPredicate("accounts")); err != nil {
 		return fmt.Errorf("initialize account authorization state: %w", err)
 	}
 	if _, err := a.db.Exec(`UPDATE accounts SET onboarded_at = COALESCE(auth_checked_at, created_at) WHERE onboarded_at IS NULL AND auth_status = 'valid'`); err != nil {

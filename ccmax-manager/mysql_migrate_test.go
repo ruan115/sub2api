@@ -2,7 +2,10 @@
 
 package main
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 type migrationKeyScanner []any
 
@@ -33,5 +36,16 @@ func TestComparableMigrationValuePreservesIntegerTrailingZero(t *testing.T) {
 	}
 	if got := comparableMigrationValue([]byte("100.12000000")); got != "100.12" {
 		t.Fatalf("decimal comparable value = %q", got)
+	}
+}
+
+func TestExecutionTablesParticipateInMigrationWithoutInvalidSequenceWatermark(t *testing.T) {
+	for _, table := range []string{"account_mode_health", "runtime_outbox", "runtime_operation_audit"} {
+		if !slices.Contains(mysqlMigrationTables, table) {
+			t.Fatalf("execution table %s is missing from SQLite to MySQL migration", table)
+		}
+	}
+	if mysqlAppendOnlyMigrationTables["runtime_outbox"] {
+		t.Fatal("runtime_outbox cannot use the id-only append watermark because its primary key is sequence")
 	}
 }

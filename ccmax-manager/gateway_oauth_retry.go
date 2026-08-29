@@ -133,7 +133,7 @@ func (a *app) recordGatewayOAuthRefreshFailure(account gatewayAccount, publicMes
 		return
 	}
 	until := time.Now().UTC().Add(gatewayOAuthRefreshFailureCooldown).Format(time.RFC3339Nano)
-	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND credentials_json = ?`, until, reason, reason, account.ID, account.CredentialsJSON)
+	_, err := a.db.Exec(`UPDATE accounts SET rate_limit_reset_at = ?, error_message = ?, auth_error = ?, auth_checked_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND credentials_json = ? AND `+legacyExecutionPredicate("accounts"), until, reason, reason, account.ID, account.CredentialsJSON)
 	logDatabaseWriteError("record OAuth refresh failure cooldown", err)
 }
 

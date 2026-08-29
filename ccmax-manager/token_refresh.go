@@ -168,7 +168,7 @@ func backgroundTokenRefreshBackoff(accountID int64, attempt int) time.Duration {
 func (a *app) expiringGatewayAccounts(before time.Duration) ([]gatewayAccount, error) {
 	rows, err := a.db.Query(`SELECT a.id, a.name, a.auth_type, a.credentials_json, a.extra_json, a.concurrency, a.base_rpm, a.rpm_strategy, a.rpm_sticky_buffer, a.user_msg_queue_mode, a.proxy_id, a.auth_error, a.rate_limit_reset_at
 		FROM accounts a
-		WHERE a.deleted_at IS NULL AND a.status = 'active' AND a.schedulable = 1 AND a.auth_status != 'reauth_required'
+		WHERE a.deleted_at IS NULL AND ` + legacyExecutionPredicate("a") + ` AND a.status = 'active' AND a.schedulable = 1 AND a.auth_status != 'reauth_required'
 		AND a.auth_type IN ('oauth', 'setup_token') AND a.proxy_id IS NOT NULL
 		AND EXISTS (SELECT 1 FROM proxies p WHERE p.id = a.proxy_id AND p.status = 'active' AND p.deleted_at IS NULL)
 		ORDER BY a.id`)

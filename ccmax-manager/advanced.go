@@ -679,7 +679,7 @@ func (a *app) migrateDynamicGroups() error {
 }
 
 func (a *app) backfillAccountSubscriptions() error {
-	rows, err := a.db.Query(`SELECT id, credentials_json FROM accounts WHERE (subscription_type = '' OR rate_limit_tier = '') AND credentials_json != '{}'`)
+	rows, err := a.db.Query(`SELECT id, credentials_json FROM accounts WHERE (subscription_type = '' OR rate_limit_tier = '') AND credentials_json != '{}' AND ` + legacyExecutionPredicate("accounts"))
 	if err != nil {
 		return fmt.Errorf("query account subscriptions: %w", err)
 	}

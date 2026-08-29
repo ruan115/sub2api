@@ -47,7 +47,7 @@ func (a *app) ensureReserveCapacity(targetGroupID, requestedModel, reason string
 		JOIN account_groups ag ON ag.account_id = a.id
 		JOIN groups g ON g.id = ag.group_id
 		WHERE g.reserve_pool_enabled = 1 AND g.status = 'active'
-		AND a.deleted_at IS NULL AND `+accountStatePredicate("a", "normal")+`
+		AND a.deleted_at IS NULL AND `+legacyExecutionPredicate("a")+` AND `+accountStatePredicate("a", "normal")+`
 		AND NOT EXISTS (
 			SELECT 1 FROM account_groups other
 			WHERE other.account_id = a.id AND other.group_id != ag.group_id
@@ -107,7 +107,7 @@ func (a *app) gatewayGroupHasCapacity(groupID, requestedModel string, excluded m
 		FROM accounts a JOIN account_groups ag ON ag.account_id = a.id
 		LEFT JOIN groups g ON g.id = ag.group_id
 		LEFT JOIN dispatch_strategies ds ON ds.id = COALESCE(a.strategy_id, g.strategy_id) AND ds.deleted_at IS NULL
-		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND `+accountStatePredicate("a", "normal")+`
+		WHERE ag.group_id = ? AND a.deleted_at IS NULL AND `+legacyExecutionPredicate("a")+` AND `+accountStatePredicate("a", "normal")+`
 		AND (? = 0 OR ds.id IS NOT NULL)
 		AND NOT EXISTS (
 			SELECT 1 FROM account_model_cooldowns mc

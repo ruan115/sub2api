@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const mysqlSchemaVersion = 1
+const mysqlSchemaVersion = 2
 
 func (a *app) migrateMySQL() error {
 	statements := []string{
@@ -77,8 +77,11 @@ func (a *app) migrateMySQL() error {
 				five_hour_release_stagger_enabled TINYINT(1) NOT NULL DEFAULT 1,
 				five_hour_release_stagger_min_minutes INT NOT NULL DEFAULT 15,
 				five_hour_release_stagger_max_minutes INT NOT NULL DEFAULT 30,
-				capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
+			capacity_queue_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INT NOT NULL DEFAULT 30,
+			execution_policy VARCHAR(16) NOT NULL DEFAULT 'auto',
+			worker_queue_mode VARCHAR(16) NOT NULL DEFAULT 'queue',
+			worker_image_channel VARCHAR(64) NOT NULL DEFAULT 'stable',
 			strategy_required_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			strategy_id BIGINT NULL,
 			reserve_pool_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -198,6 +201,18 @@ func (a *app) migrateMySQL() error {
 			quota_7d_reset_at DATETIME(3) NULL,
 			quota_7d_threshold_enabled TINYINT(1) NOT NULL DEFAULT 0,
 			quota_7d_threshold_percent INT NOT NULL DEFAULT 80,
+			execution_allowed_modes LONGTEXT NOT NULL DEFAULT ('["cli_native","oauth_api"]'),
+			execution_preferred_mode VARCHAR(32) NOT NULL DEFAULT 'cli_native',
+			execution_migration_status VARCHAR(32) NOT NULL DEFAULT 'legacy',
+			runtime_status VARCHAR(32) NOT NULL DEFAULT 'legacy',
+			runtime_error_code VARCHAR(64) NOT NULL DEFAULT '',
+			runtime_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			runtime_slot_id VARCHAR(128) NOT NULL DEFAULT '',
+			runtime_provider VARCHAR(32) NOT NULL DEFAULT '',
+			runtime_execution_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			cli_native_limit INT UNSIGNED NOT NULL DEFAULT 1,
+			oauth_api_limit INT UNSIGNED NOT NULL DEFAULT 3,
+			execution_total_limit INT UNSIGNED NOT NULL DEFAULT 3,
 			quota_sampled_at DATETIME(3) NULL,
 			subscription_type VARCHAR(64) NOT NULL DEFAULT '',
 			rate_limit_tier VARCHAR(128) NOT NULL DEFAULT '',

@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package execution.v1;
+
+option go_package = "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1";
+
+import "execution/v1/dataplane.proto";
+
+service WorkerRuntimeService {
+  rpc CredentialTransportKey(CredentialTransportKeyRequest) returns (CredentialTransportKeyResponse);
+  rpc Activate(ActivateRequest) returns (ActivateResponse);
+  rpc SecureActivate(stream SecureActivateRequest) returns (stream SecureActivateResponse);
+  rpc Execute(stream WorkerRuntimeServiceExecuteRequest) returns (stream WorkerRuntimeServiceExecuteResponse);
+  rpc CountTokens(WorkerRuntimeServiceCountTokensRequest) returns (WorkerRuntimeServiceCountTokensResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message CredentialTransportKeyRequest {
+  string execution_ticket = 1;
+}
+
+message CredentialTransportKeyResponse {
+  string slot_id = 1;
+  uint64 execution_epoch = 2;
+  string key_id = 3;
+  bytes public_key = 4;
+}
+
+message ActivateRequest {
+  string execution_ticket = 1;
+  string credential_lease_id = 2;
+  bytes encrypted_credential_bundle = 3;
+  string proxy_lease_id = 4;
+}
+
+message ActivateResponse {
+  string slot_id = 1;
+  uint64 execution_epoch = 2;
+  repeated ExecutionMode healthy_modes = 3;
+}
+
+message SecureActivateBegin {
+  string execution_ticket = 1;
+  string credential_lease_id = 2;
+  bytes encrypted_credential_bundle = 3;
+  string proxy_lease_id = 4;
+}
+
+message CredentialCommitAck {
+  string version_id = 1;
+}
+
+message SecureActivateRequest {
+  oneof event {
+    SecureActivateBegin begin = 1;
+    CredentialCommitAck credential_commit_ack = 2;
+  }
+}
+
+message SealedCredentialCommit {
+  string account_binding = 1;
+  string slot_id = 2;
+  uint64 execution_epoch = 3;
+  string credential_lease_id = 4;
+  string proxy_lease_id = 5;
+  bytes sealed_credential_bundle = 6;
+}
+
+message SecureActivationCompleted {
+  string slot_id = 1;
+  uint64 execution_epoch = 2;
+  repeated ExecutionMode healthy_modes = 3;
+}
+
+message SecureActivateResponse {
+  oneof event {
+    SealedCredentialCommit credential_commit = 1;
+    SecureActivationCompleted completed = 2;
+  }
+}
+
+message WorkerBeginExecution {
+  string execution_ticket = 1;
+  BeginExecution request = 2;
+}
+
+message WorkerRuntimeServiceExecuteRequest {
+  oneof event {
+    WorkerBeginExecution begin = 1;
+    ToolResult tool_result = 2;
+    CancelExecution cancel = 3;
+  }
+}
+
+message WorkerRuntimeServiceExecuteResponse {
+  ExecuteResponse response = 1;
+}
+
+message WorkerRuntimeServiceCountTokensRequest {
+	string execution_ticket = 1;
+	CountTokensRequest request = 2;
+}
+
+message WorkerRuntimeServiceCountTokensResponse {
+  CountTokensResponse response = 1;
+}
+
+message HealthRequest {
+  string execution_ticket = 1;
+}
+
+message ModeHealth {
+  ExecutionMode mode = 1;
+  bool healthy = 2;
+  string reason_code = 3;
+  string reason_message = 4;
+}
+
+message HealthResponse {
+  string slot_id = 1;
+  uint64 execution_epoch = 2;
+  repeated ModeHealth modes = 3;
+  string image_digest = 4;
+}

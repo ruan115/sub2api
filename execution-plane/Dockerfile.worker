@@ -1,0 +1,18 @@
+FROM golang:1.26.0-alpine3.22 AS build
+
+WORKDIR /src
+RUN apk add --no-cache ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
+
+FROM scratch
+
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/worker /worker
+
+USER 65532:65532
+EXPOSE 8093
+HEALTHCHECK --interval=1s --timeout=2s --start-period=2s --retries=20 CMD ["/worker", "healthcheck"]
+ENTRYPOINT ["/worker"]

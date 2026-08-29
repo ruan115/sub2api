@@ -64,6 +64,7 @@ type app struct {
 	coldCacheFlights      coldCacheFlightTable
 	streamHedges          *gatewayHedgeController
 	redis                 *redisRuntime
+	executionClient       *executionDataPlaneClient
 	localITPMReservations localITPMReservationStore
 	batchAuthMu           sync.Mutex
 	reserveMu             sync.Mutex
@@ -420,15 +421,37 @@ type billingBreakdown struct {
 	Margin     float64 `json:"margin"`
 }
 
+type billingModelBreakdown struct {
+	Model                   string  `json:"model"`
+	Requests                int64   `json:"requests"`
+	InputTokens             int64   `json:"input_tokens"`
+	OutputTokens            int64   `json:"output_tokens"`
+	CacheCreationTokens     int64   `json:"cache_creation_tokens"`
+	CacheReadTokens         int64   `json:"cache_read_tokens"`
+	InputPerMillion         float64 `json:"input_per_million"`
+	OutputPerMillion        float64 `json:"output_per_million"`
+	CacheCreationPerMillion float64 `json:"cache_creation_per_million"`
+	CacheReadPerMillion     float64 `json:"cache_read_per_million"`
+	BaseCost                float64 `json:"base_cost"`
+	BilledCost              float64 `json:"billed_cost"`
+	ActualCost              float64 `json:"actual_cost"`
+	Margin                  float64 `json:"margin"`
+}
+
 type billingSummary struct {
-	From             string             `json:"from"`
-	To               string             `json:"to"`
-	AvailableBalance *float64           `json:"available_balance"`
-	Totals           billingTotals      `json:"totals"`
-	ByGroup          []billingBreakdown `json:"by_group"`
-	ByAccount        []billingBreakdown `json:"by_account"`
-	ByPurpose        []billingBreakdown `json:"by_purpose"`
-	ByAPIKey         []billingBreakdown `json:"by_api_key"`
+	From                string             `json:"from"`
+	To                  string             `json:"to"`
+	AvailableBalance    *float64           `json:"available_balance"`
+	Totals              billingTotals      `json:"totals"`
+	ByGroup             []billingBreakdown `json:"by_group"`
+	ByAccount           []billingBreakdown `json:"by_account"`
+	ByPurpose           []billingBreakdown `json:"by_purpose"`
+	ByAPIKey            []billingBreakdown `json:"by_api_key"`
+	Breakdown           string             `json:"breakdown"`
+	BreakdownTotal      int64              `json:"breakdown_total"`
+	BreakdownPage       int                `json:"breakdown_page"`
+	BreakdownPageSize   int                `json:"breakdown_page_size"`
+	BreakdownTotalPages int                `json:"breakdown_total_pages"`
 }
 
 type dashboard struct {
@@ -451,6 +474,7 @@ func runServer() {
 	}
 	defer a.db.Close()
 	defer a.redis.Close()
+	defer a.executionClient.Close()
 	stopPricing := a.startPriceSyncScheduler()
 	defer stopPricing()
 	stopTokenRefresh := a.startTokenRefreshScheduler()
@@ -564,6 +588,10 @@ func newApp(dataPath string) (*app, error) {
 			return nil, err
 		}
 	}
+	if err := a.migrateExecutionFeatures(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	// Dialect-neutral data migrations run for both branches. On a MySQL import
 	// run this executes before migrateSQLiteToMySQL fills the target, so the
 	// backfills see an empty table; they are idempotent and run on every
@@ -573,6 +601,12 @@ func newApp(dataPath string) (*app, error) {
 		return nil, err
 	}
 	if err := a.pruneGatewayErrorLogs(true); err != nil {
+		db.Close()
+		return nil, err
+	}
+	a.executionClient, err = newExecutionDataPlaneClientFromEnv(a.redis)
+	if err != nil {
+		a.redis.Close()
 		db.Close()
 		return nil, err
 	}
@@ -629,6 +663,9 @@ func (a *app) migrate() error {
 			five_hour_release_stagger_max_minutes INTEGER NOT NULL DEFAULT 30 CHECK (five_hour_release_stagger_max_minutes BETWEEN 0 AND 315),
 			capacity_queue_enabled INTEGER NOT NULL DEFAULT 0,
 			capacity_queue_timeout_seconds INTEGER NOT NULL DEFAULT 30 CHECK (capacity_queue_timeout_seconds BETWEEN 1 AND 600),
+			execution_policy TEXT NOT NULL DEFAULT 'auto',
+			worker_queue_mode TEXT NOT NULL DEFAULT 'queue',
+			worker_image_channel TEXT NOT NULL DEFAULT 'stable',
 			strategy_required_enabled INTEGER NOT NULL DEFAULT 0,
 			reserve_pool_enabled INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
@@ -663,6 +700,18 @@ func (a *app) migrate() error {
 			quota_5h_threshold_percent INTEGER NOT NULL DEFAULT 80 CHECK (quota_5h_threshold_percent BETWEEN 1 AND 100),
 			quota_7d_threshold_enabled INTEGER NOT NULL DEFAULT 0,
 			quota_7d_threshold_percent INTEGER NOT NULL DEFAULT 80 CHECK (quota_7d_threshold_percent BETWEEN 1 AND 100),
+			execution_allowed_modes TEXT NOT NULL DEFAULT '["cli_native","oauth_api"]',
+			execution_preferred_mode TEXT NOT NULL DEFAULT 'cli_native',
+			execution_migration_status TEXT NOT NULL DEFAULT 'legacy',
+			runtime_status TEXT NOT NULL DEFAULT 'legacy',
+			runtime_error_code TEXT NOT NULL DEFAULT '',
+			runtime_generation INTEGER NOT NULL DEFAULT 0,
+			runtime_slot_id TEXT NOT NULL DEFAULT '',
+			runtime_provider TEXT NOT NULL DEFAULT '',
+			runtime_execution_epoch INTEGER NOT NULL DEFAULT 0,
+			cli_native_limit INTEGER NOT NULL DEFAULT 1,
+			oauth_api_limit INTEGER NOT NULL DEFAULT 3,
+			execution_total_limit INTEGER NOT NULL DEFAULT 3,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			deleted_at TEXT
@@ -779,6 +828,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", a.handleLogout)
 	mux.HandleFunc("GET /api/me", a.handleMe)
 	mux.HandleFunc("GET /api/users", a.handleUsers)
+	mux.HandleFunc("GET /api/users/{id}/access-details", a.handleUserAccessDetails)
 	mux.HandleFunc("POST /api/users", a.handleUserCreate)
 	mux.HandleFunc("PUT /api/users/{id}", a.handleUserUpdate)
 	mux.HandleFunc("DELETE /api/users/{id}", a.handleUserDelete)
@@ -805,6 +855,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/groups", a.handleGroups)
 	mux.HandleFunc("POST /api/groups", a.handleGroupCreate)
 	mux.HandleFunc("PUT /api/groups/{id}", a.handleGroupUpdate)
+	mux.HandleFunc("GET /api/groups/{id}/execution", a.handleGroupExecutionSettings)
+	mux.HandleFunc("PUT /api/groups/{id}/execution", a.handleGroupExecutionSettings)
 	mux.HandleFunc("GET /api/groups/{id}/strategy-shares", a.handleGroupStrategyShares)
 	mux.HandleFunc("GET /api/purposes", a.handlePurposes)
 	mux.HandleFunc("POST /api/purposes", a.handlePurposeCreate)
@@ -821,6 +873,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/accounts/batch-update", a.handleAccountBatchUpdate)
 	mux.HandleFunc("POST /api/accounts/health/refresh", a.handleAccountHealthRefresh)
 	mux.HandleFunc("PUT /api/accounts/{id}", a.handleAccountUpdate)
+	mux.HandleFunc("GET /api/accounts/{id}/execution", a.handleAccountExecutionSettings)
+	mux.HandleFunc("PUT /api/accounts/{id}/execution", a.handleAccountExecutionSettings)
 	mux.HandleFunc("DELETE /api/accounts/{id}", a.handleAccountDelete)
 	mux.HandleFunc("POST /api/accounts/{id}/archive", a.handleAccountArchive)
 	mux.HandleFunc("POST /api/accounts/{id}/restore", a.handleAccountRestore)
@@ -840,6 +894,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/usage", a.handleUsageList)
 	mux.HandleFunc("POST /api/usage", a.handleUsageCreate)
 	mux.HandleFunc("GET /api/billing", a.handleBilling)
+	mux.HandleFunc("GET /api/billing/accounts/{id}/models", a.handleBillingAccountModels)
 	mux.HandleFunc("GET /api/stats/daily", a.handleDailyStats)
 	mux.HandleFunc("GET /api/stats/realtime", a.handleRealtimeStats)
 	mux.HandleFunc("GET /api/authorization-logs", a.handleAuthorizationStats)
@@ -2164,10 +2219,10 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.releaseAccountTokenLease(id, leaseOwner)
-	var existingCredentials, existingExtra, existingSourceSKHint string
+	var existingCredentials, existingExtra, existingSourceSKHint, executionMigrationStatus, existingAuthType string
 	var previousProxyID sql.NullInt64
 	var previousOnboarded, previousInvalidated sql.NullString
-	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, proxy_id, onboarded_at, invalidated_at FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &existingSourceSKHint, &previousProxyID, &previousOnboarded, &previousInvalidated); err != nil {
+	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, proxy_id, onboarded_at, invalidated_at, execution_migration_status, auth_type FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &existingSourceSKHint, &previousProxyID, &previousOnboarded, &previousInvalidated, &executionMigrationStatus, &existingAuthType); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found")
 			return
@@ -2182,6 +2237,11 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	credentialsJSON, extraJSON, err := normalizeAccountInput(&input, existingCredentials, existingExtra)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	credentialsProvided := len(input.Credentials) > 0 && string(input.Credentials) != "null"
+	if executionMigrationStatus != "legacy" && (credentialsProvided || strings.TrimSpace(input.SessionKey) != "" || input.AuthType != existingAuthType) {
+		writeError(w, http.StatusConflict, errRuntimeCredentialOwner.Error())
 		return
 	}
 	if err := a.validateAccountGroupIDs(input.GroupIDs); err != nil {
@@ -2238,13 +2298,13 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		consecutive_429 = CASE WHEN NULLIF(?, '') IS NULL THEN 0 ELSE consecutive_429 END,
 		last_429_at = CASE WHEN NULLIF(?, '') IS NULL THEN NULL ELSE last_429_at END,
 		proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?,
-		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), quota_7d_threshold_enabled = COALESCE(?, quota_7d_threshold_enabled), quota_7d_threshold_percent = COALESCE(?, quota_7d_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), quota_7d_threshold_enabled = COALESCE(?, quota_7d_threshold_enabled), quota_7d_threshold_percent = COALESCE(?, quota_7d_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND (execution_migration_status = 'legacy' OR ? = '{}')
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt,
 		// Clearing the cooldown field is the administrator's manual recovery, so
 		// the automatic 429 bookkeeping has to go with it. Otherwise the account
 		// keeps its strikes and the next single 429 re-parks it.
 		input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt,
-		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent, id, leaseOwner)
+		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent, id, credentialsJSON, leaseOwner)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2259,7 +2319,6 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	credentialsProvided := len(input.Credentials) > 0 && string(input.Credentials) != "null"
 	if credentialsProvided && credentialsJSON != "{}" {
 		credentials := decodeObject(credentialsJSON)
 		subscription := subscriptionTypeFromCredentials(credentials)
@@ -3011,7 +3070,7 @@ func (a *app) resolveAccount(purposeKey string, reveal bool) (account, string, e
 	if err := a.db.QueryRow(`SELECT active_group_id FROM purposes WHERE key = ?`, strings.ToLower(strings.TrimSpace(purposeKey))).Scan(&groupID); err != nil {
 		return account{}, "", err
 	}
-	query := accountSelect + ` JOIN account_groups ag ON ag.account_id = a.id JOIN groups g ON g.id = ag.group_id WHERE ag.group_id = ? AND g.status = 'active' AND a.deleted_at IS NULL AND ` + accountStatePredicate("a", "normal") + ` ORDER BY ag.priority, a.priority, COALESCE(a.last_used_at, ''), a.id LIMIT 1`
+	query := accountSelect + ` JOIN account_groups ag ON ag.account_id = a.id JOIN groups g ON g.id = ag.group_id WHERE ag.group_id = ? AND g.status = 'active' AND a.deleted_at IS NULL AND ` + legacyExecutionPredicate("a") + ` AND ` + accountStatePredicate("a", "normal") + ` ORDER BY ag.priority, a.priority, COALESCE(a.last_used_at, ''), a.id LIMIT 1`
 	item, err := scanAccount(a.db.QueryRow(query, groupID), reveal)
 	if err != nil {
 		return account{}, groupID, err
@@ -3475,6 +3534,35 @@ func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, summary)
 }
 
+func (a *app) handleBillingAccountModels(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	filters := filtersFromRequest(r)
+	filters.AccountID = accountID
+	if filters.From == "" {
+		filters.From = startOfMonthUTC()
+	}
+	user := currentUser(r)
+	if user.Role == "user" {
+		filters.UserID = user.ID
+	}
+	items, total, err := a.queryAccountModelBreakdown(filters)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if user.Role == "user" {
+		redactBillingModelBreakdowns(items)
+	}
+	page := filters.Offset/filters.Limit + 1
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "total": total, "page": page, "page_size": filters.Limit,
+		"total_pages": totalPages(total, filters.Limit),
+	})
+}
+
 func redactUsageCosts(items []usageLog) {
 	for index := range items {
 		items[index].InputCost = 0
@@ -3501,9 +3589,21 @@ func redactBillingBreakdowns(items []billingBreakdown) {
 	}
 }
 
+func redactBillingModelBreakdowns(items []billingModelBreakdown) {
+	for index := range items {
+		items[index].InputPerMillion = 0
+		items[index].OutputPerMillion = 0
+		items[index].CacheCreationPerMillion = 0
+		items[index].CacheReadPerMillion = 0
+		items[index].BaseCost = 0
+		items[index].ActualCost = 0
+		items[index].Margin = 0
+	}
+}
+
 func (a *app) billingSummary(filters usageFilters, breakdown string) (billingSummary, error) {
 	where, args := buildUsageWhere(filters)
-	result := billingSummary{From: filters.From, To: filters.To, ByGroup: []billingBreakdown{}, ByAccount: []billingBreakdown{}, ByPurpose: []billingBreakdown{}, ByAPIKey: []billingBreakdown{}}
+	result := billingSummary{From: filters.From, To: filters.To, ByGroup: []billingBreakdown{}, ByAccount: []billingBreakdown{}, ByPurpose: []billingBreakdown{}, ByAPIKey: []billingBreakdown{}, Breakdown: breakdown}
 	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cache_creation_tokens + u.cache_read_tokens), 0), COALESCE(SUM(u.base_cost), 0), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)`+usageFrom+` WHERE `+where, args...).Scan(&result.Totals.Requests, &result.Totals.InputTokens, &result.Totals.OutputTokens, &result.Totals.CacheTokens, &result.Totals.BaseCost, &result.Totals.BilledCost, &result.Totals.ActualCost, &result.Totals.Margin); err != nil {
 		return result, err
 	}
@@ -3523,7 +3623,19 @@ func (a *app) billingSummary(filters usageFilters, breakdown string) (billingSum
 		if breakdown != "all" && breakdown != query.name {
 			continue
 		}
-		items, err := a.queryBreakdown(where, args, query.keyExpr, query.nameExpr)
+		limit, offset := 0, 0
+		if breakdown != "all" {
+			limit, offset = filters.Limit, filters.Offset
+			total, err := a.countBreakdown(where, args, query.keyExpr, query.nameExpr)
+			if err != nil {
+				return result, err
+			}
+			result.BreakdownTotal = total
+			result.BreakdownPage = filters.Offset/filters.Limit + 1
+			result.BreakdownPageSize = filters.Limit
+			result.BreakdownTotalPages = totalPages(total, filters.Limit)
+		}
+		items, err := a.queryBreakdown(where, args, query.keyExpr, query.nameExpr, limit, offset)
 		if err != nil {
 			return result, err
 		}
@@ -3532,9 +3644,14 @@ func (a *app) billingSummary(filters usageFilters, breakdown string) (billingSum
 	return result, nil
 }
 
-func (a *app) queryBreakdown(where string, args []any, keyExpr, nameExpr string) ([]billingBreakdown, error) {
-	query := `SELECT ` + keyExpr + `, ` + nameExpr + `, COUNT(*), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)` + usageFrom + ` WHERE ` + where + ` GROUP BY ` + keyExpr + `, ` + nameExpr + ` ORDER BY SUM(u.billed_cost) DESC`
-	rows, err := a.db.Query(query, args...)
+func (a *app) queryBreakdown(where string, args []any, keyExpr, nameExpr string, limit, offset int) ([]billingBreakdown, error) {
+	query := `SELECT ` + keyExpr + `, ` + nameExpr + `, COUNT(*), COALESCE(SUM(u.billed_cost), 0), COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)` + usageFrom + ` WHERE ` + where + ` GROUP BY ` + keyExpr + `, ` + nameExpr + ` ORDER BY SUM(u.billed_cost) DESC, ` + keyExpr + `, ` + nameExpr
+	queryArgs := append([]any{}, args...)
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		queryArgs = append(queryArgs, limit, offset)
+	}
+	rows, err := a.db.Query(query, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -3548,6 +3665,50 @@ func (a *app) queryBreakdown(where string, args []any, keyExpr, nameExpr string)
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (a *app) countBreakdown(where string, args []any, keyExpr, nameExpr string) (int64, error) {
+	query := `SELECT COUNT(*) FROM (SELECT 1` + usageFrom + ` WHERE ` + where + ` GROUP BY ` + keyExpr + `, ` + nameExpr + `) billing_breakdown`
+	var total int64
+	err := a.db.QueryRow(query, args...).Scan(&total)
+	return total, err
+}
+
+func (a *app) queryAccountModelBreakdown(filters usageFilters) ([]billingModelBreakdown, int64, error) {
+	where, args := buildUsageWhere(filters)
+	var total int64
+	if err := a.db.QueryRow(`SELECT COUNT(DISTINCT u.model)`+usageFrom+` WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `SELECT u.model, COUNT(*),
+		COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0),
+		COALESCE(SUM(u.cache_creation_tokens), 0), COALESCE(SUM(u.cache_read_tokens), 0),
+		CASE WHEN SUM(u.input_tokens) > 0 THEN SUM(u.input_cost) * 1000000.0 / SUM(u.input_tokens) ELSE 0 END,
+		CASE WHEN SUM(u.output_tokens) > 0 THEN SUM(u.output_cost) * 1000000.0 / SUM(u.output_tokens) ELSE 0 END,
+		CASE WHEN SUM(u.cache_creation_tokens) > 0 THEN SUM(u.cache_creation_cost) * 1000000.0 / SUM(u.cache_creation_tokens) ELSE 0 END,
+		CASE WHEN SUM(u.cache_read_tokens) > 0 THEN SUM(u.cache_read_cost) * 1000000.0 / SUM(u.cache_read_tokens) ELSE 0 END,
+		COALESCE(SUM(u.base_cost), 0), COALESCE(SUM(u.billed_cost), 0),
+		COALESCE(SUM(u.actual_cost), 0), COALESCE(SUM(u.billed_cost - u.actual_cost), 0)` + usageFrom + ` WHERE ` + where + ` GROUP BY u.model ORDER BY SUM(u.billed_cost) DESC, u.model LIMIT ? OFFSET ?`
+	queryArgs := append(append([]any{}, args...), filters.Limit, filters.Offset)
+	rows, err := a.db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := []billingModelBreakdown{}
+	for rows.Next() {
+		var item billingModelBreakdown
+		if err := rows.Scan(
+			&item.Model, &item.Requests, &item.InputTokens, &item.OutputTokens,
+			&item.CacheCreationTokens, &item.CacheReadTokens, &item.InputPerMillion,
+			&item.OutputPerMillion, &item.CacheCreationPerMillion, &item.CacheReadPerMillion,
+			&item.BaseCost, &item.BilledCost, &item.ActualCost, &item.Margin,
+		); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }
 
 func (a *app) queryTotals(from, to string) (billingTotals, error) {
