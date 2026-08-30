@@ -4,6 +4,13 @@ modules:
 lint:
   use:
     - STANDARD
+  # Recovery intentionally returns the already-public receipt shape so callers
+  # cannot observe a second, subtly divergent contract for the same receipt.
+  ignore_only:
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - api/proto/execution/v1/onboarding.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - api/proto/execution/v1/onboarding.proto
 breaking:
   use:
     - FILE

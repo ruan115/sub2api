@@ -17,12 +17,15 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const nodeURIScheme = "spiffe"
 const nodeURIHost = "sub2api.execution"
+
+var serviceIdentityPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 type Authority struct {
 	certificate    *x509.Certificate
@@ -131,6 +134,28 @@ func (a *Authority) IssueNode(nodeID string, publicKeyPEM []byte) (IssuedCertifi
 	return a.issue(pkix.Name{CommonName: nodeID}, publicKey, publicKeyDER, nil, []*url.URL{identity}, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
 }
 
+// IssueServiceClient issues a short-lived internal client identity such as
+// spiffe://sub2api.execution/service/ccmax. It is distinct from node identity
+// and cannot authenticate to NodeControl as a host-agent.
+func (a *Authority) IssueServiceClient(serviceID string, publicKeyPEM []byte) (IssuedCertificate, error) {
+	if ValidateServiceID(serviceID) != nil {
+		return IssuedCertificate{}, errors.New("service id is invalid")
+	}
+	publicKey, publicKeyDER, err := parsePublicKey(publicKeyPEM)
+	if err != nil {
+		return IssuedCertificate{}, err
+	}
+	identity := &url.URL{Scheme: nodeURIScheme, Host: nodeURIHost, Path: "/service/" + serviceID}
+	return a.issue(pkix.Name{CommonName: serviceID}, publicKey, publicKeyDER, nil, []*url.URL{identity}, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+}
+
+func ValidateServiceID(serviceID string) error {
+	if !serviceIdentityPattern.MatchString(serviceID) {
+		return errors.New("service id is invalid")
+	}
+	return nil
+}
+
 func (a *Authority) IssueServer(serverNames []string) (tls.Certificate, IssuedCertificate, error) {
 	if len(serverNames) == 0 {
 		return tls.Certificate{}, IssuedCertificate{}, errors.New("server name is required")
@@ -208,6 +233,26 @@ func NodeIDFromCertificate(certificate *x509.Certificate) (string, error) {
 		}
 	}
 	return "", errors.New("client certificate does not contain a node identity")
+}
+
+func ServiceIDFromCertificate(certificate *x509.Certificate) (string, error) {
+	if certificate == nil {
+		return "", errors.New("client certificate is required")
+	}
+	for _, identity := range certificate.URIs {
+		if identity.Scheme != nodeURIScheme || identity.Host != nodeURIHost {
+			continue
+		}
+		const prefix = "/service/"
+		if !strings.HasPrefix(identity.EscapedPath(), prefix) {
+			continue
+		}
+		serviceID, err := url.PathUnescape(strings.TrimPrefix(identity.EscapedPath(), prefix))
+		if err == nil && serviceIdentityPattern.MatchString(serviceID) {
+			return serviceID, nil
+		}
+	}
+	return "", errors.New("client certificate does not contain a service identity")
 }
 
 func PublicKeyPEM(publicKey any) ([]byte, error) {

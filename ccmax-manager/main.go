@@ -65,6 +65,7 @@ type app struct {
 	streamHedges          *gatewayHedgeController
 	redis                 *redisRuntime
 	executionClient       *executionDataPlaneClient
+	onboardingIntake      *runtimeOnboardingIntakeClient
 	localITPMReservations localITPMReservationStore
 	batchAuthMu           sync.Mutex
 	reserveMu             sync.Mutex
@@ -257,6 +258,10 @@ type accountInput struct {
 	Platform                string          `json:"platform"`
 	AuthType                string          `json:"auth_type"`
 	SessionKey              string          `json:"session_key"`
+	ExecutionOnboarding     bool            `json:"execution_onboarding"`
+	OnboardingSource        string          `json:"onboarding_source"`
+	OnboardingSecret        string          `json:"onboarding_secret"`
+	OnboardingAuxiliary     string          `json:"onboarding_auxiliary"`
 	Credentials             json.RawMessage `json:"credentials"`
 	Extra                   json.RawMessage `json:"extra"`
 	Status                  string          `json:"status"`
@@ -475,6 +480,7 @@ func runServer() {
 	defer a.db.Close()
 	defer a.redis.Close()
 	defer a.executionClient.Close()
+	defer a.onboardingIntake.Close()
 	stopPricing := a.startPriceSyncScheduler()
 	defer stopPricing()
 	stopTokenRefresh := a.startTokenRefreshScheduler()
@@ -483,6 +489,8 @@ func runServer() {
 	defer stopAccountHealth()
 	stopRateLimitSweep := a.startAccountRateLimitSweeper()
 	defer stopRateLimitSweep()
+	stopOnboardingResults := a.startRuntimeOnboardingResultScheduler()
+	defer stopOnboardingResults()
 
 	server := &http.Server{
 		Addr:              addr,
@@ -606,6 +614,13 @@ func newApp(dataPath string) (*app, error) {
 	}
 	a.executionClient, err = newExecutionDataPlaneClientFromEnv(a.redis)
 	if err != nil {
+		a.redis.Close()
+		db.Close()
+		return nil, err
+	}
+	a.onboardingIntake, err = newRuntimeOnboardingIntakeClientFromEnv()
+	if err != nil {
+		a.executionClient.Close()
 		a.redis.Close()
 		db.Close()
 		return nil, err
@@ -875,6 +890,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PUT /api/accounts/{id}", a.handleAccountUpdate)
 	mux.HandleFunc("GET /api/accounts/{id}/execution", a.handleAccountExecutionSettings)
 	mux.HandleFunc("PUT /api/accounts/{id}/execution", a.handleAccountExecutionSettings)
+	mux.HandleFunc("GET /api/accounts/{id}/runtime-onboarding", a.handleRuntimeOnboardingStatus)
+	mux.HandleFunc("POST /api/accounts/{id}/runtime-onboarding/resume", a.handleRuntimeOnboardingResume)
 	mux.HandleFunc("DELETE /api/accounts/{id}", a.handleAccountDelete)
 	mux.HandleFunc("POST /api/accounts/{id}/archive", a.handleAccountArchive)
 	mux.HandleFunc("POST /api/accounts/{id}/restore", a.handleAccountRestore)
@@ -2056,29 +2073,106 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	runtimeMaterial, err := prepareRuntimeOnboardingMaterial(&input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer func() {
+		if runtimeMaterial != nil {
+			runtimeMaterial.Destroy()
+		}
+	}()
 	credentialsJSON, extraJSON, err := normalizeAccountInput(&input, "{}", "{}")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := a.validateAccountGroupIDs(input.GroupIDs); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if strings.TrimSpace(input.ProxyText) != "" {
-		input.ProxyID, err = a.ensureProxyInPool(input.ProxyPoolID, input.ProxyText)
-		if err != nil {
+	var strategyValue any
+	if runtimeMaterial == nil {
+		if err := a.validateAccountGroupIDs(input.GroupIDs); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		input.AutoProxy = false
 	}
 	var authorizedProxyID *int64
 	var tokenExpiresAt string
 	var authorizedSubscription string
 	sessionAuthorized := false
 	deferredAuthorization := false
-	if credentialsJSON == "{}" {
+	runtimeOnboarding := false
+	runtimeIdempotencyKey := ""
+	var runtimeCreateFingerprint [runtimeOnboardingFingerprintSize]byte
+	if runtimeMaterial != nil {
+		if input.Platform != "anthropic" {
+			writeError(w, http.StatusBadRequest, "execution onboarding requires anthropic platform")
+			return
+		}
+		if strings.TrimSpace(input.ProxyText) != "" {
+			writeError(w, http.StatusBadRequest, "execution onboarding does not accept proxy_text; select a stored proxy or enable automatic matching")
+			return
+		}
+		runtimeIdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if !runtimeOpaqueIntentIDPattern.MatchString(runtimeIdempotencyKey) || runtimeSecretString(runtimeIdempotencyKey) {
+			writeError(w, http.StatusBadRequest, "Idempotency-Key is required for execution onboarding")
+			return
+		}
+		*input.Schedulable = false
+		runtimeOnboarding = true
+		if err := validateRuntimeOnboardingProxySelection(input.ProxyPoolID, input.ProxyID, input.AutoProxy); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		runtimeCreateFingerprint, err = runtimeOnboardingCreateFingerprint(
+			&input, runtimeMaterial, runtimeOnboardingRequestedStrategyID(input.StrategyID),
+		)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid execution onboarding account configuration")
+			return
+		}
+		existingID, _, found, replayErr := a.replayRuntimeOnboardingCreate(
+			r.Context(), a.onboardingIntake, runtimeIdempotencyKey, runtimeMaterial, runtimeCreateFingerprint,
+		)
+		if found {
+			runtimeMaterial = nil
+			if replayErr != nil {
+				if errors.Is(replayErr, errRuntimeOnboardingTimeout) {
+					writePendingRuntimeOnboardingError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out", existingID)
+				} else if errors.Is(replayErr, errRuntimeOnboardingUnavailable) {
+					writePendingRuntimeOnboardingError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable", existingID)
+				} else if errors.Is(replayErr, errRuntimeOnboardingIdempotency) || errors.Is(replayErr, errRuntimeMigration) {
+					writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+				} else {
+					writePendingRuntimeOnboardingError(w, http.StatusBadGateway, "execution onboarding request failed", existingID)
+				}
+				return
+			}
+			item, err := a.getAccount(existingID, false)
+			if err != nil {
+				writeDBError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
+			return
+		}
+		if err := a.validateAccountGroupIDs(input.GroupIDs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		strategyValue, err = a.resolveStrategyBinding(input.StrategyID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := a.validateRuntimeOnboardingProxyAvailability(input.ProxyPoolID, input.ProxyID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if a.onboardingIntake == nil {
+			writeError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable")
+			return
+		}
+	} else if credentialsJSON == "{}" {
 		switch input.AuthType {
 		case "oauth", "setup_token":
 			if strings.TrimSpace(input.SessionKey) == "" {
@@ -2116,20 +2210,33 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if strings.TrimSpace(input.ProxyText) != "" {
+		input.ProxyID, err = a.ensureProxyInPool(input.ProxyPoolID, input.ProxyText)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		input.AutoProxy = false
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
 	defer tx.Rollback()
-	accountSourceSKHint := sourceSKHint(input.SessionKey)
+	accountSourceSKHint := ""
+	if !runtimeOnboarding {
+		accountSourceSKHint = sourceSKHint(input.SessionKey)
+	}
 	if accountSourceSKHint == "" {
 		accountSourceSKHint = sourceSKHintFromCredentials(credentialsJSON)
 	}
-	strategyValue, err := a.resolveStrategyBinding(input.StrategyID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	if !runtimeOnboarding {
+		strategyValue, err = a.resolveStrategyBinding(input.StrategyID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	result, err := tx.Exec(`INSERT INTO accounts (name, platform, auth_type, credentials_json, credential_hint, source_sk_hint, extra_json, status, schedulable, concurrency, priority, rate_multiplier, notes, error_message, expires_at, rate_limit_reset_at, proxy_pool_id, auto_proxy, base_rpm, rpm_strategy, rpm_sticky_buffer, user_msg_queue_mode, strategy_id, account_price, quota_5h_threshold_enabled, quota_5h_threshold_percent, quota_7d_threshold_enabled, quota_7d_threshold_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt, input.ProxyPoolID, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, strategyValue, input.AccountPrice, boolInt(boolPointerValue(input.Quota5HThresholdEnabled, false)), intPointerValue(input.Quota5HThresholdPercent, 80), boolInt(boolPointerValue(input.Quota7DThresholdEnabled, false)), intPointerValue(input.Quota7DThresholdPercent, 80))
 	if err != nil {
@@ -2137,6 +2244,46 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := result.LastInsertId()
+	if runtimeOnboarding {
+		created, err := insertRuntimeOnboardingSubmissionTx(r.Context(), tx, runtimeOnboardingSubmission{
+			IdempotencyKey: runtimeIdempotencyKey, OperationType: runtimeOnboardingOperationCreate,
+			AccountID: id, DesiredGeneration: 1, EventType: "account.runtime.provision_requested",
+			MigrationStatus: "migrating", SourceType: runtimeMaterial.Source, AuthType: runtimeMaterial.AuthType,
+			Status:                    runtimeOnboardingSubmissionPending,
+			RequestFingerprintVersion: runtimeOnboardingCreateFingerprintVersion,
+			RequestFingerprintSHA256:  runtimeCreateFingerprint, RequestFingerprintPresent: true,
+		})
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		if !created {
+			_ = tx.Rollback()
+			existingID, _, found, replayErr := a.replayRuntimeOnboardingCreate(
+				r.Context(), a.onboardingIntake, runtimeIdempotencyKey, runtimeMaterial, runtimeCreateFingerprint,
+			)
+			runtimeMaterial = nil
+			if !found || replayErr != nil {
+				if errors.Is(replayErr, errRuntimeOnboardingTimeout) {
+					writePendingRuntimeOnboardingError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out", existingID)
+				} else if errors.Is(replayErr, errRuntimeOnboardingUnavailable) {
+					writePendingRuntimeOnboardingError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable", existingID)
+				} else if errors.Is(replayErr, errRuntimeOnboardingIdempotency) || errors.Is(replayErr, errRuntimeMigration) {
+					writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+				} else {
+					writePendingRuntimeOnboardingError(w, http.StatusBadGateway, "execution onboarding request failed", existingID)
+				}
+				return
+			}
+			item, err := a.getAccount(existingID, false)
+			if err != nil {
+				writeDBError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
+			return
+		}
+	}
 	if err := seedAccountFingerprint(tx, id, r.Header); err != nil {
 		writeDBError(w, err)
 		return
@@ -2146,6 +2293,14 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		subscription := subscriptionTypeFromCredentials(credentials)
 		rateLimitTier := rateLimitTierFromCredentials(credentials)
 		if _, err := tx.Exec(`UPDATE accounts SET auth_status = 'valid', auth_error = '', auth_checked_at = `+nowSQL+`, token_expires_at = ?, subscription_type = ?, rate_limit_tier = ?, onboarded_at = `+nowSQL+`, invalidated_at = NULL WHERE id = ?`, tokenExpiresAt, subscription, rateLimitTier, id); err != nil {
+			writeDBError(w, err)
+			return
+		}
+	} else if runtimeOnboarding {
+		if _, err := tx.Exec(`UPDATE accounts SET
+			auth_status = 'unknown', auth_error = '', schedulable = 0,
+			execution_migration_status = 'migrating', runtime_status = 'provisioning', runtime_error_code = ''
+			WHERE id = ?`, id); err != nil {
 			writeDBError(w, err)
 			return
 		}
@@ -2173,6 +2328,16 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if runtimeOnboarding && assignedProxy == nil {
+		writeError(w, http.StatusConflict, "execution onboarding requires a reserved account proxy")
+		return
+	}
+	if runtimeOnboarding {
+		if err := bindRuntimeOnboardingSubmissionProxyTx(r.Context(), tx, runtimeIdempotencyKey, id, *assignedProxy); err != nil {
+			writeDBError(w, err)
+			return
+		}
+	}
 	if _, err := tx.Exec(`UPDATE accounts SET proxy_id = ? WHERE id = ?`, assignedProxy, id); err != nil {
 		writeDBError(w, err)
 		return
@@ -2197,6 +2362,26 @@ func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
+	if runtimeOnboarding {
+		event, err := a.requestRuntimeOnboardingWithMaterial(r.Context(), a.onboardingIntake, runtimeIdempotencyKey, runtimeTransitionRequest{
+			AccountID: id, EventType: "account.runtime.provision_requested", MigrationStatus: "migrating",
+			RuntimeStatus: "provisioning",
+		}, runtimeMaterial)
+		if err != nil {
+			a.recordAuthorization(&id, assignedProxy, input.Name, "runtime_onboarding_create", false, "runtime onboarding request failed", "", requestIP(r))
+			if errors.Is(err, errRuntimeOnboardingTimeout) {
+				writePendingRuntimeOnboardingError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out; pending account and proxy were preserved", id)
+			} else if errors.Is(err, errRuntimeOnboardingUnavailable) {
+				writePendingRuntimeOnboardingError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable; pending account and proxy were preserved", id)
+			} else {
+				writePendingRuntimeOnboardingError(w, http.StatusBadGateway, "execution onboarding request failed; pending account and proxy were preserved", id)
+			}
+			return
+		}
+		runtimeMaterial = nil
+		a.recordAuthorization(&id, assignedProxy, input.Name, "runtime_onboarding_create", true, "runtime onboarding queued", "", requestIP(r))
+		_ = event
+	}
 	if sessionAuthorized {
 		a.recordAuthorization(&id, assignedProxy, input.Name, "session_key_create", true, "authorization succeeded", authorizedSubscription, requestIP(r))
 	}
@@ -2220,9 +2405,19 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.releaseAccountTokenLease(id, leaseOwner)
 	var existingCredentials, existingExtra, existingSourceSKHint, executionMigrationStatus, existingAuthType string
-	var previousProxyID sql.NullInt64
+	var existingPlatform, existingStatus string
+	var previousProxyPoolID, previousProxyID sql.NullInt64
+	var existingAutoProxy, existingSchedulable int
+	var existingRuntimeGeneration uint64
 	var previousOnboarded, previousInvalidated sql.NullString
-	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, proxy_id, onboarded_at, invalidated_at, execution_migration_status, auth_type FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(&existingCredentials, &existingExtra, &existingSourceSKHint, &previousProxyID, &previousOnboarded, &previousInvalidated, &executionMigrationStatus, &existingAuthType); err != nil {
+	if err := a.db.QueryRow(`SELECT credentials_json, extra_json, source_sk_hint, proxy_pool_id, proxy_id,
+		onboarded_at, invalidated_at, execution_migration_status, auth_type, platform, status, auto_proxy, schedulable,
+		runtime_generation
+		FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, id).Scan(
+		&existingCredentials, &existingExtra, &existingSourceSKHint, &previousProxyPoolID, &previousProxyID,
+		&previousOnboarded, &previousInvalidated, &executionMigrationStatus, &existingAuthType,
+		&existingPlatform, &existingStatus, &existingAutoProxy, &existingSchedulable, &existingRuntimeGeneration,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found")
 			return
@@ -2242,6 +2437,13 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	credentialsProvided := len(input.Credentials) > 0 && string(input.Credentials) != "null"
 	if executionMigrationStatus != "legacy" && (credentialsProvided || strings.TrimSpace(input.SessionKey) != "" || input.AuthType != existingAuthType) {
 		writeError(w, http.StatusConflict, errRuntimeCredentialOwner.Error())
+		return
+	}
+	if executionMigrationStatus != "legacy" && (input.Platform != existingPlatform || input.Status != existingStatus ||
+		strings.TrimSpace(input.ProxyText) != "" || !sameNullableInt64(previousProxyPoolID, input.ProxyPoolID) ||
+		!sameNullableInt64(previousProxyID, input.ProxyID) || input.AutoProxy != (existingAutoProxy != 0) ||
+		*input.Schedulable != (existingSchedulable != 0)) {
+		writeError(w, http.StatusConflict, errRuntimeRoutingOwner.Error())
 		return
 	}
 	if err := a.validateAccountGroupIDs(input.GroupIDs); err != nil {
@@ -2298,13 +2500,13 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		consecutive_429 = CASE WHEN NULLIF(?, '') IS NULL THEN 0 ELSE consecutive_429 END,
 		last_429_at = CASE WHEN NULLIF(?, '') IS NULL THEN NULL ELSE last_429_at END,
 		proxy_pool_id = ?, proxy_id = ?, auto_proxy = ?, base_rpm = ?, rpm_strategy = ?, rpm_sticky_buffer = ?, user_msg_queue_mode = ?, strategy_id = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, strategy_id) END, account_price = ?,
-		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), quota_7d_threshold_enabled = COALESCE(?, quota_7d_threshold_enabled), quota_7d_threshold_percent = COALESCE(?, quota_7d_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND (execution_migration_status = 'legacy' OR ? = '{}')
+		quota_5h_threshold_enabled = COALESCE(?, quota_5h_threshold_enabled), quota_5h_threshold_percent = COALESCE(?, quota_5h_threshold_percent), quota_7d_threshold_enabled = COALESCE(?, quota_7d_threshold_enabled), quota_7d_threshold_percent = COALESCE(?, quota_7d_threshold_percent), updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL AND runtime_generation = ? AND (execution_migration_status = 'legacy' OR ? = '{}')
 		AND EXISTS (SELECT 1 FROM account_token_leases lease WHERE lease.account_id = accounts.id AND lease.owner = ? AND lease.expires_at > CAST(strftime('%s','now') AS INTEGER))`, input.Name, input.Platform, input.AuthType, credentialsJSON, credentialHint(credentialsJSON), accountSourceSKHint, extraJSON, input.Status, boolInt(*input.Schedulable), input.Concurrency, input.Priority, input.RateMultiplier, input.Notes, input.ErrorMessage, input.ExpiresAt, input.RateLimitResetAt,
 		// Clearing the cooldown field is the administrator's manual recovery, so
 		// the automatic 429 bookkeeping has to go with it. Otherwise the account
 		// keeps its strikes and the next single 429 re-parks it.
 		input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt, input.RateLimitResetAt,
-		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent, id, credentialsJSON, leaseOwner)
+		input.ProxyPoolID, assignedProxy, boolInt(input.AutoProxy), input.BaseRPM, input.RPMStrategy, input.RPMStickyBuffer, input.UserMsgQueueMode, boolInt(strategyClear), strategyValue, input.AccountPrice, quota5HThresholdEnabled, quota5HThresholdPercent, quota7DThresholdEnabled, quota7DThresholdPercent, id, existingRuntimeGeneration, credentialsJSON, leaseOwner)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -2679,12 +2881,15 @@ func (a *app) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := a.db.Exec(`UPDATE accounts SET status = 'disabled', schedulable = 0, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, id)
+	deleted, err := a.deleteAccounts(r.Context(), []int64{id})
 	if err != nil {
+		if writeRuntimeRoutingOwnerError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
-	if count, _ := result.RowsAffected(); count == 0 {
+	if deleted == 0 {
 		writeError(w, http.StatusNotFound, "account not found")
 		return
 	}
@@ -2709,33 +2914,16 @@ func (a *app) handleAccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
 		return
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, len(ids))
-	for index, id := range ids {
-		args[index] = id
-	}
-	tx, err := a.db.Begin()
+	deleted, err := a.deleteAccounts(r.Context(), ids)
 	if err != nil {
-		writeDBError(w, err)
-		return
-	}
-	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE accounts SET status = 'disabled', schedulable = 0, deleted_at = `+nowSQL+`, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND id IN (`+placeholders+`)`, args...)
-	if err != nil {
-		writeDBError(w, err)
-		return
-	}
-	deleted, err := result.RowsAffected()
-	if err != nil {
+		if writeRuntimeRoutingOwnerError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
 	if deleted == 0 {
 		writeError(w, http.StatusNotFound, "no selected accounts were found")
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		writeDBError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
@@ -2765,6 +2953,16 @@ func (a *app) handleAccountBatchSchedule(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "no selected accounts were found")
 		return
 	}
+	var runtimeManaged int64
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL AND archived_at IS NULL
+		AND execution_migration_status <> 'legacy' AND id IN (`+placeholders+`)`, args...).Scan(&runtimeManaged); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if runtimeManaged != 0 {
+		writeError(w, http.StatusConflict, errRuntimeRoutingOwner.Error())
+		return
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		writeDBError(w, err)
@@ -2777,10 +2975,13 @@ func (a *app) handleAccountBatchSchedule(w http.ResponseWriter, r *http.Request)
 			rate_limit_reset_at = NULL, rate_limit_window = '', rate_limit_reason = '', consecutive_429 = 0, last_429_at = NULL,
 			rate_limit_downweight_until = NULL, quota_refreshed_at = `+nowSQL+`,
 			error_message = '', updated_at = `+nowSQL+`
-			WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`) AND auth_status = 'valid' AND proxy_id IS NOT NULL
+			WHERE deleted_at IS NULL AND archived_at IS NULL AND execution_migration_status = 'legacy'
+			AND id IN (`+placeholders+`) AND auth_status = 'valid' AND proxy_id IS NOT NULL
 			AND EXISTS (SELECT 1 FROM proxies p WHERE p.id = accounts.proxy_id AND p.status = 'active' AND p.deleted_at IS NULL)`, args...)
 	} else {
-		result, err = tx.Exec(`UPDATE accounts SET schedulable = 0, updated_at = `+nowSQL+` WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`)`, args...)
+		result, err = tx.Exec(`UPDATE accounts SET schedulable = 0, updated_at = `+nowSQL+`
+			WHERE deleted_at IS NULL AND archived_at IS NULL AND execution_migration_status = 'legacy'
+			AND id IN (`+placeholders+`)`, args...)
 	}
 	if err != nil {
 		writeDBError(w, err)
@@ -3806,6 +4007,13 @@ func nullIntPointer(value sql.NullInt64) *int64 {
 		return nil
 	}
 	return &value.Int64
+}
+
+func sameNullableInt64(stored sql.NullInt64, candidate *int64) bool {
+	if candidate == nil {
+		return !stored.Valid
+	}
+	return stored.Valid && stored.Int64 == *candidate
 }
 
 func validOptionalNonNegative(value *float64) bool {

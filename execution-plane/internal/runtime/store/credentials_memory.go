@@ -28,6 +28,17 @@ func (r *MemoryRepository) NextCredentialVersionNumber(_ context.Context, accoun
 }
 
 func (r *MemoryRepository) CommitCredentialVersion(_ context.Context, version credential.VersionRecord) error {
+	return r.commitCredentialVersion("", version)
+}
+
+func (r *MemoryRepository) CommitCredentialVersionForOperation(_ context.Context, operationID string, version credential.VersionRecord) error {
+	if credential.ValidateTransportID(operationID) != nil {
+		return credential.ErrCredentialOperationConflict
+	}
+	return r.commitCredentialVersion(operationID, version)
+}
+
+func (r *MemoryRepository) commitCredentialVersion(operationID string, version credential.VersionRecord) error {
 	if err := version.Validate(); err != nil {
 		return err
 	}
@@ -35,6 +46,11 @@ func (r *MemoryRepository) CommitCredentialVersion(_ context.Context, version cr
 	defer r.mu.Unlock()
 	if _, exists := r.credentialVersions[version.ID]; exists {
 		return credential.ErrCredentialVersionConflict
+	}
+	if operationID != "" {
+		if _, exists := r.credentialOperations[operationID]; exists {
+			return credential.ErrCredentialOperationConflict
+		}
 	}
 	var current uint64
 	for _, versionID := range r.credentialVersionIDs[version.AccountID] {
@@ -48,6 +64,9 @@ func (r *MemoryRepository) CommitCredentialVersion(_ context.Context, version cr
 	stored := cloneCredentialVersion(version)
 	r.credentialVersions[version.ID] = stored
 	r.credentialVersionIDs[version.AccountID] = append(r.credentialVersionIDs[version.AccountID], version.ID)
+	if operationID != "" {
+		r.credentialOperations[operationID] = version.ID
+	}
 	vault, exists := r.credentialVaults[version.AccountID]
 	if !exists {
 		vault.CreatedAt = version.CreatedAt.UTC()
@@ -64,6 +83,23 @@ func (r *MemoryRepository) CommitCredentialVersion(_ context.Context, version cr
 		}
 	}
 	return nil
+}
+
+func (r *MemoryRepository) GetCredentialVersionByOperation(_ context.Context, operationID string) (credential.VersionRecord, error) {
+	if credential.ValidateTransportID(operationID) != nil {
+		return credential.VersionRecord{}, credential.ErrCredentialOperationConflict
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	versionID, exists := r.credentialOperations[operationID]
+	if !exists {
+		return credential.VersionRecord{}, credential.ErrCredentialOperationNotFound
+	}
+	version, exists := r.credentialVersions[versionID]
+	if !exists {
+		return credential.VersionRecord{}, errors.New("credential operation version is missing")
+	}
+	return cloneCredentialVersion(version), nil
 }
 
 func (r *MemoryRepository) GetActiveCredentialVersion(_ context.Context, accountID string) (credential.VersionRecord, error) {
@@ -191,3 +227,4 @@ func cloneCredentialVersion(version credential.VersionRecord) credential.Version
 }
 
 var _ CredentialVaultRepository = (*MemoryRepository)(nil)
+var _ credential.IdempotentVaultRepository = (*MemoryRepository)(nil)

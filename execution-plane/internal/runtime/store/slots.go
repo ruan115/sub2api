@@ -41,6 +41,7 @@ type Assignment struct {
 	NodeID             string
 	ProviderRef        string
 	ExecutionEpoch     uint64
+	DesiredGeneration  uint64
 	ImageDigest        string
 	CPURequestMillis   uint64
 	MemoryRequestBytes uint64
@@ -216,10 +217,10 @@ WHERE node_id = ? AND status = 'connected' AND control_session_id = ? AND last_s
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO slot_assignments (
-  assignment_id, slot_id, node_id, execution_epoch, image_digest,
+  assignment_id, slot_id, node_id, execution_epoch, desired_generation, image_digest,
   cpu_request_millis, memory_request_bytes, actual_state, actual_generation, assigned_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, 'missing', 1, ?)`,
-		reservation.ID, slot.ID, reservation.NodeID, epoch, slot.ImageDigest,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'missing', 1, ?)`,
+		reservation.ID, slot.ID, reservation.NodeID, epoch, slot.DesiredGeneration, slot.ImageDigest,
 		slot.CPURequestMillis, slot.MemoryRequestBytes, reservation.ReservedAt.UTC(),
 	)
 	if err != nil {
@@ -401,7 +402,7 @@ FROM slots WHERE slot_id = ?`
 
 func getActiveAssignment(ctx context.Context, queryer slotQueryer, slotID string, forUpdate bool) (Assignment, error) {
 	query := `
-SELECT assignment_id, slot_id, node_id, COALESCE(provider_ref, ''), execution_epoch, image_digest,
+SELECT assignment_id, slot_id, node_id, COALESCE(provider_ref, ''), execution_epoch, desired_generation, image_digest,
        cpu_request_millis, memory_request_bytes, actual_state, actual_generation, healthy, reason_code,
        assigned_at, last_observed_at, released_at
 FROM slot_assignments WHERE slot_id = ? AND released_at IS NULL`
@@ -409,15 +410,19 @@ FROM slot_assignments WHERE slot_id = ? AND released_at IS NULL`
 		query += " FOR UPDATE"
 	}
 	var assignment Assignment
+	var desiredGeneration sql.NullInt64
 	var observed, released sql.NullTime
 	err := queryer.QueryRowContext(ctx, query, slotID).Scan(
 		&assignment.ID, &assignment.SlotID, &assignment.NodeID, &assignment.ProviderRef,
-		&assignment.ExecutionEpoch, &assignment.ImageDigest, &assignment.CPURequestMillis, &assignment.MemoryRequestBytes,
+		&assignment.ExecutionEpoch, &desiredGeneration, &assignment.ImageDigest, &assignment.CPURequestMillis, &assignment.MemoryRequestBytes,
 		&assignment.ActualState, &assignment.ActualGeneration, &assignment.Healthy, &assignment.ReasonCode,
 		&assignment.AssignedAt, &observed, &released,
 	)
 	if err != nil {
 		return Assignment{}, err
+	}
+	if desiredGeneration.Valid && desiredGeneration.Int64 > 0 {
+		assignment.DesiredGeneration = uint64(desiredGeneration.Int64)
 	}
 	if observed.Valid {
 		value := observed.Time.UTC()

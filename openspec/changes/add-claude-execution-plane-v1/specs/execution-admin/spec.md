@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: 管理端必须展示执行面真实状态
-V1 SHALL 在 `ccmax-manager/web` 提供中文节点、槽位、镜像、会话、队列、租约、代理、模式健康和异步生命周期页面。UI MUST 展示 desired 与 actual state，不得把 provisioning 显示为 ready。
+V1 SHALL 在 `ccmax-manager/web` 使用 React + TypeScript + Vite 与 shadcn/ui 提供中文节点、槽位、镜像、会话、队列、租约、代理、模式健康和异步生命周期页面。UI MUST 提供中性色纯白/暗黑双主题，MUST 展示 desired 与 actual state，不得把 provisioning 显示为 ready。生产构建 MUST 由 CCMAX Go 服务内嵌提供且不得要求独立 Node 运行时。
 
 #### Scenario: 节点失联
 - **WHEN** 节点心跳超过阈值

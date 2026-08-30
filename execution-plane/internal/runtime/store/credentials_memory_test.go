@@ -210,6 +210,76 @@ func TestConcurrentCredentialRotationsAreMonotonic(t *testing.T) {
 	}
 }
 
+func TestIdempotentCredentialRotationConvergesAcrossVaultInstances(t *testing.T) {
+	firstVault, repository, kms, now := credentialTestRuntime(t)
+	cryptoService, err := credential.NewService(kms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondVault, err := credential.NewVault(cryptoService, repository, credential.VaultConfig{
+		LeaseTTL: 30 * time.Second,
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const contenders = 16
+	versions := make(chan credential.VersionRecord, contenders)
+	errorsSeen := make(chan error, contenders)
+	var wait sync.WaitGroup
+	wait.Add(contenders)
+	for index := range contenders {
+		index := index
+		go func() {
+			defer wait.Done()
+			vault := firstVault
+			if index%2 == 1 {
+				vault = secondVault
+			}
+			record, rotateErr := vault.RotateIdempotent(
+				context.Background(), "credential-lease-idempotent", "account-1", "oauth", "oauth:***same", []byte("same-credential"),
+			)
+			if rotateErr != nil {
+				errorsSeen <- rotateErr
+				return
+			}
+			versions <- record
+		}()
+	}
+	wait.Wait()
+	close(versions)
+	close(errorsSeen)
+	for rotateErr := range errorsSeen {
+		t.Errorf("idempotent rotation: %v", rotateErr)
+	}
+
+	var committedID string
+	for record := range versions {
+		if committedID == "" {
+			committedID = record.ID
+		}
+		if record.ID != committedID || record.VersionNumber != 1 {
+			t.Fatalf("idempotent result = %+v, want version %q/1", record, committedID)
+		}
+	}
+	if committedID == "" {
+		t.Fatal("no idempotent rotation completed")
+	}
+	repository.mu.RLock()
+	versionCount := len(repository.credentialVersions)
+	operationVersion := repository.credentialOperations["credential-lease-idempotent"]
+	repository.mu.RUnlock()
+	if versionCount != 1 || operationVersion != committedID {
+		t.Fatalf("durable operation mapping versions=%d mapped=%q committed=%q", versionCount, operationVersion, committedID)
+	}
+	if _, err := firstVault.RotateIdempotent(
+		context.Background(), "credential-lease-idempotent", "account-1", "oauth", "oauth:***changed", []byte("same-credential"),
+	); !errors.Is(err, credential.ErrCredentialOperationConflict) {
+		t.Fatalf("changed operation metadata error = %v, want conflict", err)
+	}
+}
+
 func containsCredentialSecurityReason(events []credential.SecurityEvent, reason string) bool {
 	for _, event := range events {
 		if event.ReasonCode == reason {

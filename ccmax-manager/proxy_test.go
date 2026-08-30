@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -418,4 +419,131 @@ func TestBatchProxyTestRecoversWorkingErrorProxy(t *testing.T) {
 	if status != "active" || exitIP != "198.51.100.7" {
 		t.Fatalf("working proxy status/ip = %q/%q", status, exitIP)
 	}
+}
+
+func TestProxyTestRejectsActiveRuntimeReservationBeforeNetwork(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	fixture := newRuntimeProxyReservationFixture(t, "proxy-test-runtime-fence")
+	forwarderID, calls := createCountingForwardProxy(t, fixture.app)
+	pointProxyAtForwarder(t, fixture.app, fixture.proxyID, forwarderID, "runtime-probe-owner")
+	setProxyTestEndpoint(t, "198.51.100.20")
+
+	putJSON(t, fixture.app.routes(), http.MethodPost,
+		"/api/proxies/"+strconv.FormatInt(fixture.proxyID, 10)+"/test", nil, http.StatusConflict, nil)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("runtime-owned single proxy emitted %d network requests, want 0", got)
+	}
+}
+
+func TestProxyTestRejectsPendingRuntimeOwnerBeforeNetwork(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "proxy-test-pending-runtime-fence.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	proxyID, calls := createCountingForwardProxy(t, a)
+	if _, err := a.db.Exec(`INSERT INTO accounts
+		(name, credentials_json, execution_migration_status, runtime_status, proxy_id)
+		VALUES ('pending-proxy-test-owner', '{}', 'migrating', 'provisioning', ?)`, proxyID); err != nil {
+		t.Fatal(err)
+	}
+	setProxyTestEndpoint(t, "198.51.100.21")
+
+	putJSON(t, a.routes(), http.MethodPost, "/api/proxies/"+strconv.FormatInt(proxyID, 10)+"/test",
+		nil, http.StatusConflict, nil)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("pending runtime-owned single proxy emitted %d network requests, want 0", got)
+	}
+}
+
+func TestBatchProxyTestRejectsRuntimeOwnedTargetBeforeAnyNetwork(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	fixture := newRuntimeProxyReservationFixture(t, "proxy-batch-test-runtime-fence")
+	legacyID, calls := createCountingForwardProxy(t, fixture.app)
+	pointProxyAtForwarder(t, fixture.app, fixture.proxyID, legacyID, "runtime-batch-owner")
+	setProxyTestEndpoint(t, "198.51.100.22")
+
+	putJSON(t, fixture.app.routes(), http.MethodPost, "/api/proxies/batch-test", map[string]any{
+		"ids": []int64{legacyID, fixture.proxyID}, "concurrency": 2,
+	}, http.StatusConflict, nil)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("rejected mixed batch emitted %d network requests, want 0", got)
+	}
+}
+
+func TestBatchProxyTestRejectsPendingRuntimeOwnerBeforeAnyNetwork(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "proxy-batch-test-pending-runtime-fence.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	runtimeID, runtimeCalls := createCountingForwardProxy(t, a)
+	legacyID, legacyCalls := createCountingForwardProxy(t, a)
+	if _, err := a.db.Exec(`INSERT INTO accounts
+		(name, credentials_json, execution_migration_status, runtime_status, proxy_id)
+		VALUES ('pending-batch-proxy-test-owner', '{}', 'migrating', 'provisioning', ?)`, runtimeID); err != nil {
+		t.Fatal(err)
+	}
+	setProxyTestEndpoint(t, "198.51.100.24")
+
+	putJSON(t, a.routes(), http.MethodPost, "/api/proxies/batch-test", map[string]any{
+		"ids": []int64{legacyID, runtimeID}, "concurrency": 2,
+	}, http.StatusConflict, nil)
+	if runtimeCalls.Load() != 0 || legacyCalls.Load() != 0 {
+		t.Fatalf("rejected pending-owner batch emitted runtime/legacy requests = %d/%d, want 0/0",
+			runtimeCalls.Load(), legacyCalls.Load())
+	}
+}
+
+func TestProxyTestLegacyProxyStillProbesAndPersists(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "proxy-test-legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	proxyID, calls := createCountingForwardProxy(t, a)
+	setProxyTestEndpoint(t, "198.51.100.23")
+
+	var result proxyTestResult
+	putJSON(t, a.routes(), http.MethodPost, "/api/proxies/"+strconv.FormatInt(proxyID, 10)+"/test",
+		nil, http.StatusOK, &result)
+	if !result.Success || result.IP != "198.51.100.23" || calls.Load() != 1 {
+		t.Fatalf("legacy proxy probe = %+v, network calls=%d", result, calls.Load())
+	}
+	var status, exitIP string
+	if err := a.db.QueryRow(`SELECT status, exit_ip FROM proxies WHERE id = ?`, proxyID).Scan(&status, &exitIP); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" || exitIP != "198.51.100.23" {
+		t.Fatalf("legacy proxy persisted status/ip = %q/%q", status, exitIP)
+	}
+}
+
+func pointProxyAtForwarder(t *testing.T, a *app, proxyID, forwarderID int64, username string) {
+	t.Helper()
+	var host string
+	var port int
+	if err := a.db.QueryRow(`SELECT host, port FROM proxies WHERE id = ?`, forwarderID).Scan(&host, &port); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE proxies SET protocol = 'http', host = ?, port = ?, username = ?, password = ''
+		WHERE id = ?`, host, port, username, proxyID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setProxyTestEndpoint(t *testing.T, ip string) {
+	t.Helper()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"ip": ip})
+	}))
+	previous := proxyTestEndpoint
+	proxyTestEndpoint = target.URL
+	t.Cleanup(func() {
+		proxyTestEndpoint = previous
+		target.Close()
+	})
 }

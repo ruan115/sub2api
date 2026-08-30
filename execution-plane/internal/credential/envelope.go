@@ -19,9 +19,13 @@ const (
 	dataKeySize       = 32
 	gcmNonceSize      = 12
 	maxPlaintextBytes = 1 << 20
-	maxWrappedKeySize = 64 << 10
-	maxAADBytes       = 1024
-	aadSchema         = "ccmax.credential.v1"
+	// Authenticated internal framing receives a small bounded allowance above
+	// credential material. Public credential APIs still enforce 1 MiB.
+	maxEnvelopePlaintextBytes = maxPlaintextBytes + 1024
+	maxWrappedKeySize         = 64 << 10
+	maxAADBytes               = 1024
+	aadSchema                 = "ccmax.credential.v1"
+	serviceKeyAADSchema       = "sub2api.service-key.v1"
 )
 
 var (
@@ -48,15 +52,28 @@ type canonicalAADPayload struct {
 	AuthType          string `json:"auth_type"`
 }
 
+type ServiceKeyMetadata struct {
+	ServiceID string
+	Purpose   string
+	Version   uint64
+}
+
+type serviceKeyAADPayload struct {
+	Schema    string `json:"schema"`
+	ServiceID string `json:"service_id"`
+	Purpose   string `json:"purpose"`
+	Version   uint64 `json:"version"`
+}
+
 // Envelope maps directly to credential_versions without storing plaintext or
 // a plaintext data-encryption key.
 type Envelope struct {
-	Ciphertext    []byte
-	EncryptedDEK  []byte
-	Nonce         []byte
-	AADJSON       []byte
-	KMSKeyID      string
-	KMSKeyVersion string
+	Ciphertext    []byte `json:"ciphertext"`
+	EncryptedDEK  []byte `json:"encrypted_dek"`
+	Nonce         []byte `json:"nonce"`
+	AADJSON       []byte `json:"aad_json"`
+	KMSKeyID      string `json:"kms_key_id"`
+	KMSKeyVersion string `json:"kms_key_version"`
 }
 
 // WrappedDataKey is the opaque KMS result persisted with an envelope.
@@ -94,11 +111,21 @@ func NewService(kms KMS) (*Service, error) {
 
 // Seal encrypts one credential version using a newly generated 256-bit DEK.
 func (s *Service) Seal(ctx context.Context, metadata Metadata, plaintext []byte) (Envelope, error) {
+	if len(plaintext) == 0 || len(plaintext) > maxPlaintextBytes {
+		return Envelope{}, fmt.Errorf("%w: plaintext size is outside supported bounds", ErrEncryption)
+	}
 	aad, err := metadata.canonicalAAD()
 	if err != nil {
 		return Envelope{}, err
 	}
-	if len(plaintext) == 0 || len(plaintext) > maxPlaintextBytes {
+	return s.sealWithAAD(ctx, aad, plaintext)
+}
+
+func (s *Service) sealWithAAD(ctx context.Context, aad, plaintext []byte) (Envelope, error) {
+	if s == nil || s.kms == nil || ctx == nil || ctx.Err() != nil || len(aad) == 0 || len(aad) > maxAADBytes {
+		return Envelope{}, ErrEncryption
+	}
+	if len(plaintext) == 0 || len(plaintext) > maxEnvelopePlaintextBytes {
 		return Envelope{}, fmt.Errorf("%w: plaintext size is outside supported bounds", ErrEncryption)
 	}
 
@@ -142,9 +169,51 @@ func (s *Service) Seal(ctx context.Context, metadata Metadata, plaintext []byte)
 // or integrity failure is fail-closed and never includes sensitive values in
 // the returned error.
 func (s *Service) Open(ctx context.Context, metadata Metadata, envelope Envelope) ([]byte, error) {
+	if len(envelope.Ciphertext) > maxPlaintextBytes+16 {
+		return nil, ErrInvalidEnvelope
+	}
 	expectedAAD, err := metadata.canonicalAAD()
 	if err != nil {
 		return nil, err
+	}
+	return s.openWithAAD(ctx, expectedAAD, envelope)
+}
+
+// SealServiceKey consumes and erases plaintextKey on every path. Service keys
+// use a distinct AAD schema and may not be opened as account credentials.
+func (s *Service) SealServiceKey(ctx context.Context, metadata ServiceKeyMetadata, plaintextKey []byte) (Envelope, error) {
+	defer zeroBytes(plaintextKey)
+	if len(plaintextKey) != dataKeySize {
+		return Envelope{}, ErrEncryption
+	}
+	aad, err := metadata.canonicalAAD()
+	if err != nil {
+		return Envelope{}, err
+	}
+	return s.sealWithAAD(ctx, aad, plaintextKey)
+}
+
+// OpenServiceKey returns one 32-byte key. The caller must immediately transfer
+// ownership to a consuming key constructor or erase the returned buffer.
+func (s *Service) OpenServiceKey(ctx context.Context, metadata ServiceKeyMetadata, envelope Envelope) ([]byte, error) {
+	expectedAAD, err := metadata.canonicalAAD()
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := s.openWithAAD(ctx, expectedAAD, envelope)
+	if err != nil {
+		return nil, err
+	}
+	if len(plaintext) != dataKeySize {
+		zeroBytes(plaintext)
+		return nil, ErrDecryption
+	}
+	return plaintext, nil
+}
+
+func (s *Service) openWithAAD(ctx context.Context, expectedAAD []byte, envelope Envelope) ([]byte, error) {
+	if s == nil || s.kms == nil || ctx == nil || ctx.Err() != nil || len(expectedAAD) == 0 || len(expectedAAD) > maxAADBytes {
+		return nil, ErrDecryption
 	}
 	if err := envelope.validate(); err != nil {
 		return nil, err
@@ -206,6 +275,25 @@ func (m Metadata) canonicalAAD() ([]byte, error) {
 	return aad, nil
 }
 
+func (m ServiceKeyMetadata) canonicalAAD() ([]byte, error) {
+	if err := validateMetadataString(m.ServiceID, 64, true); err != nil {
+		return nil, fmt.Errorf("%w: service id", ErrInvalidMetadata)
+	}
+	if err := validateMetadataString(m.Purpose, 64, true); err != nil {
+		return nil, fmt.Errorf("%w: service key purpose", ErrInvalidMetadata)
+	}
+	if m.Version == 0 {
+		return nil, fmt.Errorf("%w: service key version", ErrInvalidMetadata)
+	}
+	aad, err := json.Marshal(serviceKeyAADPayload{
+		Schema: serviceKeyAADSchema, ServiceID: m.ServiceID, Purpose: m.Purpose, Version: m.Version,
+	})
+	if err != nil || len(aad) > maxAADBytes {
+		return nil, fmt.Errorf("%w: service key AAD", ErrInvalidMetadata)
+	}
+	return aad, nil
+}
+
 func validateMetadataString(value string, maxBytes int, restricted bool) error {
 	if value == "" || len(value) > maxBytes || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
 		return ErrInvalidMetadata
@@ -226,7 +314,7 @@ func validateMetadataString(value string, maxBytes int, restricted bool) error {
 }
 
 func (e Envelope) validate() error {
-	if len(e.Ciphertext) < 16 || len(e.Ciphertext) > maxPlaintextBytes+16 ||
+	if len(e.Ciphertext) < 16 || len(e.Ciphertext) > maxEnvelopePlaintextBytes+16 ||
 		len(e.EncryptedDEK) == 0 || len(e.EncryptedDEK) > maxWrappedKeySize ||
 		len(e.Nonce) != gcmNonceSize || len(e.AADJSON) == 0 || len(e.AADJSON) > maxAADBytes {
 		return ErrInvalidEnvelope
@@ -238,6 +326,36 @@ func (e Envelope) validate() error {
 		return ErrInvalidEnvelope
 	}
 	return nil
+}
+
+// Validate checks the persisted envelope shape without decrypting it.
+func (e Envelope) Validate() error { return e.validate() }
+
+// Clone makes ownership of sensitive ciphertext buffers explicit at package
+// boundaries. Ciphertext is not plaintext, but still receives bounded lifetime
+// and erasure in onboarding workflows.
+func (e Envelope) Clone() Envelope {
+	return Envelope{
+		Ciphertext: append([]byte(nil), e.Ciphertext...), EncryptedDEK: append([]byte(nil), e.EncryptedDEK...),
+		Nonce: append([]byte(nil), e.Nonce...), AADJSON: append([]byte(nil), e.AADJSON...),
+		KMSKeyID: e.KMSKeyID, KMSKeyVersion: e.KMSKeyVersion,
+	}
+}
+
+func (e *Envelope) Destroy() {
+	if e == nil {
+		return
+	}
+	zeroBytes(e.Ciphertext)
+	zeroBytes(e.EncryptedDEK)
+	zeroBytes(e.Nonce)
+	zeroBytes(e.AADJSON)
+	e.Ciphertext = nil
+	e.EncryptedDEK = nil
+	e.Nonce = nil
+	e.AADJSON = nil
+	e.KMSKeyID = ""
+	e.KMSKeyVersion = ""
 }
 
 func validateGeneratedDataKey(generated GeneratedDataKey) error {

@@ -138,6 +138,41 @@ func TestServiceFailsClosedWhenKMSFails(t *testing.T) {
 	}
 }
 
+func TestServiceKeyEnvelopeIsDistinctAndConsumesInput(t *testing.T) {
+	kms, err := NewFakeKMS(bytes.Repeat([]byte{0x44}, 32), "kms-service-key", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, _ := NewService(kms)
+	metadata := ServiceKeyMetadata{ServiceID: "orchestrator", Purpose: "rotation-recipient", Version: 1}
+	privateKey := bytes.Repeat([]byte{0x55}, 32)
+	want := append([]byte(nil), privateKey...)
+	envelope, err := service.SealServiceKey(context.Background(), metadata, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer envelope.Destroy()
+	if !bytes.Equal(privateKey, make([]byte, 32)) {
+		t.Fatal("SealServiceKey did not erase caller input")
+	}
+	opened, err := service.OpenServiceKey(context.Background(), metadata, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroBytes(opened)
+	if !bytes.Equal(opened, want) {
+		t.Fatal("service key round trip changed key bytes")
+	}
+	if _, err := service.Open(context.Background(), Metadata{AccountID: "orchestrator", VersionNumber: 1, AuthType: "oauth"}, envelope); err == nil {
+		t.Fatal("service key envelope opened through credential metadata")
+	}
+	if _, err := service.OpenServiceKey(context.Background(), ServiceKeyMetadata{
+		ServiceID: "orchestrator", Purpose: "different-purpose", Version: 1,
+	}, envelope); err == nil {
+		t.Fatal("service key envelope opened with different purpose")
+	}
+}
+
 func TestServiceErasesGeneratedPlaintextDataKey(t *testing.T) {
 	t.Parallel()
 	provider := &recordingKMS{

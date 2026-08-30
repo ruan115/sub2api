@@ -36,6 +36,8 @@ type TencentKMS struct {
 	keyVersion string
 }
 
+func (c TencentKMSConfig) Validate() error { return c.validate() }
+
 // NewTencentKMSFromCVMRole intentionally uses only the CVM instance-role
 // provider. It never falls back to environment variables or credential files.
 func NewTencentKMSFromCVMRole(config TencentKMSConfig) (*TencentKMS, error) {

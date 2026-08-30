@@ -76,6 +76,35 @@ func TestIssueServerReturnsUsableTLSCertificate(t *testing.T) {
 	}
 }
 
+func TestIssueServiceClientUsesDistinctSPIFFEIdentity(t *testing.T) {
+	authority, _, err := NewEphemeralAuthority(time.Now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPEM, err := PublicKeyPEM(privateKey.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := authority.IssueServiceClient("ccmax", publicKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceID, err := ServiceIDFromCertificate(issued.Certificate)
+	if err != nil || serviceID != "ccmax" {
+		t.Fatalf("service identity = %q, %v", serviceID, err)
+	}
+	if _, err := NodeIDFromCertificate(issued.Certificate); err == nil {
+		t.Fatal("service certificate was accepted as a node identity")
+	}
+	if _, err := authority.IssueServiceClient("CCMAX/other", publicKeyPEM); err == nil {
+		t.Fatal("invalid service identity was issued")
+	}
+}
+
 func TestLoadAuthorityRejectsMismatchedPrivateKey(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
 	authority, _, err := NewEphemeralAuthority(func() time.Time { return now }, time.Hour)

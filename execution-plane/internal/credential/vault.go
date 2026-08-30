@@ -26,9 +26,11 @@ const (
 )
 
 var (
-	ErrCredentialVaultNotFound   = errors.New("credential vault is not initialized")
-	ErrCredentialVersionConflict = errors.New("credential version changed concurrently")
-	ErrCredentialLeaseRejected   = errors.New("credential lease is invalid, expired or already consumed")
+	ErrCredentialVaultNotFound     = errors.New("credential vault is not initialized")
+	ErrCredentialVersionConflict   = errors.New("credential version changed concurrently")
+	ErrCredentialOperationNotFound = errors.New("credential rotation operation is not committed")
+	ErrCredentialOperationConflict = errors.New("credential rotation operation conflicts with its committed version")
+	ErrCredentialLeaseRejected     = errors.New("credential lease is invalid, expired or already consumed")
 )
 
 type VersionRecord struct {
@@ -140,6 +142,16 @@ type VaultRepository interface {
 	ConsumeCredentialLease(ctx context.Context, claim LeaseClaim) (VersionRecord, error)
 }
 
+// IdempotentVaultRepository atomically binds one durable operation identity to
+// the credential version it creates. The caller that chooses operationID is
+// responsible for separately fencing the authenticated material digest; the
+// repository deliberately persists no plaintext-derived digest.
+type IdempotentVaultRepository interface {
+	VaultRepository
+	GetCredentialVersionByOperation(ctx context.Context, operationID string) (VersionRecord, error)
+	CommitCredentialVersionForOperation(ctx context.Context, operationID string, version VersionRecord) error
+}
+
 type VaultConfig struct {
 	LeaseTTL time.Duration
 	Now      func() time.Time
@@ -239,15 +251,33 @@ func NewVault(cryptoService *Service, repository VaultRepository, config VaultCo
 // Rotate encrypts and commits a new active version. Same-process operations are
 // serialized per account; the repository's version fence covers other replicas.
 func (v *Vault) Rotate(ctx context.Context, accountID, authType, hint string, plaintext []byte) (VersionRecord, error) {
-	metadata := Metadata{AccountID: accountID, VersionNumber: 1, AuthType: authType}
-	if _, err := metadata.canonicalAAD(); err != nil {
+	metadata, err := validateRotationInput(accountID, authType, hint, plaintext)
+	if err != nil {
 		return VersionRecord{}, err
 	}
-	if err := validateCredentialHint(hint); err != nil {
+
+	accountLockValue, _ := v.locks.LoadOrStore(accountID, &sync.Mutex{})
+	accountLock := accountLockValue.(*sync.Mutex)
+	accountLock.Lock()
+	defer accountLock.Unlock()
+	return v.rotateLocked(ctx, metadata, hint, plaintext, v.repo.CommitCredentialVersion)
+}
+
+// RotateIdempotent encrypts at most one credential version for operationID.
+// A retry after a lost acknowledgement or process crash returns the original
+// committed version. operationID must be a durable, authenticated identity
+// whose material digest is fenced by the higher-level rotation authorizer.
+func (v *Vault) RotateIdempotent(ctx context.Context, operationID, accountID, authType, hint string, plaintext []byte) (VersionRecord, error) {
+	if ValidateTransportID(operationID) != nil {
+		return VersionRecord{}, ErrCredentialOperationConflict
+	}
+	metadata, err := validateRotationInput(accountID, authType, hint, plaintext)
+	if err != nil {
 		return VersionRecord{}, err
 	}
-	if len(plaintext) == 0 || len(plaintext) > maxPlaintextBytes {
-		return VersionRecord{}, ErrEncryption
+	repository, ok := v.repo.(IdempotentVaultRepository)
+	if !ok {
+		return VersionRecord{}, errors.New("credential vault persistence is unavailable")
 	}
 
 	accountLockValue, _ := v.locks.LoadOrStore(accountID, &sync.Mutex{})
@@ -255,8 +285,44 @@ func (v *Vault) Rotate(ctx context.Context, accountID, authType, hint string, pl
 	accountLock.Lock()
 	defer accountLock.Unlock()
 
+	existing, err := repository.GetCredentialVersionByOperation(ctx, operationID)
+	if err == nil {
+		return validateCommittedOperation(existing, accountID, authType, hint)
+	}
+	if !errors.Is(err, ErrCredentialOperationNotFound) {
+		return VersionRecord{}, sanitizeRepositoryError(err)
+	}
+
+	return v.rotateLocked(ctx, metadata, hint, plaintext, func(commitContext context.Context, candidate VersionRecord) error {
+		return repository.CommitCredentialVersionForOperation(commitContext, operationID, candidate)
+	}, func(commitErr error) (VersionRecord, bool, error) {
+		committed, lookupErr := repository.GetCredentialVersionByOperation(ctx, operationID)
+		if lookupErr == nil {
+			validated, validationErr := validateCommittedOperation(committed, accountID, authType, hint)
+			return validated, true, validationErr
+		}
+		if !errors.Is(lookupErr, ErrCredentialOperationNotFound) {
+			return VersionRecord{}, true, sanitizeRepositoryError(lookupErr)
+		}
+		return VersionRecord{}, false, commitErr
+	})
+}
+
+type credentialVersionCommit func(context.Context, VersionRecord) error
+
+type credentialVersionRecovery func(error) (VersionRecord, bool, error)
+
+func (v *Vault) rotateLocked(
+	ctx context.Context,
+	metadata Metadata,
+	hint string,
+	plaintext []byte,
+	commit credentialVersionCommit,
+	recoveries ...credentialVersionRecovery,
+) (VersionRecord, error) {
+
 	for attempt := 0; attempt < maxRotationAttempts; attempt++ {
-		versionNumber, err := v.repo.NextCredentialVersionNumber(ctx, accountID)
+		versionNumber, err := v.repo.NextCredentialVersionNumber(ctx, metadata.AccountID)
 		if err != nil {
 			return VersionRecord{}, sanitizeRepositoryError(err)
 		}
@@ -270,10 +336,15 @@ func (v *Vault) Rotate(ctx context.Context, accountID, authType, hint string, pl
 			return VersionRecord{}, ErrEncryption
 		}
 		record := VersionRecord{
-			ID: versionID, AccountID: accountID, VersionNumber: versionNumber,
-			AuthType: authType, Envelope: envelope, Hint: hint, CreatedAt: v.now().UTC(),
+			ID: versionID, AccountID: metadata.AccountID, VersionNumber: versionNumber,
+			AuthType: metadata.AuthType, Envelope: envelope, Hint: hint, CreatedAt: v.now().UTC(),
 		}
-		if err := v.repo.CommitCredentialVersion(ctx, record); err != nil {
+		if err := commit(ctx, record); err != nil {
+			for _, recovery := range recoveries {
+				if recovered, handled, recoveryErr := recovery(err); handled {
+					return recovered, recoveryErr
+				}
+			}
 			if errors.Is(err, ErrCredentialVersionConflict) {
 				continue
 			}
@@ -282,6 +353,27 @@ func (v *Vault) Rotate(ctx context.Context, accountID, authType, hint string, pl
 		return record, nil
 	}
 	return VersionRecord{}, ErrCredentialVersionConflict
+}
+
+func validateRotationInput(accountID, authType, hint string, plaintext []byte) (Metadata, error) {
+	metadata := Metadata{AccountID: accountID, VersionNumber: 1, AuthType: authType}
+	if _, err := metadata.canonicalAAD(); err != nil {
+		return Metadata{}, err
+	}
+	if err := validateCredentialHint(hint); err != nil {
+		return Metadata{}, err
+	}
+	if len(plaintext) == 0 || len(plaintext) > maxPlaintextBytes {
+		return Metadata{}, ErrEncryption
+	}
+	return metadata, nil
+}
+
+func validateCommittedOperation(record VersionRecord, accountID, authType, hint string) (VersionRecord, error) {
+	if err := record.Validate(); err != nil || record.AccountID != accountID || record.AuthType != authType || record.Hint != hint {
+		return VersionRecord{}, ErrCredentialOperationConflict
+	}
+	return record, nil
 }
 
 func (v *Vault) IssueLease(ctx context.Context, accountID, slotID string, executionEpoch uint64) (LeaseGrant, error) {
@@ -373,6 +465,10 @@ func sanitizeRepositoryError(err error) error {
 		return ErrCredentialVaultNotFound
 	case errors.Is(err, ErrCredentialVersionConflict):
 		return ErrCredentialVersionConflict
+	case errors.Is(err, ErrCredentialOperationNotFound):
+		return ErrCredentialOperationNotFound
+	case errors.Is(err, ErrCredentialOperationConflict):
+		return ErrCredentialOperationConflict
 	case errors.Is(err, ErrCredentialLeaseRejected):
 		return ErrCredentialLeaseRejected
 	default:

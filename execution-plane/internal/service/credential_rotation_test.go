@@ -9,8 +9,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/onboarding"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 )
@@ -55,18 +57,46 @@ func (a *replayFencedRotationAuthorizer) CommitAuthorizedRotation(ctx context.Co
 }
 
 type recordingCredentialRotator struct {
-	mu        sync.Mutex
-	calls     int
-	accountID string
-	authType  string
-	hint      string
-	plaintext []byte
-	err       error
+	mu          sync.Mutex
+	calls       int
+	operationID string
+	accountID   string
+	authType    string
+	hint        string
+	plaintext   []byte
+	err         error
 }
 
 type doubleInvokeRotationAuthorizer struct {
 	accountID string
 	secondErr error
+}
+
+type recordingResultProjectionRepository struct {
+	mu     sync.Mutex
+	calls  int
+	commit onboarding.ResultProjectionCommit
+	err    error
+}
+
+func (r *recordingResultProjectionRepository) ProjectProvisioningResult(_ context.Context, commit onboarding.ResultProjectionCommit) (onboarding.ProvisioningResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.commit = commit
+	if r.err != nil {
+		return onboarding.ProvisioningResult{}, r.err
+	}
+	return onboarding.ProvisioningResult{
+		WorkflowID: "workflow-10380", IntentID: "intent-10380", AccountID: "account-10380", DesiredGeneration: 1,
+		SlotID: commit.SlotID, ExecutionEpoch: commit.ExecutionEpoch,
+		CredentialLeaseID: commit.CredentialLeaseID, CredentialVersionID: commit.CredentialVersionID,
+		Projection: commit.Projection, CreatedAt: commit.CommittedAt,
+	}, nil
+}
+
+func (r *recordingResultProjectionRepository) GetProvisioningResult(context.Context, string, string, uint64) (onboarding.ProvisioningOutcome, error) {
+	return onboarding.ProvisioningOutcome{}, onboarding.ErrResultProjectionRejected
 }
 
 func (a *doubleInvokeRotationAuthorizer) CommitAuthorizedRotation(ctx context.Context, _ RotationClaim, rotate func(context.Context, string) (string, error)) (string, error) {
@@ -78,11 +108,11 @@ func (a *doubleInvokeRotationAuthorizer) CommitAuthorizedRotation(ctx context.Co
 	return versionID, nil
 }
 
-func (r *recordingCredentialRotator) Rotate(_ context.Context, accountID, authType, hint string, plaintext []byte) (credential.VersionRecord, error) {
+func (r *recordingCredentialRotator) RotateIdempotent(_ context.Context, operationID, accountID, authType, hint string, plaintext []byte) (credential.VersionRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
-	r.accountID, r.authType, r.hint = accountID, authType, hint
+	r.operationID, r.accountID, r.authType, r.hint = operationID, accountID, authType, hint
 	r.plaintext = append([]byte(nil), plaintext...)
 	if r.err != nil {
 		return credential.VersionRecord{}, r.err
@@ -126,11 +156,11 @@ func TestCredentialRotationSinkAuthenticatesDecryptsAndFencesReplay(t *testing.T
 		t.Fatalf("version ids = %q / %q", versionID, replayedVersionID)
 	}
 	rotator.mu.Lock()
-	calls, rotatedAccount, authType, hint := rotator.calls, rotator.accountID, rotator.authType, rotator.hint
+	calls, operationID, rotatedAccount, authType, hint := rotator.calls, rotator.operationID, rotator.accountID, rotator.authType, rotator.hint
 	plaintext := append([]byte(nil), rotator.plaintext...)
 	rotator.mu.Unlock()
 	defer eraseRotationBytes(plaintext)
-	if calls != 1 || authorizer.calls != 1 || rotatedAccount != accountID || authType != worker.AuthTypeOAuth || hint != "oauth:***" ||
+	if calls != 1 || authorizer.calls != 1 || operationID != request.CredentialLeaseID || rotatedAccount != accountID || authType != worker.AuthTypeOAuth || hint != "oauth:***" ||
 		!bytes.Contains(plaintext, []byte("rotation-vault-secret")) {
 		t.Fatalf("rotation result calls=%d/%d account=%q auth=%q hint=%q plaintext=%q", calls, authorizer.calls, rotatedAccount, authType, hint, plaintext)
 	}
@@ -222,6 +252,75 @@ func TestCredentialRotationSinkInvokesVaultAtMostOncePerAuthorization(t *testing
 	}
 }
 
+func TestCredentialRotationSinkProjectsSafeWorkerResultAfterVaultCommit(t *testing.T) {
+	t.Parallel()
+	accountID := "account-10380"
+	recipient, err := credential.NewRecipient(bytes.NewReader(bytes.Repeat([]byte{0x6a}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recipient.Destroy()
+	request := sealRotationPayloadWithRecipient(t, recipient, accountID, "lease-projection", []byte(`{
+		"access_token":"oauth-projection-secret",
+		"refresh_token":"refresh-projection-secret",
+		"email_address":"Owner@Example.COM",
+		"subscription_type":"max",
+		"rate_limit_tier":"tier-1"
+	}`), 0x6b)
+	authorizer := &replayFencedRotationAuthorizer{accountID: accountID}
+	rotator := &recordingCredentialRotator{}
+	defer rotator.destroy()
+	results := &recordingResultProjectionRepository{}
+	now := time.Unix(2_000_000_000, 0).UTC()
+	sink, err := NewCredentialRotationSink(CredentialRotationSinkConfig{
+		Recipient: recipient, Authorizer: authorizer, Vault: rotator, ResultRepository: results,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.CommitSealedCredential(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	results.mu.Lock()
+	calls, commit := results.calls, results.commit
+	results.mu.Unlock()
+	if calls != 1 || commit.Projection.EmailAddress != "owner@example.com" || commit.Projection.SubscriptionType != "max" ||
+		commit.CredentialLeaseID != request.CredentialLeaseID || !commit.CommittedAt.Equal(now) {
+		t.Fatalf("result projection calls=%d commit=%+v", calls, commit)
+	}
+	for _, serialized := range []string{commit.Projection.String(), fmt.Sprintf("%+v", commit.Projection), string(mustRotationJSON(t, commit.Projection))} {
+		if strings.Contains(serialized, "projection-secret") {
+			t.Fatalf("result projection leaked credential: %s", serialized)
+		}
+	}
+}
+
+func TestCredentialRotationSinkProjectionFailureDoesNotRotateAgain(t *testing.T) {
+	t.Parallel()
+	accountID := "account-10380"
+	recipient, request := sealedRotationRequest(t, accountID, "lease-projection-failure", "rotation-vault-secret")
+	defer recipient.Destroy()
+	authorizer := &replayFencedRotationAuthorizer{accountID: accountID}
+	rotator := &recordingCredentialRotator{}
+	defer rotator.destroy()
+	results := &recordingResultProjectionRepository{err: errors.New("projection database unavailable")}
+	sink, err := NewCredentialRotationSink(CredentialRotationSinkConfig{
+		Recipient: recipient, Authorizer: authorizer, Vault: rotator, ResultRepository: results,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := sink.CommitSealedCredential(context.Background(), request); !errors.Is(err, ErrCredentialRotationRejected) {
+			t.Fatalf("projection failure attempt %d error = %v", attempt, err)
+		}
+	}
+	if rotator.calls != 1 || authorizer.calls != 1 || results.calls != 2 {
+		t.Fatalf("projection retry calls vault=%d authorizer=%d projection=%d", rotator.calls, authorizer.calls, results.calls)
+	}
+}
+
 func sealedRotationRequest(t *testing.T, accountID, leaseID, secret string) (*credential.Recipient, worker.SealedCredentialCommitRequest) {
 	t.Helper()
 	recipient, err := credential.NewRecipient(bytes.NewReader(bytes.Repeat([]byte{0x79}, 32)))
@@ -234,12 +333,18 @@ func sealedRotationRequest(t *testing.T, accountID, leaseID, secret string) (*cr
 
 func sealRotationRequestWithRecipient(t *testing.T, recipient *credential.Recipient, accountID, leaseID, secret string, randomByte byte) (*credential.Recipient, worker.SealedCredentialCommitRequest) {
 	t.Helper()
+	request := sealRotationPayloadWithRecipient(t, recipient, accountID, leaseID, []byte(`{"access_token":"`+secret+`"}`), randomByte)
+	return recipient, request
+}
+
+func sealRotationPayloadWithRecipient(t *testing.T, recipient *credential.Recipient, accountID, leaseID string, payload []byte, randomByte byte) worker.SealedCredentialCommitRequest {
+	t.Helper()
 	binding := credential.TransportContext{
 		AccountBinding: provider.RuntimeAccountID(accountID), SlotID: "slot-10380", ExecutionEpoch: 9,
 		LeaseID: leaseID, ProxyLeaseID: "proxy-lease-9", Purpose: "rotation",
 	}
 	material, err := credential.EncodeRotationMaterial(credential.RotationMaterial{
-		AuthType: worker.AuthTypeOAuth, Plaintext: []byte(`{"access_token":"` + secret + `"}`),
+		AuthType: worker.AuthTypeOAuth, Plaintext: payload,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +355,7 @@ func sealRotationRequestWithRecipient(t *testing.T, recipient *credential.Recipi
 	if err != nil {
 		t.Fatal(err)
 	}
-	return recipient, worker.SealedCredentialCommitRequest{
+	return worker.SealedCredentialCommitRequest{
 		AccountBinding: binding.AccountBinding, SlotID: binding.SlotID, ExecutionEpoch: binding.ExecutionEpoch,
 		CredentialLeaseID: binding.LeaseID, ProxyLeaseID: binding.ProxyLeaseID, SealedCredentialBundle: sealed,
 	}

@@ -20,7 +20,18 @@ func Main(role config.Role) {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if err := Run(ctx, cfg, logger); err != nil {
+	run := func() error { return Run(ctx, cfg, logger) }
+	if role == config.RoleOrchestrator {
+		runtimeConfig, runtimeErr := config.LoadOrchestratorRuntime(os.Getenv)
+		if runtimeErr != nil {
+			logger.Error("invalid production orchestrator configuration", "role", role, "error", runtimeErr)
+			os.Exit(2)
+		}
+		if runtimeConfig.Enabled {
+			run = func() error { return RunProductionOrchestrator(ctx, cfg, runtimeConfig, logger) }
+		}
+	}
+	if err := run(); err != nil {
 		logger.Error("execution service stopped", "role", role, "error", err)
 		os.Exit(1)
 	}

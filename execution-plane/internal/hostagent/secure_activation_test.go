@@ -154,7 +154,7 @@ type bridgeRotator struct {
 	err       error
 }
 
-func (r *bridgeRotator) Rotate(_ context.Context, accountID, authType, _ string, plaintext []byte) (credential.VersionRecord, error) {
+func (r *bridgeRotator) RotateIdempotent(_ context.Context, _, accountID, authType, _ string, plaintext []byte) (credential.VersionRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++

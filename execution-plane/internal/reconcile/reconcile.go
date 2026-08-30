@@ -58,14 +58,15 @@ type Slot struct {
 }
 
 type Assignment struct {
-	ID               string
-	SlotID           string
-	NodeID           string
-	ExecutionEpoch   uint64
-	ActualGeneration uint64
-	ImageDigest      string
-	ActualState      ActualState
-	Healthy          bool
+	ID                string
+	SlotID            string
+	NodeID            string
+	ExecutionEpoch    uint64
+	DesiredGeneration uint64
+	ActualGeneration  uint64
+	ImageDigest       string
+	ActualState       ActualState
+	Healthy           bool
 }
 
 type Input struct {
@@ -187,7 +188,12 @@ func Plan(input Input) (Action, error) {
 		return Action{}, errors.New("reconcile assignment is invalid")
 	}
 
-	if input.Slot.DesiredState == DesiredReady && assignment.ImageDigest != input.Slot.ImageDigest {
+	// Desired generation is an immutable assignment input, independent from
+	// ActualGeneration (which only counts observed state changes). A legacy
+	// assignment has generation zero and must take the same replacement path as
+	// any other stale generation, even when its image is unchanged.
+	if input.Slot.DesiredState == DesiredReady &&
+		(assignment.DesiredGeneration != input.Slot.DesiredGeneration || assignment.ImageDigest != input.Slot.ImageDigest) {
 		switch assignment.ActualState {
 		case ActualMissing, ActualDestroyed:
 			return newAction(ActionRelease, input), nil

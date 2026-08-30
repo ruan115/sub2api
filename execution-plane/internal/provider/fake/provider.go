@@ -14,6 +14,7 @@ type Provider struct {
 	mu        sync.RWMutex
 	instances map[string]base.Instance
 	bySlot    map[string]string
+	images    map[string]string
 	now       func() time.Time
 }
 
@@ -21,6 +22,7 @@ func New() *Provider {
 	return &Provider{
 		instances: make(map[string]base.Instance),
 		bySlot:    make(map[string]string),
+		images:    make(map[string]string),
 		now:       time.Now,
 	}
 }
@@ -53,6 +55,7 @@ func (p *Provider) Create(_ context.Context, spec base.SlotSpec) (base.Instance,
 	}
 	p.instances[ref] = instance
 	p.bySlot[spec.SlotID] = ref
+	p.images[ref] = spec.ImageDigest
 	return instance, nil
 }
 
@@ -65,8 +68,8 @@ func (p *Provider) Inspect(_ context.Context, providerRef string) (base.Status, 
 		return base.Status{}, base.ErrNotFound
 	}
 	return base.Status{
-		Instance: instance,
-		Healthy:  instance.State == slot.StateReady || instance.State == slot.StateBusy,
+		Instance: instance, ImageDigest: p.images[providerRef],
+		Healthy: instance.State == slot.StateReady || instance.State == slot.StateBusy,
 	}, nil
 }
 
@@ -108,6 +111,7 @@ func (p *Provider) Destroy(_ context.Context, providerRef string) error {
 	}
 	delete(p.bySlot, instance.SlotID)
 	delete(p.instances, providerRef)
+	delete(p.images, providerRef)
 	return nil
 }
 

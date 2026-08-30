@@ -70,6 +70,30 @@ func TestPlanImageReplacementUsesDrainDestroyReleaseSequence(t *testing.T) {
 	}
 }
 
+func TestPlanGenerationReplacementUsesDrainDestroyReleaseSequence(t *testing.T) {
+	states := []struct {
+		actual ActualState
+		want   ActionKind
+	}{
+		{actual: ActualRunning, want: ActionDrain},
+		{actual: ActualDrained, want: ActionDestroy},
+		{actual: ActualDestroyed, want: ActionRelease},
+	}
+	for _, desiredGeneration := range []uint64{0, 2} {
+		for _, state := range states {
+			assignment := testAssignment(state.actual, state.actual == ActualRunning)
+			assignment.DesiredGeneration = desiredGeneration
+			action, err := Plan(Input{Slot: testSlot(DesiredReady), Assignment: assignment})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action.Kind != state.want {
+				t.Fatalf("generation %d actual %s action = %s, want %s", desiredGeneration, state.actual, action.Kind, state.want)
+			}
+		}
+	}
+}
+
 func TestControllerClaimsConcurrentReconcileExactlyOnce(t *testing.T) {
 	jobs := store.NewMemoryJobRepository()
 	executor := &countingExecutor{}
@@ -163,6 +187,6 @@ func testSlot(desired DesiredState) Slot {
 func testAssignment(actual ActualState, healthy bool) *Assignment {
 	return &Assignment{
 		ID: "assignment-1", SlotID: "slot-1", NodeID: "srv74", ExecutionEpoch: 7,
-		ActualGeneration: 2, ImageDigest: "sha256:" + strings.Repeat("a", 64), ActualState: actual, Healthy: healthy,
+		DesiredGeneration: 3, ActualGeneration: 2, ImageDigest: "sha256:" + strings.Repeat("a", 64), ActualState: actual, Healthy: healthy,
 	}
 }

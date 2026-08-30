@@ -783,6 +783,7 @@ func (a *app) availableBatchAuthProxyCandidates(poolID int64, excluded map[int64
 		AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 		AND `+proxyNotQuarantinedPredicate("p")+`
 		AND (pool.single_use_enabled = 0 OR `+proxyIdentityUnusedPredicate("p")+`)
+		AND `+proxyHasNoActiveRuntimeReservationPredicate("p")+`
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)
 		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id`, poolID)
 	if err != nil {

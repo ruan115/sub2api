@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,6 +49,90 @@ func TestExecutionFeatureMigrationDefaultsExistingAccountsToLegacy(t *testing.T)
 	}
 	if policy != "auto" || queueMode != "queue" || imageChannel != "stable" {
 		t.Fatalf("unexpected group execution defaults: %s/%s/%s", policy, queueMode, imageChannel)
+	}
+}
+
+func TestRuntimeOnboardingResultCursorSchemaStaysInSyncAcrossDialects(t *testing.T) {
+	for dialect, statements := range map[string][]string{
+		"sqlite": sqliteExecutionSchema(),
+		"mysql":  mysqlExecutionSchema(),
+	} {
+		schema := strings.Join(statements, "\n")
+		for _, fragment := range []string{
+			"CREATE TABLE IF NOT EXISTS runtime_onboarding_result_cursors",
+			"cursor_name",
+			"last_sequence",
+			"updated_at",
+		} {
+			if !strings.Contains(schema, fragment) {
+				t.Fatalf("%s execution schema is missing %q", dialect, fragment)
+			}
+		}
+	}
+}
+
+func TestRuntimeOnboardingSubmissionSchemaStaysStrictAcrossDialects(t *testing.T) {
+	sqliteSchema := strings.Join(sqliteExecutionSchema(), "\n")
+	if !strings.Contains(sqliteSchema, "CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_onboarding_submission_account_generation") {
+		t.Fatal("SQLite execution schema does not enforce one onboarding submission per account generation")
+	}
+	for _, fragment := range []string{"intake_idempotency_key TEXT", "intake_attempt INTEGER", "intent_expires_at_millis INTEGER"} {
+		if !strings.Contains(sqliteSchema, fragment) {
+			t.Fatalf("SQLite execution schema is missing %q", fragment)
+		}
+	}
+	mysqlSchema := strings.Join(mysqlExecutionSchema(), "\n")
+	for _, fragment := range []string{
+		"idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY",
+		"intake_idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL",
+		"intake_attempt BIGINT UNSIGNED NOT NULL",
+		"intent_expires_at_millis BIGINT NOT NULL",
+		"UNIQUE KEY uq_runtime_onboarding_submission_intake_key (intake_idempotency_key)",
+		"UNIQUE KEY uq_runtime_onboarding_submission_account_generation (account_id, desired_generation)",
+	} {
+		if !strings.Contains(mysqlSchema, fragment) {
+			t.Fatalf("MySQL execution schema is missing %q", fragment)
+		}
+	}
+}
+
+func TestRuntimeOnboardingReceiptCommitMargin(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0).UTC()
+	if runtimeOnboardingReceiptHasCommitMargin(now.Add(runtimeOnboardingReceiptCommitMargin-time.Nanosecond), now) {
+		t.Fatal("receipt with less than the commit margin was accepted")
+	}
+	if !runtimeOnboardingReceiptHasCommitMargin(now.Add(runtimeOnboardingReceiptCommitMargin), now) {
+		t.Fatal("receipt with the exact commit margin was rejected")
+	}
+}
+
+func TestSQLiteRuntimeOnboardingIntakeKeyIsUnique(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "runtime-onboarding-intake-index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	rows, err := a.db.Query(`PRAGMA index_list(runtime_onboarding_submissions)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var sequence, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+			t.Fatal(err)
+		}
+		if name == "uq_runtime_onboarding_submission_intake_key" && unique == 1 {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("SQLite execution schema does not enforce unique internal intake keys")
 	}
 }
 
@@ -156,6 +242,458 @@ func TestRuntimeTransitionAndOutboxCheckpointAreAtomicAndAtLeastOnce(t *testing.
 	}
 }
 
+func TestRuntimeOnboardingTransitionStoresOnlyOpaqueIntentAndFencesGeneration(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "execution-onboarding-outbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	result, err := a.db.Exec(`INSERT INTO accounts (name, credentials_json) VALUES ('runtime-onboarding', '{}')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	seedRuntimeOnboardingSubmission(t, a, "event-runtime-onboarding", accountID, 1,
+		"account.runtime.provision_requested", "migrating", "session_key", "oauth")
+	request := runtimeTransitionRequest{
+		AccountID: accountID, EventType: "account.runtime.provision_requested", MigrationStatus: "migrating",
+		RuntimeStatus: "provisioning", OnboardingKey: "event-runtime-onboarding",
+		Payload: map[string]any{"session_key": "must-be-replaced"},
+	}
+	submission, err := a.getRuntimeOnboardingSubmission(context.Background(), "event-runtime-onboarding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := runtimeOnboardingIntentReceipt{
+		IdempotencyKey: submission.IntakeIdempotencyKey, IntentID: "intent-near-expiry",
+		AccountID: accountID, DesiredGeneration: 1, ExpiresAt: time.Now().Add(4 * time.Second),
+	}
+	submission, err = a.persistRuntimeOnboardingReceipt(context.Background(), "event-runtime-onboarding", submission, receipt, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.requestRuntimeOnboardingTransition(context.Background(), request, receipt); !errors.Is(err, errRuntimeMigration) {
+		t.Fatalf("near-expiry receipt error = %v", err)
+	}
+	assertRuntimeGenerationAndEvents(t, a, accountID, 0, 0)
+	oldReceipt := receipt
+	staleSubmission := submission
+	submission, err = a.advanceRuntimeOnboardingAttempt(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.persistRuntimeOnboardingReceipt(context.Background(), "event-runtime-onboarding", staleSubmission, oldReceipt, time.Now()); !errors.Is(err, errRuntimeOnboardingAttemptSuperseded) {
+		t.Fatalf("late superseded receipt error = %v", err)
+	}
+	afterLateReceipt, err := a.getRuntimeOnboardingSubmission(context.Background(), "event-runtime-onboarding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterLateReceipt.IntakeAttempt != submission.IntakeAttempt ||
+		afterLateReceipt.IntakeIdempotencyKey != submission.IntakeIdempotencyKey ||
+		afterLateReceipt.IntentID != "" || afterLateReceipt.IntentExpiresAtMillis != 0 {
+		t.Fatalf("late receipt changed current attempt: %+v", afterLateReceipt)
+	}
+	receipt.IdempotencyKey = submission.IntakeIdempotencyKey
+	receipt.IntentID = "intent-10380"
+	receipt.ExpiresAt = time.Now().Add(time.Minute)
+	submission, err = a.persistRuntimeOnboardingReceipt(context.Background(), "event-runtime-onboarding", submission, receipt, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := a.requestRuntimeOnboardingTransition(context.Background(), request, receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.DesiredGeneration != 1 || event.PayloadJSON != `{"onboarding_intent_id":"intent-10380"}` {
+		t.Fatalf("onboarding event = %+v", event)
+	}
+	var payload string
+	if err := a.db.QueryRow(`SELECT payload_json FROM runtime_outbox WHERE event_id = ?`, event.EventID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload != event.PayloadJSON || strings.Contains(payload, "session_key") || strings.Contains(payload, "must-be-replaced") {
+		t.Fatalf("stored onboarding payload = %s", payload)
+	}
+	if _, err := a.requestRuntimeOnboardingTransition(context.Background(), request, runtimeOnboardingIntentReceipt{
+		IdempotencyKey: submission.IntakeIdempotencyKey, IntentID: "intent-stale", AccountID: accountID, DesiredGeneration: 1,
+		ExpiresAt: time.Now().Add(time.Minute),
+	}); !errors.Is(err, errRuntimeMigration) {
+		t.Fatalf("stale generation error = %v", err)
+	}
+	assertRuntimeGenerationAndEvents(t, a, accountID, 1, 2)
+	if _, err := a.requestRuntimeOnboardingTransition(context.Background(), request, runtimeOnboardingIntentReceipt{
+		IdempotencyKey: submission.IntakeIdempotencyKey, IntentID: "sk-ant-must-not-pass", AccountID: accountID, DesiredGeneration: 2,
+		ExpiresAt: time.Now().Add(time.Minute),
+	}); !errors.Is(err, errRuntimeMigration) {
+		t.Fatalf("secret-looking intent id error = %v", err)
+	}
+	assertRuntimeGenerationAndEvents(t, a, accountID, 1, 2)
+}
+
+func seedRuntimeOnboardingSubmission(
+	t *testing.T,
+	a *app,
+	idempotencyKey string,
+	accountID int64,
+	desiredGeneration uint64,
+	eventType string,
+	migrationStatus string,
+	sourceType string,
+	authType string,
+) int64 {
+	t.Helper()
+	proxyID := createTestForwardProxy(t, a)
+	if _, err := a.db.Exec(`UPDATE accounts SET proxy_id = ? WHERE id = ?`, proxyID, accountID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	candidate := runtimeOnboardingSubmission{
+		IdempotencyKey: idempotencyKey, OperationType: runtimeOnboardingOperationForEvent(eventType),
+		AccountID: accountID, DesiredGeneration: desiredGeneration, EventType: eventType,
+		MigrationStatus: migrationStatus, SourceType: sourceType, AuthType: authType,
+		ProxyID: sql.NullInt64{Int64: proxyID, Valid: true}, Status: runtimeOnboardingSubmissionPending,
+	}
+	if candidate.OperationType == runtimeOnboardingOperationCreate {
+		candidate.RequestFingerprintVersion = runtimeOnboardingCreateFingerprintVersion
+		candidate.RequestFingerprintSHA256[0] = 1
+		candidate.RequestFingerprintPresent = true
+	}
+	created, err := insertRuntimeOnboardingSubmissionTx(context.Background(), tx, candidate)
+	if err != nil || !created {
+		t.Fatalf("seed runtime onboarding submission: created=%v err=%v", created, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return proxyID
+}
+
+func TestEnsureRuntimeOnboardingSubmissionReplaysOnlyExactKeyAndRequest(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "runtime-onboarding-submission.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	result, err := a.db.Exec(`INSERT INTO accounts
+		(name, credentials_json, proxy_id, execution_migration_status, runtime_status, runtime_generation)
+		VALUES ('submission-replay', '{}', ?, 'migrated', 'ready', 7)`, proxyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	request := runtimeTransitionRequest{
+		AccountID: accountID, EventType: "account.credential.rotate_requested",
+		MigrationStatus: "migrated", RuntimeStatus: "provisioning",
+	}
+	material := &runtimeOnboardingMaterial{Source: "session_key", AuthType: "oauth"}
+	created, err := a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-key-a", request, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.DesiredGeneration != 8 || created.OperationType != runtimeOnboardingOperationReauthorize {
+		t.Fatalf("created submission = %+v", created)
+	}
+	replayed, err := a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-key-a", request, material)
+	if err != nil || replayed != created {
+		t.Fatalf("exact replay = %+v, err=%v", replayed, err)
+	}
+
+	mismatchedEvent := request
+	mismatchedEvent.EventType = "account.runtime.provision_requested"
+	if _, err := a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-key-a", mismatchedEvent, material); !errors.Is(err, errRuntimeOnboardingIdempotency) {
+		t.Fatalf("mismatched operation/event error = %v", err)
+	}
+	mismatchedMigration := request
+	mismatchedMigration.MigrationStatus = "migrating"
+	if _, err := a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-key-a", mismatchedMigration, material); !errors.Is(err, errRuntimeOnboardingIdempotency) {
+		t.Fatalf("mismatched migration error = %v", err)
+	}
+	if _, err := a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-key-b", request, material); !errors.Is(err, errRuntimeOnboardingIdempotency) {
+		t.Fatalf("different key for the same account generation error = %v", err)
+	}
+	var submissions int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM runtime_onboarding_submissions WHERE account_id = ?`, accountID).Scan(&submissions); err != nil {
+		t.Fatal(err)
+	}
+	if submissions != 1 {
+		t.Fatalf("submission count = %d, want 1", submissions)
+	}
+}
+
+func TestRuntimeOnboardingAccountValidationRefreshesExactQueuedSuccessor(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "runtime-onboarding-queued-refresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	result, err := a.db.Exec(`INSERT INTO accounts
+		(name, credentials_json, proxy_id, execution_migration_status, runtime_status, runtime_generation)
+		VALUES ('queued-refresh', '{}', ?, 'migrated', 'ready', 7)`, proxyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	request := runtimeTransitionRequest{
+		AccountID: accountID, EventType: "account.credential.rotate_requested",
+		MigrationStatus: "migrated", RuntimeStatus: "provisioning", OnboardingKey: "queued-refresh-key",
+	}
+	material := &runtimeOnboardingMaterial{Source: "session_key", AuthType: "oauth"}
+	stalePending, err := a.ensureRuntimeOnboardingSubmission(context.Background(), "queued-refresh-key", request, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := runtimeOnboardingIntentReceipt{
+		IdempotencyKey:    stalePending.IntakeIdempotencyKey,
+		IntentID:          "intent-queued-refresh",
+		AccountID:         accountID,
+		DesiredGeneration: stalePending.DesiredGeneration,
+		ExpiresAt:         time.Now().Add(time.Minute),
+	}
+	persisted, err := a.persistRuntimeOnboardingReceipt(context.Background(), "queued-refresh-key", stalePending, receipt, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := a.requestRuntimeOnboardingTransition(context.Background(), request, receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed, err := a.validateRuntimeOnboardingSubmissionAccountOrRefreshQueued(
+		context.Background(), stalePending, "queued-refresh-key", request, material,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Status != runtimeOnboardingSubmissionQueued || refreshed.EventID != event.EventID ||
+		refreshed.IntakeIdempotencyKey != persisted.IntakeIdempotencyKey {
+		t.Fatalf("refreshed submission = %+v, event=%+v", refreshed, event)
+	}
+}
+
+func TestAdvanceRuntimeOnboardingAttemptReplaysNewerQueuedSuccessor(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "runtime-onboarding-advance-queued-successor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	result, err := a.db.Exec(`INSERT INTO accounts
+		(name, credentials_json, execution_migration_status, runtime_status, runtime_generation)
+		VALUES ('advance-queued-successor', '{}', 'migrated', 'ready', 2)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	seedRuntimeOnboardingSubmission(t, a, "advance-queued-successor-key", accountID, 3,
+		"account.credential.rotate_requested", "migrated", "session_key", "oauth")
+	staleAttempt, err := a.getRuntimeOnboardingSubmission(context.Background(), "advance-queued-successor-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReceipt := runtimeOnboardingIntentReceipt{
+		IdempotencyKey:    staleAttempt.IntakeIdempotencyKey,
+		IntentID:          "intent-stale-attempt",
+		AccountID:         accountID,
+		DesiredGeneration: staleAttempt.DesiredGeneration,
+		ExpiresAt:         time.Now().Add(time.Minute),
+	}
+	staleAttempt, err = a.persistRuntimeOnboardingReceipt(
+		context.Background(), "advance-queued-successor-key", staleAttempt, firstReceipt, time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerAttempt, err := a.advanceRuntimeOnboardingAttempt(context.Background(), staleAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReceipt := runtimeOnboardingIntentReceipt{
+		IdempotencyKey:    newerAttempt.IntakeIdempotencyKey,
+		IntentID:          "intent-newer-attempt",
+		AccountID:         accountID,
+		DesiredGeneration: newerAttempt.DesiredGeneration,
+		ExpiresAt:         time.Now().Add(time.Minute),
+	}
+	newerAttempt, err = a.persistRuntimeOnboardingReceipt(
+		context.Background(), "advance-queued-successor-key", newerAttempt, secondReceipt, time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := a.requestRuntimeOnboardingTransition(context.Background(), runtimeTransitionRequest{
+		AccountID: accountID, EventType: newerAttempt.EventType, MigrationStatus: newerAttempt.MigrationStatus,
+		RuntimeStatus: "provisioning", OnboardingKey: "advance-queued-successor-key",
+	}, secondReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, err := a.advanceRuntimeOnboardingAttempt(context.Background(), staleAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Status != runtimeOnboardingSubmissionQueued || replayed.EventID != event.EventID ||
+		replayed.IntakeAttempt != newerAttempt.IntakeAttempt {
+		t.Fatalf("replayed successor = %+v, event=%+v, newer=%+v", replayed, event, newerAttempt)
+	}
+}
+
+func TestRuntimeOnboardingReloadErrorSeparatesMissingFenceFromDatabaseFailure(t *testing.T) {
+	if err := runtimeOnboardingReloadError("reload test", sql.ErrNoRows); !errors.Is(err, errRuntimeOnboardingIdempotency) {
+		t.Fatalf("missing reload error = %v", err)
+	}
+	databaseFailure := errors.New("database connection lost")
+	err := runtimeOnboardingReloadError("reload test", databaseFailure)
+	if !errors.Is(err, databaseFailure) || errors.Is(err, errRuntimeOnboardingIdempotency) {
+		t.Fatalf("database reload error = %v", err)
+	}
+}
+
+func TestEnsureRuntimeOnboardingSubmissionRejectsNewKeyWhileProvisioning(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "runtime-onboarding-provisioning.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	result, err := a.db.Exec(`INSERT INTO accounts
+		(name, credentials_json, proxy_id, execution_migration_status, runtime_status, runtime_generation)
+		VALUES ('submission-provisioning', '{}', ?, 'migrated', 'provisioning', 4)`, proxyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	_, err = a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-key-provisioning", runtimeTransitionRequest{
+		AccountID: accountID, EventType: "account.credential.rotate_requested",
+		MigrationStatus: "migrated", RuntimeStatus: "provisioning",
+	}, &runtimeOnboardingMaterial{Source: "session_key", AuthType: "oauth"})
+	if !errors.Is(err, errRuntimeOnboardingIdempotency) {
+		t.Fatalf("new key while provisioning error = %v", err)
+	}
+	var submissions int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM runtime_onboarding_submissions WHERE account_id = ?`, accountID).Scan(&submissions); err != nil {
+		t.Fatal(err)
+	}
+	if submissions != 0 {
+		t.Fatalf("submission count = %d, want 0", submissions)
+	}
+}
+
+func TestEnsureRuntimeOnboardingSubmissionRejectsLifecycleTransition(t *testing.T) {
+	for _, runtimeStatus := range []string{"provisioning", "draining", "destroying", "archived", "deleted"} {
+		t.Run(runtimeStatus, func(t *testing.T) {
+			a, err := newApp(filepath.Join(t.TempDir(), "runtime-onboarding-lifecycle.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.db.Close()
+			proxyID := createTestForwardProxy(t, a)
+			result, err := a.db.Exec(`INSERT INTO accounts
+				(name, credentials_json, proxy_id, execution_migration_status, runtime_status, runtime_generation)
+				VALUES ('submission-lifecycle', '{}', ?, 'migrated', ?, 4)`, proxyID, runtimeStatus)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accountID, _ := result.LastInsertId()
+			_, err = a.ensureRuntimeOnboardingSubmission(context.Background(), "submission-lifecycle-key", runtimeTransitionRequest{
+				AccountID: accountID, EventType: "account.credential.rotate_requested",
+				MigrationStatus: "migrated", RuntimeStatus: "provisioning",
+			}, &runtimeOnboardingMaterial{Source: "session_key", AuthType: "oauth"})
+			if !errors.Is(err, errRuntimeOnboardingIdempotency) {
+				t.Fatalf("new key during %s error = %v", runtimeStatus, err)
+			}
+			var submissions int
+			if err := a.db.QueryRow(`SELECT COUNT(*) FROM runtime_onboarding_submissions WHERE account_id = ?`, accountID).Scan(&submissions); err != nil {
+				t.Fatal(err)
+			}
+			if submissions != 0 {
+				t.Fatalf("submission count = %d, want 0", submissions)
+			}
+		})
+	}
+}
+
+func TestRuntimeTransitionRejectsArchivedAccount(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "execution-archived-transition.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	result, err := a.db.Exec(`INSERT INTO accounts (name, credentials_json, archived_at) VALUES ('archived-transition', '{}', ` + nowSQL + `)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := result.LastInsertId()
+	if _, err := a.requestRuntimeTransition(context.Background(), runtimeTransitionRequest{
+		AccountID: accountID, EventType: "account.runtime.provision_requested", MigrationStatus: "migrating",
+		RuntimeStatus: "provisioning", Payload: map[string]any{"provider": "docker"},
+	}); err == nil {
+		t.Fatal("archived account accepted a runtime transition")
+	}
+	assertRuntimeGenerationAndEvents(t, a, accountID, 0, 0)
+}
+
+func TestMigratedAccountRejectsSynchronousRuntimeRoutingMutations(t *testing.T) {
+	t.Setenv("CCMAX_AUTH_DISABLED", "1")
+	a, err := newApp(filepath.Join(t.TempDir(), "execution-routing-owner.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+	proxyID := createTestForwardProxy(t, a)
+	otherProxyID := createTestForwardProxy(t, a)
+	created, err := a.db.Exec(`INSERT INTO accounts
+		(name, platform, auth_type, credentials_json, status, auth_status, schedulable,
+		 proxy_pool_id, proxy_id, execution_migration_status, runtime_status, runtime_generation)
+		VALUES ('runtime-owned-routing', 'anthropic', 'oauth', '{}', 'active', 'valid', 0,
+		 1, ?, 'migrated', 'ready', 2)`, proxyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := created.LastInsertId()
+	handler := a.routes()
+	base := map[string]any{
+		"name": "runtime-owned-routing", "platform": "anthropic", "auth_type": "oauth",
+		"status": "active", "schedulable": false, "concurrency": 1, "priority": 10,
+		"rate_multiplier": 1, "group_ids": []string{"a"}, "proxy_pool_id": 1,
+		"proxy_id": proxyID, "rpm_strategy": "tiered", "user_msg_queue_mode": "off",
+	}
+	base["name"] = "runtime-owned-routing-renamed"
+	base["notes"] = "metadata remains CCMAX-owned"
+	putJSON(t, handler, http.MethodPut, "/api/accounts/"+strconv.FormatInt(accountID, 10), base, http.StatusOK, nil)
+	base["schedulable"] = true
+	putJSON(t, handler, http.MethodPut, "/api/accounts/"+strconv.FormatInt(accountID, 10), base, http.StatusConflict, nil)
+	base["schedulable"] = false
+	base["proxy_id"] = otherProxyID
+	putJSON(t, handler, http.MethodPut, "/api/accounts/"+strconv.FormatInt(accountID, 10), base, http.StatusConflict, nil)
+	putJSON(t, handler, http.MethodPost, "/api/accounts/batch-schedule", map[string]any{
+		"ids": []int64{accountID}, "schedulable": true,
+	}, http.StatusConflict, nil)
+
+	var storedProxyID int64
+	var schedulable int
+	var generation uint64
+	var eventCount int
+	if err := a.db.QueryRow(`SELECT proxy_id, schedulable, runtime_generation FROM accounts WHERE id = ?`, accountID).Scan(
+		&storedProxyID, &schedulable, &generation,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM runtime_outbox WHERE account_id = ?`, accountID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if storedProxyID != proxyID || schedulable != 0 || generation != 2 || eventCount != 0 {
+		t.Fatalf("runtime routing changed outside execution plane: proxy/schedulable/generation/events=%d/%d/%d/%d",
+			storedProxyID, schedulable, generation, eventCount)
+	}
+}
+
 func TestAccountModeHealthIsModeIsolatedAndRejectsSecrets(t *testing.T) {
 	a, err := newApp(filepath.Join(t.TempDir(), "execution-health.db"))
 	if err != nil {
@@ -251,11 +789,16 @@ func TestMigratedAccountRejectsEveryLegacyCredentialWritePath(t *testing.T) {
 	handler := a.routes()
 	for _, path := range []string{
 		"/api/accounts/" + strconv.FormatInt(accountID, 10) + "/auth-url",
-		"/api/accounts/" + strconv.FormatInt(accountID, 10) + "/oauth-exchange",
 		"/api/accounts/" + strconv.FormatInt(accountID, 10) + "/session-auth",
 	} {
 		putJSON(t, handler, http.MethodPost, path, map[string]any{}, http.StatusConflict, nil)
 	}
+	// Migrated OAuth exchange is an execution-onboarding endpoint now; without
+	// a matching one-time OAuth session it fails before accepting material.
+	putJSON(t, handler, http.MethodPost, "/api/accounts/"+strconv.FormatInt(accountID, 10)+"/oauth-exchange", map[string]any{}, http.StatusBadRequest, nil)
+	putJSON(t, handler, http.MethodPost, "/api/accounts/"+strconv.FormatInt(accountID, 10)+"/session-auth", map[string]any{
+		"session_key": "must-not-enter-legacy-auth",
+	}, http.StatusConflict, nil)
 	putJSON(t, handler, http.MethodPut, "/api/accounts/"+strconv.FormatInt(accountID, 10), map[string]any{
 		"name": "execution-owned", "platform": "anthropic", "auth_type": "oauth",
 		"credentials": map[string]any{"access_token": "must-not-return"}, "extra": map[string]any{},

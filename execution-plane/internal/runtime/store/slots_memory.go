@@ -84,7 +84,8 @@ func (r *MemoryRepository) ReserveAssignment(_ context.Context, reservation Assi
 	r.nodes[node.ID] = node
 	assignment := Assignment{
 		ID: reservation.ID, SlotID: slot.ID, NodeID: node.ID, ExecutionEpoch: slot.NextExecutionEpoch,
-		ImageDigest: slot.ImageDigest, CPURequestMillis: slot.CPURequestMillis, MemoryRequestBytes: slot.MemoryRequestBytes,
+		DesiredGeneration: slot.DesiredGeneration,
+		ImageDigest:       slot.ImageDigest, CPURequestMillis: slot.CPURequestMillis, MemoryRequestBytes: slot.MemoryRequestBytes,
 		ActualState: "missing", ActualGeneration: 1, AssignedAt: reservation.ReservedAt.UTC(),
 	}
 	slot.NextExecutionEpoch++

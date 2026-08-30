@@ -83,14 +83,28 @@ func NewRecipient(random io.Reader) (*Recipient, error) {
 		zeroBytes(privateBytes)
 		return nil, ErrCredentialTransport
 	}
-	privateKey, err := ecdh.X25519().NewPrivateKey(privateBytes)
-	if err != nil {
+	return NewRecipientFromPrivateKey(privateBytes)
+}
+
+// NewRecipientFromPrivateKey consumes and erases privateBytes on every path.
+// It allows an orchestrator to restore its rotation recipient from a
+// KMS-decrypted, durable key instead of silently generating a new identity on
+// each restart. The returned Recipient owns its independent private-key copy.
+func NewRecipientFromPrivateKey(privateBytes []byte) (*Recipient, error) {
+	if len(privateBytes) != credentialTransportKeySize {
 		zeroBytes(privateBytes)
+		return nil, ErrCredentialTransport
+	}
+	ownedPrivate := append([]byte(nil), privateBytes...)
+	zeroBytes(privateBytes)
+	privateKey, err := ecdh.X25519().NewPrivateKey(ownedPrivate)
+	if err != nil {
+		zeroBytes(ownedPrivate)
 		return nil, ErrCredentialTransport
 	}
 	publicBytes := privateKey.PublicKey().Bytes()
 	return &Recipient{
-		privateKey: privateBytes,
+		privateKey: ownedPrivate,
 		publicKey:  append([]byte(nil), publicBytes...),
 		keyID:      transportKeyID(publicBytes),
 	}, nil

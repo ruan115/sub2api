@@ -24,8 +24,15 @@ type MemoryRepository struct {
 	credentialVaults         map[string]memoryCredentialVault
 	credentialVersions       map[string]credential.VersionRecord
 	credentialVersionIDs     map[string][]string
+	credentialOperations     map[string]string
 	credentialLeases         map[[32]byte]credential.LeaseRecord
 	credentialSecurityEvents []credential.SecurityEvent
+	proxyReservations        map[string]ProxyReservationGrant
+	proxyReservationByScope  map[string]string
+	proxyReservationByGrant  map[string]string
+	proxyReservationByRevoke map[string]string
+	proxyLeases              map[string]ProxyLease
+	proxyLeaseIDsByEpoch     map[string]string
 }
 
 type memoryEnrollment struct {
@@ -43,18 +50,25 @@ type memoryCredentialVault struct {
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		enrollments:          make(map[[32]byte]memoryEnrollment),
-		nodes:                make(map[string]Node),
-		certificates:         make(map[string]Certificate),
-		commandResults:       make(map[string]CommandResult),
-		slots:                make(map[string]Slot),
-		assignments:          make(map[string][]Assignment),
-		jobs:                 NewMemoryJobRepository(),
-		executionLeases:      make(map[string]ExecutionLease),
-		credentialVaults:     make(map[string]memoryCredentialVault),
-		credentialVersions:   make(map[string]credential.VersionRecord),
-		credentialVersionIDs: make(map[string][]string),
-		credentialLeases:     make(map[[32]byte]credential.LeaseRecord),
+		enrollments:              make(map[[32]byte]memoryEnrollment),
+		nodes:                    make(map[string]Node),
+		certificates:             make(map[string]Certificate),
+		commandResults:           make(map[string]CommandResult),
+		slots:                    make(map[string]Slot),
+		assignments:              make(map[string][]Assignment),
+		jobs:                     NewMemoryJobRepository(),
+		executionLeases:          make(map[string]ExecutionLease),
+		credentialVaults:         make(map[string]memoryCredentialVault),
+		credentialVersions:       make(map[string]credential.VersionRecord),
+		credentialVersionIDs:     make(map[string][]string),
+		credentialOperations:     make(map[string]string),
+		credentialLeases:         make(map[[32]byte]credential.LeaseRecord),
+		proxyReservations:        make(map[string]ProxyReservationGrant),
+		proxyReservationByScope:  make(map[string]string),
+		proxyReservationByGrant:  make(map[string]string),
+		proxyReservationByRevoke: make(map[string]string),
+		proxyLeases:              make(map[string]ProxyLease),
+		proxyLeaseIDsByEpoch:     make(map[string]string),
 	}
 }
 

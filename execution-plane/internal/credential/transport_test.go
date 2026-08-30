@@ -180,6 +180,35 @@ func TestRotationMaterialCodecRedactsAndErases(t *testing.T) {
 	}
 }
 
+func TestRecipientRestoresStableKeyAndConsumesPrivateInput(t *testing.T) {
+	firstPrivate := bytes.Repeat([]byte{0x63}, credentialTransportKeySize)
+	secondPrivate := append([]byte(nil), firstPrivate...)
+	first, err := NewRecipientFromPrivateKey(firstPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Destroy()
+	second, err := NewRecipientFromPrivateKey(secondPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Destroy()
+	if !bytes.Equal(firstPrivate, make([]byte, credentialTransportKeySize)) ||
+		!bytes.Equal(secondPrivate, make([]byte, credentialTransportKeySize)) {
+		t.Fatal("recipient constructor did not erase caller private-key buffers")
+	}
+	firstID, firstPublic, _ := first.PublicKey()
+	secondID, secondPublic, _ := second.PublicKey()
+	if firstID != secondID || !bytes.Equal(firstPublic, secondPublic) {
+		t.Fatal("restored recipient identity changed for the same private key")
+	}
+	invalid := []byte("short private key")
+	if _, err := NewRecipientFromPrivateKey(invalid); !errors.Is(err, ErrCredentialTransport) ||
+		!bytes.Equal(invalid, make([]byte, len(invalid))) {
+		t.Fatalf("invalid private key was not rejected and erased: %v", err)
+	}
+}
+
 func TestCredentialTransportAllowsBoundedCredentialFramingOverhead(t *testing.T) {
 	recipient, err := NewRecipient(bytes.NewReader(bytes.Repeat([]byte{0x7c}, 32)))
 	if err != nil {

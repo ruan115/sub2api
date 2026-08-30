@@ -35,6 +35,20 @@ added without changing placement or account lifecycle semantics.
 - host-agent HTTP CONNECT egress with source-IP/slot/epoch binding, exact/wildcard target policy, fixed authenticated HTTP/HTTPS/SOCKS5 upstream conversion and active lease fencing;
 - worker onboarding engine for Session Key, OAuth code/PKCE, Setup Token, API Key, Cookie and normalized credential import, with fixed-client upstream verification and secret-redacted results;
 - process-local X25519/HKDF/AES-GCM credential transport keys and replay-fenced secure activation that only becomes ready after a credential commit acknowledgement;
+- additive NodeControl credential-key and secure-activation commands, capability/minor-version gating, and an opaque worker → host-agent → Vault commit/version-ACK bridge;
+- orchestrator secure-onboarding command construction that rejects stale/mismatched process-key results and only emits a process-key-encrypted activation bundle;
+- short-lived KMS-encrypted onboarding intents with canonical account/generation/source/auth AAD, idempotent owner claims, expiry fencing and exact activation-completion consumption;
+- a MySQL-backed intent repository plus a CCMAX transition contract whose outbox payload contains only an opaque intent id and rejects stale desired generations;
+- durable onboarding workflow persistence, a NodeControl observer for both secure command results and a one-step polling controller that resumes key discovery, encrypted activation and intent completion after restart;
+- an mTLS-only onboarding intake with a distinct CCMAX SPIFFE service identity, request-buffer erasure and an opaque receipt contract synchronized into CCMAX;
+- one orchestrator credential composition root that wires the shared KMS/Vaults, a caller-restored durable rotation recipient, observer, sink, NodeControl, intake and provisioning controller fail-closed;
+- a bounded active-workflow scanner plus TLS 1.3 gRPC runner that serves enrollment/NodeControl and intake together, isolates per-workflow failures and shuts polling down with the RPC lifecycle;
+- an explicit production-runtime configuration boundary with verified-TLS MySQL validation, Tencent KMS CVM-role-only settings, protected CA/server PKI loading and a fixed rotation recipient restored only from a KMS service-key envelope;
+- a secret-free onboarding result projection stored only after Vault commit, fenced by workflow/intent/account/generation/slot/epoch/lease/version, and readable by CCMAX over mTLS only after workflow completion;
+- crash-safe credential operations plus a durable material-digest authorizer that recovers the exact Vault version across process failure and rejects changed worker payloads before a second rotation;
+- opaque proxy runtime leases that bind the CCMAX reservation identity to one account/slot/epoch without storing proxy endpoints or passwords, and fail closed with the execution lease;
+- trusted CCMAX proxy-reservation grant/revoke projections with strict three-field secret-free payloads, durable event provenance and assignment desired-generation fencing;
+- opt-in production orchestrator bootstrap that verifies the read-only schema boundary, opens verified-TLS MySQL, obtains Tencent KMS identity only from the CVM role, loads protected PKI/fixed recipient, composes the durable authorizer and starts health plus TLS 1.3 RPC together;
 - secure oauth_api requests derive Authorization/x-api-key only from the acknowledged in-memory credential;
 - authenticated activation packages that bind the orchestrator rotation public key, plus an encrypted worker-return/Vault bridge with lease-and-ciphertext replay fencing;
 - control/data-plane/worker protobuf source contracts;
@@ -42,11 +56,18 @@ added without changing placement or account lifecycle semantics.
 - health endpoints for the three process entry points.
 - tagged real-Docker E2E for create/start/activate/messages/count_tokens, direct-egress bypass rejection, drain and destroy.
 
-This is not production-ready yet. The NodeControl client and command executor
-are library-complete but not yet wired to role-specific mTLS/Docker process
-configuration. The secure worker process is available, while the orchestrator
-onboarding command/key exchange, production credential commit endpoint and
-CCMAX onboarding entry migration remain gated. CCMAX gateway request dispatch,
+This is not production-ready yet. The NodeControl client, command executor and
+orchestrator activation-command builder are library-complete but not yet wired
+to role-specific mTLS/Docker process configuration. The KMS-backed durable
+onboarding intent, opaque CCMAX outbox contract, provisioning observer/controller
+and authenticated intake RPC are library-complete. The orchestrator component graph,
+bounded polling runner and shared TLS 1.3 gRPC serving path are also implemented as
+injectable process libraries, including stable rotation-recipient restoration and protected
+production dependency loaders. With explicit production enablement the orchestrator now
+constructs MySQL/KMS/PKI/recipient and serves the complete RPC graph; schema migration remains
+an explicit deployment step. CCMAX single-account creation and
+migrated Session Key reauthorization use the new bridge behind explicit configuration;
+the trusted CCMAX proxy-reservation grant/revoke records, immutable proxy-occupancy fences and execution-plane projection are implemented. The atomic healthy-slot workflow/proxy-lease starter is also implemented as a library, while production outbox routing/slot selection and duplicate-aware batch onboarding lifecycle remain gated. CCMAX gateway request dispatch,
 host-agent data-plane serving, Claude CLI runtime image and deployment
 automation are also incomplete.
 
@@ -92,10 +113,22 @@ host-agent validates every binding before forwarding ciphertext. Lost
 acknowledgements reuse the pending normalized result without repeating the
 upstream login; the orchestrator fences the canonical material digest rather
 than randomized transport ciphertext. The host-agent now maintains the
-NodeControl stream and executes fenced Docker slot lifecycle commands, and the
-worker binary can run the secure activator. The orchestrator-to-host-agent
-onboarding command/key exchange and CCMAX handler migration remain part of task
-5.5; these components alone do not enable the new onboarding path.
+NodeControl stream, executes fenced Docker slot lifecycle commands, obtains the
+process key and relays dedicated encrypted activation/rotation envelopes. New
+commands require protocol minor 1 plus the `secure_activation` capability, and
+cannot be dispatched without the provisioning observer or Vault sink. Durable
+intent creation/claim/completion, the restart-safe workflow state machine, bounded
+polling and TLS 1.3 dual-service registration are implemented. Production dependency
+construction/serving handoff is implemented behind the explicit enable flag. CCMAX now performs a generation-fenced completed-result projection and all six single-account material sources use the worker intake. CCMAX also emits a same-transaction secret-free proxy-reservation grant before the onboarding event, fences proxy/pool mutation and allocation while that authority is owned, and performs successor revoke/grant handoff without changing ordinary lifecycle semantics. The execution-plane can project/revoke the authority, reconcile same-image generation drift, and atomically create one trusted proxy lease plus workflow from a fresh healthy slot. Production outbox routing/slot selection and duplicate-aware batch lifecycle integration remain part of task 5.5. These
+components alone do not enable the new onboarding path.
+
+CCMAX durably records the opaque receipt before queueing its outbox event. A
+lost Create response is recovered with an exact, lookup-only internal key; only
+an exact expired attempt may rotate that key. Account-create replays use a
+versioned canonical fingerprint containing non-secret typed configuration only.
+If the external request key is lost after the pending account commits, the
+account-scoped status/resume endpoints recover the server-owned canonical
+submission without exposing either key or permitting a new-key takeover.
 
 ## Local checks
 
@@ -138,6 +171,25 @@ bits; only their SHA-256 digest is persisted. Issue and redeem both revalidate
 the current slot assignment, node, execution epoch and unexpired execution
 lease. Redeem marks the token consumed before KMS decryption, so a KMS failure
 cannot turn one token into a retryable credential oracle.
+
+Worker credential commits use `Vault.RotateIdempotent` with the authenticated
+credential lease ID as their durable operation identity. The credential
+version, active-version switch, old-lease revocation and
+`credential_version_operations` row commit atomically. A retry after an
+orchestrator crash returns the original version instead of creating another
+ciphertext version. This mapping stores no material digest; the higher-level
+rotation authorizer must persist and compare the authenticated material digest
+and validate the current execution and proxy leases.
+
+`DurableRotationAuthorizer` now reserves that digest in
+`credential_rotation_commits` before invoking Vault, validates the exact
+workflow/slot/epoch and current execution lease, and records only the version
+bound by `credential_version_operations`. A completed replay returns the
+recorded version without requiring an expired proxy lease to become current
+again. New work additionally requires an opaque `proxy_leases` grant whose
+account/slot/epoch match and whose execution lease remains current; proxy URLs
+and credentials stay in the CCMAX/host-agent boundary and are never stored in
+the runtime grant table.
 
 MySQL normalizes native JSON column formatting. Stored AAD is therefore parsed
 with unknown fields rejected, compared field-for-field with the authoritative

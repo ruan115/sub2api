@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package execution.v1;
+
+option go_package = "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1";
+
+import "google/protobuf/timestamp.proto";
+
+// OnboardingIntakeService is an internal mTLS-only CCMAX boundary. Request
+// bodies contain temporary credential material and must never be logged.
+service OnboardingIntakeService {
+  rpc CreateOnboardingIntent(CreateOnboardingIntentRequest) returns (CreateOnboardingIntentResponse);
+  // Recover is lookup-only and never decrypts or returns credential material.
+  // NOT_FOUND means the exact key was never created; ABORTED means that exact
+  // intent expired; FAILED_PRECONDITION means its identity changed or it was
+  // claimed/consumed; UNAVAILABLE means durable lookup could not be completed.
+  rpc RecoverOnboardingIntent(RecoverOnboardingIntentRequest) returns (CreateOnboardingIntentResponse);
+  rpc GetOnboardingResult(GetOnboardingResultRequest) returns (GetOnboardingResultResponse);
+}
+
+enum OnboardingSource {
+  ONBOARDING_SOURCE_UNSPECIFIED = 0;
+  ONBOARDING_SOURCE_SESSION_KEY = 1;
+  ONBOARDING_SOURCE_OAUTH_CODE = 2;
+  ONBOARDING_SOURCE_SETUP_TOKEN = 3;
+  ONBOARDING_SOURCE_API_KEY = 4;
+  ONBOARDING_SOURCE_COOKIE = 5;
+  ONBOARDING_SOURCE_CREDENTIAL_IMPORT = 6;
+}
+
+enum OnboardingAuthType {
+  ONBOARDING_AUTH_TYPE_UNSPECIFIED = 0;
+  ONBOARDING_AUTH_TYPE_OAUTH = 1;
+  ONBOARDING_AUTH_TYPE_SETUP_TOKEN = 2;
+  ONBOARDING_AUTH_TYPE_API_KEY = 3;
+}
+
+// Zero is the legacy-success compatibility value: clients reading responses
+// from a server predating this enum treat UNSPECIFIED plus the existing safe
+// projection fields as succeeded. New servers always emit an explicit terminal
+// value. Pending remains the gRPC FailedPrecondition path.
+enum OnboardingResultStatus {
+  ONBOARDING_RESULT_STATUS_UNSPECIFIED = 0;
+  ONBOARDING_RESULT_STATUS_SUCCEEDED = 1;
+  ONBOARDING_RESULT_STATUS_FAILED = 2;
+  ONBOARDING_RESULT_STATUS_EXPIRED = 3;
+}
+
+message CreateOnboardingIntentRequest {
+  string idempotency_key = 1;
+  string account_id = 2;
+  uint64 desired_generation = 3;
+  OnboardingSource source = 4;
+  OnboardingAuthType auth_type = 5;
+  bytes secret = 6;
+  bytes auxiliary = 7;
+}
+
+message CreateOnboardingIntentResponse {
+  string intent_id = 1;
+  string account_id = 2;
+  uint64 desired_generation = 3;
+  OnboardingSource source = 4;
+  OnboardingAuthType auth_type = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+// RecoverOnboardingIntentRequest contains only the exact durable identity of a
+// previously-created intent that has not yet been claimed. It deliberately has
+// no credential or auxiliary-material field.
+message RecoverOnboardingIntentRequest {
+  string idempotency_key = 1;
+  string account_id = 2;
+  uint64 desired_generation = 3;
+  OnboardingSource source = 4;
+  OnboardingAuthType auth_type = 5;
+}
+
+message GetOnboardingResultRequest {
+  string intent_id = 1;
+  string account_id = 2;
+  uint64 desired_generation = 3;
+}
+
+// GetOnboardingResultResponse deliberately contains only non-secret identity
+// and plan metadata projected from the committed worker credential. Failed and
+// expired outcomes contain only a fixed public error code/summary; raw worker,
+// provider, database and credential errors never cross this boundary.
+message GetOnboardingResultResponse {
+  string intent_id = 1;
+  string account_id = 2;
+  uint64 desired_generation = 3;
+  OnboardingAuthType auth_type = 4;
+  string email_address = 5;
+  string organization_id = 6;
+  string upstream_account_id = 7;
+  string scope = 8;
+  string subscription_type = 9;
+  string rate_limit_tier = 10;
+  google.protobuf.Timestamp expires_at = 11;
+  google.protobuf.Timestamp projected_at = 12;
+  // Runtime identity is returned from the same completed workflow binding as
+  // the projection. CCMAX needs both values to fence subsequent data-plane
+  // requests; neither value is a provider/container identifier or a secret.
+  string slot_id = 13;
+  uint64 execution_epoch = 14;
+  OnboardingResultStatus status = 15;
+  string error_code = 16;
+  string error_summary = 17;
+  google.protobuf.Timestamp finished_at = 18;
+}

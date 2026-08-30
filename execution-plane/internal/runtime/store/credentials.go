@@ -11,7 +11,7 @@ import (
 )
 
 type CredentialVaultRepository interface {
-	credential.VaultRepository
+	credential.IdempotentVaultRepository
 	ListCredentialSecurityEvents(ctx context.Context, accountID string, limit int) ([]credential.SecurityEvent, error)
 }
 
@@ -30,6 +30,17 @@ func (r *Repository) NextCredentialVersionNumber(ctx context.Context, accountID 
 }
 
 func (r *Repository) CommitCredentialVersion(ctx context.Context, version credential.VersionRecord) error {
+	return r.commitCredentialVersion(ctx, "", version)
+}
+
+func (r *Repository) CommitCredentialVersionForOperation(ctx context.Context, operationID string, version credential.VersionRecord) error {
+	if credential.ValidateTransportID(operationID) != nil {
+		return credential.ErrCredentialOperationConflict
+	}
+	return r.commitCredentialVersion(ctx, operationID, version)
+}
+
+func (r *Repository) commitCredentialVersion(ctx context.Context, operationID string, version credential.VersionRecord) error {
 	if err := version.Validate(); err != nil {
 		return err
 	}
@@ -73,6 +84,15 @@ INSERT INTO credential_versions (
 	if err != nil {
 		return fmt.Errorf("insert credential version: %w", err)
 	}
+	if operationID != "" {
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO credential_version_operations (
+  operation_id, version_id, account_id, auth_type, created_at
+) VALUES (?, ?, ?, ?, ?)`, operationID, version.ID, version.AccountID, version.AuthType, version.CreatedAt.UTC())
+		if err != nil {
+			return fmt.Errorf("bind credential rotation operation: %w", err)
+		}
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE credential_vault SET active_version_id = ?, auth_type = ?, updated_at = ?
 WHERE account_id = ?`, version.ID, version.AuthType, version.CreatedAt.UTC(), version.AccountID)
@@ -92,6 +112,25 @@ WHERE account_id = ? AND version_id <> ? AND consumed_at IS NULL AND revoked_at 
 		return fmt.Errorf("commit credential version: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) GetCredentialVersionByOperation(ctx context.Context, operationID string) (credential.VersionRecord, error) {
+	if credential.ValidateTransportID(operationID) != nil {
+		return credential.VersionRecord{}, credential.ErrCredentialOperationConflict
+	}
+	record, err := scanCredentialVersion(r.db.QueryRowContext(ctx, `
+SELECT v.version_id, v.account_id, v.version_number, cvo.auth_type, v.ciphertext, v.encrypted_dek,
+       v.nonce, v.aad_json, v.kms_key_id, v.kms_key_version, v.credential_hint, v.created_at
+FROM credential_version_operations cvo
+JOIN credential_versions v ON v.version_id = cvo.version_id AND v.account_id = cvo.account_id
+WHERE cvo.operation_id = ?`, operationID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return credential.VersionRecord{}, credential.ErrCredentialOperationNotFound
+	}
+	if err != nil {
+		return credential.VersionRecord{}, fmt.Errorf("read credential rotation operation: %w", err)
+	}
+	return record, nil
 }
 
 func (r *Repository) GetActiveCredentialVersion(ctx context.Context, accountID string) (credential.VersionRecord, error) {

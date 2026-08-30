@@ -38,12 +38,13 @@ var (
 )
 
 type oauthSession struct {
-	AccountID    int64
-	State        string
-	CodeVerifier string
-	Scope        string
-	ProxyURL     string
-	CreatedAt    time.Time
+	AccountID           int64
+	State               string
+	CodeVerifier        string
+	Scope               string
+	ProxyURL            string
+	ExecutionOnboarding bool
+	CreatedAt           time.Time
 }
 
 type oauthSessionStore struct {
@@ -256,6 +257,52 @@ func (s *oauthSessionStore) take(id string, accountID int64) (oauthSession, bool
 	return session, true
 }
 
+// peek keeps the PKCE verifier available until the durable runtime transition
+// commits. The session remains process-local; this intentionally does not turn
+// temporary OAuth material into a database record.
+func (s *oauthSessionStore) peek(id string, accountID int64) (oauthSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[id]
+	if !ok || session.AccountID != accountID {
+		return oauthSession{}, false
+	}
+	if time.Since(session.CreatedAt) > 30*time.Minute {
+		delete(s.sessions, id)
+		return oauthSession{}, false
+	}
+	return session, true
+}
+
+// consume deletes only the exact session previously observed by peek. A
+// concurrent successful replay may already have removed it, so callers treat
+// a false return after a committed durable transition as harmless.
+func (s *oauthSessionStore) consume(id string, accountID int64, expected oauthSession) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[id]
+	if !ok || session.AccountID != accountID || session.CreatedAt != expected.CreatedAt ||
+		session.State != expected.State || session.CodeVerifier != expected.CodeVerifier {
+		return false
+	}
+	delete(s.sessions, id)
+	return true
+}
+
+// discard removes only a session bound to the same account. It is used after
+// an exact durable replay succeeds, when the original PKCE material is no
+// longer needed even if this process lost the first HTTP response.
+func (s *oauthSessionStore) discard(id string, accountID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[id]
+	if !ok || session.AccountID != accountID {
+		return false
+	}
+	delete(s.sessions, id)
+	return true
+}
+
 func secureBase64(size int) (string, error) {
 	buffer := make([]byte, size)
 	if _, err := rand.Read(buffer); err != nil {
@@ -340,15 +387,15 @@ func (a *app) handleAccountAuthURL(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.requireLegacyCredentialOwner(r.Context(), accountID); err != nil {
-		if writeRuntimeCredentialOwnerError(w, err) {
-			return
-		}
+	var migrationStatus string
+	var proxyID sql.NullInt64
+	if err := a.db.QueryRowContext(r.Context(), `SELECT execution_migration_status, proxy_id FROM accounts
+		WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, accountID).Scan(&migrationStatus, &proxyID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found")
-			return
+		} else {
+			writeDBError(w, err)
 		}
-		writeDBError(w, err)
 		return
 	}
 	var input struct {
@@ -362,15 +409,28 @@ func (a *app) handleAccountAuthURL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	proxyURL, err := a.accountProxyString(accountID)
-	if err != nil {
-		a.recordAuthorization(&accountID, nil, "", "oauth_start", false, err.Error(), "", requestIP(r))
-		status := http.StatusConflict
-		if errors.Is(err, sql.ErrNoRows) {
-			status = http.StatusNotFound
+	executionOnboarding := migrationStatus != "legacy"
+	proxyURL := ""
+	if executionOnboarding {
+		if (migrationStatus != "migrating" && migrationStatus != "migrated") || a.onboardingIntake == nil {
+			writeError(w, http.StatusConflict, errRuntimeCredentialOwner.Error())
+			return
 		}
-		writeError(w, status, err.Error())
-		return
+		if !proxyID.Valid {
+			writeError(w, http.StatusConflict, "execution onboarding requires a reserved account proxy")
+			return
+		}
+	} else {
+		proxyURL, err = a.accountProxyString(accountID)
+		if err != nil {
+			a.recordAuthorization(&accountID, nil, "", "oauth_start", false, err.Error(), "", requestIP(r))
+			status := http.StatusConflict
+			if errors.Is(err, sql.ErrNoRows) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 	}
 	state, err := secureBase64(32)
 	if err != nil {
@@ -379,13 +439,172 @@ func (a *app) handleAccountAuthURL(w http.ResponseWriter, r *http.Request) {
 	}
 	verifier, _ := secureBase64(32)
 	sessionID, _ := secureHex(16)
-	a.oauthSessions.put(sessionID, oauthSession{AccountID: accountID, State: state, CodeVerifier: verifier, Scope: scope, ProxyURL: proxyURL, CreatedAt: time.Now()})
+	a.oauthSessions.put(sessionID, oauthSession{
+		AccountID: accountID, State: state, CodeVerifier: verifier, Scope: scope, ProxyURL: proxyURL,
+		ExecutionOnboarding: executionOnboarding, CreatedAt: time.Now(),
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"auth_url": claudeAuthorizationURL(state, pkceChallenge(verifier), scope), "session_id": sessionID})
 }
 
 func (a *app) handleAccountOAuthExchange(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	var currentMigrationStatus string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT execution_migration_status FROM accounts
+		WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`, accountID).Scan(&currentMigrationStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "account not found")
+		} else {
+			writeDBError(w, err)
+		}
+		return
+	}
+	var input struct {
+		SessionID string `json:"session_id"`
+		Code      string `json:"code"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	defer func() { input.Code = "" }()
+	sessionID := strings.TrimSpace(input.SessionID)
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	validIdempotencyKey := runtimeOpaqueIntentIDPattern.MatchString(idempotencyKey) && !runtimeSecretString(idempotencyKey)
+	if currentMigrationStatus != "legacy" && !validIdempotencyKey {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required for execution onboarding")
+		return
+	}
+	var pendingSubmission *runtimeOnboardingSubmission
+	if currentMigrationStatus != "legacy" && validIdempotencyKey {
+		submission, submissionErr := a.getRuntimeOnboardingSubmission(r.Context(), idempotencyKey)
+		switch {
+		case submissionErr == nil:
+			if submission.AccountID != accountID || submission.OperationType != runtimeOnboardingOperationReauthorize ||
+				submission.SourceType != "oauth_code" {
+				writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+				return
+			}
+			if submission.Status == runtimeOnboardingSubmissionQueued {
+				event, err := a.queuedRuntimeOnboardingEvent(r.Context(), submission)
+				if err != nil {
+					if errors.Is(err, errRuntimeOnboardingIdempotency) {
+						writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+					} else {
+						writeError(w, http.StatusBadGateway, "execution onboarding request failed")
+					}
+					return
+				}
+				_ = a.oauthSessions.discard(sessionID, accountID)
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"status": "provisioning", "event_id": event.EventID, "desired_generation": event.DesiredGeneration,
+				})
+				return
+			}
+			pendingSubmission = &submission
+		case errors.Is(submissionErr, sql.ErrNoRows):
+		case errors.Is(submissionErr, errRuntimeOnboardingIdempotency):
+			writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+			return
+		default:
+			writeDBError(w, submissionErr)
+			return
+		}
+	}
+	if pendingSubmission != nil {
+		// A previous OAuth exchange may have reached the execution-plane vault
+		// before CCMAX lost its response or restarted. Recover the exact opaque
+		// receipt before requiring the in-memory PKCE session again.
+		event, recoverErr := a.requestRuntimeOnboardingWithMaterial(r.Context(), a.onboardingIntake, idempotencyKey,
+			runtimeTransitionRequest{
+				AccountID: pendingSubmission.AccountID, EventType: pendingSubmission.EventType,
+				MigrationStatus: pendingSubmission.MigrationStatus, RuntimeStatus: "provisioning",
+			}, &runtimeOnboardingMaterial{Source: pendingSubmission.SourceType, AuthType: pendingSubmission.AuthType})
+		if recoverErr == nil {
+			_ = a.oauthSessions.discard(sessionID, accountID)
+			a.recordAuthorization(&accountID, nil, "", "runtime_oauth", true, "runtime onboarding receipt recovered", "", requestIP(r))
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"status": "provisioning", "event_id": event.EventID, "desired_generation": event.DesiredGeneration,
+			})
+			return
+		}
+		if !errors.Is(recoverErr, errRuntimeOnboardingMaterialRequired) {
+			if errors.Is(recoverErr, errRuntimeMigration) {
+				writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+			} else if errors.Is(recoverErr, errRuntimeOnboardingTimeout) {
+				writeError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out")
+			} else if errors.Is(recoverErr, errRuntimeOnboardingUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable")
+			} else {
+				writeError(w, http.StatusBadGateway, "execution onboarding request failed")
+			}
+			return
+		}
+	}
+	session, ok := a.oauthSessions.peek(sessionID, accountID)
+	if !ok {
+		a.recordAuthorization(&accountID, nil, "", "oauth", false, "OAuth session not found or expired", "", requestIP(r))
+		writeError(w, http.StatusBadRequest, "OAuth session not found or expired")
+		return
+	}
+	defer func() { session.CodeVerifier = "" }()
+	if session.ExecutionOnboarding {
+		migrationStatus := currentMigrationStatus
+		if (migrationStatus != "migrating" && migrationStatus != "migrated") || a.onboardingIntake == nil {
+			writeError(w, http.StatusConflict, errRuntimeCredentialOwner.Error())
+			return
+		}
+		code := strings.TrimSpace(input.Code)
+		input.Code = ""
+		if code == "" || len(code) > maxRuntimeOnboardingMaterialBytes || strings.ContainsAny(code, "\x00\r\n") {
+			writeError(w, http.StatusBadRequest, "OAuth code is invalid")
+			return
+		}
+		authType := "oauth"
+		if session.Scope == claudeOAuthInferenceOnly {
+			authType = "setup_token"
+		}
+		if pendingSubmission != nil && pendingSubmission.AuthType != authType {
+			writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+			return
+		}
+		eventType := "account.credential.rotate_requested"
+		if migrationStatus == "migrating" {
+			eventType = "account.credential.migrate_requested"
+		}
+		event, err := a.requestRuntimeOnboardingWithMaterial(r.Context(), a.onboardingIntake, idempotencyKey, runtimeTransitionRequest{
+			AccountID: accountID, EventType: eventType, MigrationStatus: migrationStatus, RuntimeStatus: "provisioning",
+		}, &runtimeOnboardingMaterial{
+			Source: "oauth_code", AuthType: authType, Secret: []byte(code), Auxiliary: []byte(session.CodeVerifier),
+		})
+		code = ""
+		if err != nil {
+			if errors.Is(err, errRuntimeMigration) {
+				writeError(w, http.StatusConflict, "account runtime generation changed; retry with a new OAuth session")
+			} else if errors.Is(err, errRuntimeOnboardingTimeout) {
+				writeError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out")
+			} else if errors.Is(err, errRuntimeOnboardingUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable")
+			} else {
+				writeError(w, http.StatusBadGateway, "execution onboarding request failed")
+			}
+			return
+		}
+		_ = a.oauthSessions.consume(sessionID, accountID, session)
+		a.recordAuthorization(&accountID, nil, "", "runtime_oauth", true, "runtime onboarding queued", "", requestIP(r))
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": "provisioning", "event_id": event.EventID, "desired_generation": event.DesiredGeneration,
+		})
+		return
+	}
+	if pendingSubmission != nil {
+		writeError(w, http.StatusConflict, errRuntimeOnboardingIdempotency.Error())
+		return
+	}
+	if !a.oauthSessions.consume(sessionID, accountID, session) {
+		a.recordAuthorization(&accountID, nil, "", "oauth", false, "OAuth session not found or expired", "", requestIP(r))
+		writeError(w, http.StatusBadRequest, "OAuth session not found or expired")
 		return
 	}
 	if err := a.requireLegacyCredentialOwner(r.Context(), accountID); err != nil {
@@ -399,25 +618,12 @@ func (a *app) handleAccountOAuthExchange(w http.ResponseWriter, r *http.Request)
 		writeDBError(w, err)
 		return
 	}
-	var input struct {
-		SessionID string `json:"session_id"`
-		Code      string `json:"code"`
-	}
-	if !decodeJSON(w, r, &input) {
-		return
-	}
 	leaseOwner, err := a.acquireAccountTokenLease(r.Context(), accountID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	defer a.releaseAccountTokenLease(accountID, leaseOwner)
-	session, ok := a.oauthSessions.take(strings.TrimSpace(input.SessionID), accountID)
-	if !ok {
-		a.recordAuthorization(&accountID, nil, "", "oauth", false, "OAuth session not found or expired", "", requestIP(r))
-		writeError(w, http.StatusBadRequest, "OAuth session not found or expired")
-		return
-	}
 	proxyURL, err := a.accountProxyString(accountID)
 	if err != nil {
 		a.recordAuthorization(&accountID, nil, "", "oauth", false, err.Error(), "", requestIP(r))
@@ -457,15 +663,13 @@ func (a *app) handleAccountSessionAuth(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.requireLegacyCredentialOwner(r.Context(), accountID); err != nil {
-		if writeRuntimeCredentialOwnerError(w, err) {
-			return
-		}
+	var migrationStatus string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT execution_migration_status FROM accounts WHERE id = ? AND deleted_at IS NULL`, accountID).Scan(&migrationStatus); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found")
-			return
+		} else {
+			writeDBError(w, err)
 		}
-		writeDBError(w, err)
 		return
 	}
 	var input struct {
@@ -475,13 +679,88 @@ func (a *app) handleAccountSessionAuth(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if strings.TrimSpace(input.SessionKey) == "" {
+	sessionKey := strings.TrimSpace(input.SessionKey)
+	input.SessionKey = ""
+	defer func() { sessionKey = "" }()
+	if migrationStatus != "legacy" && a.onboardingIntake == nil {
+		// A completed submission can be replayed locally while intake is down.
+		// Anything else remains fail-closed before credential material is
+		// inspected or sent to a legacy exchange path.
+		idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		authType, _, _, modeErr := normalizeClaudeAuthMode(input.Mode)
+		eventType := "account.credential.rotate_requested"
+		if migrationStatus == "migrating" {
+			eventType = "account.credential.migrate_requested"
+		}
+		if modeErr == nil && runtimeOpaqueIntentIDPattern.MatchString(idempotencyKey) && !runtimeSecretString(idempotencyKey) {
+			event, replayErr := a.requestRuntimeOnboardingWithMaterial(r.Context(), nil, idempotencyKey, runtimeTransitionRequest{
+				AccountID: accountID, EventType: eventType, MigrationStatus: migrationStatus, RuntimeStatus: "provisioning",
+			}, &runtimeOnboardingMaterial{Source: "session_key", AuthType: authType})
+			if replayErr == nil {
+				a.recordAuthorization(&accountID, nil, "", "runtime_session_key", true, "runtime onboarding replayed", "", requestIP(r))
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"status": "provisioning", "event_id": event.EventID, "desired_generation": event.DesiredGeneration,
+				})
+				return
+			}
+			if errors.Is(replayErr, errRuntimeOnboardingTimeout) {
+				writeError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out")
+				return
+			}
+			if errors.Is(replayErr, errRuntimeOnboardingUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable")
+				return
+			}
+		}
+		writeError(w, http.StatusConflict, errRuntimeCredentialOwner.Error())
+		return
+	}
+	if sessionKey == "" {
 		writeError(w, http.StatusBadRequest, "Claude Session Key is required")
 		return
 	}
 	authType, _, apiScope, err := normalizeClaudeAuthMode(input.Mode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if migrationStatus != "legacy" {
+		if migrationStatus != "migrating" && migrationStatus != "migrated" {
+			writeError(w, http.StatusConflict, errRuntimeCredentialOwner.Error())
+			return
+		}
+		idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if !runtimeOpaqueIntentIDPattern.MatchString(idempotencyKey) || runtimeSecretString(idempotencyKey) {
+			writeError(w, http.StatusBadRequest, "Idempotency-Key is required for execution onboarding")
+			return
+		}
+		eventType := "account.credential.rotate_requested"
+		if migrationStatus == "migrating" {
+			eventType = "account.credential.migrate_requested"
+		}
+		event, err := a.requestRuntimeOnboardingWithMaterial(r.Context(), a.onboardingIntake, idempotencyKey, runtimeTransitionRequest{
+			AccountID: accountID, EventType: eventType, MigrationStatus: migrationStatus,
+			RuntimeStatus: "provisioning",
+		}, &runtimeOnboardingMaterial{
+			Source: "session_key", AuthType: authType, Secret: []byte(sessionKey),
+		})
+		sessionKey = ""
+		if err != nil {
+			if errors.Is(err, errRuntimeMigration) {
+				writeError(w, http.StatusConflict, "account runtime generation changed; retry with the same Idempotency-Key")
+			} else if errors.Is(err, errRuntimeOnboardingTimeout) {
+				writeError(w, http.StatusGatewayTimeout, "execution onboarding intake timed out")
+			} else if errors.Is(err, errRuntimeOnboardingUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "execution onboarding intake is unavailable")
+			} else {
+				writeError(w, http.StatusBadGateway, "execution onboarding request failed")
+			}
+			return
+		}
+		a.recordAuthorization(&accountID, nil, "", "runtime_session_key", true, "runtime onboarding queued", "", requestIP(r))
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": "provisioning", "event_id": event.EventID, "desired_generation": event.DesiredGeneration,
+		})
 		return
 	}
 	leaseOwner, err := a.acquireAccountTokenLease(r.Context(), accountID)
@@ -500,13 +779,13 @@ func (a *app) handleAccountSessionAuth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	token, err := exchangeClaudeSessionKey(r.Context(), strings.TrimSpace(input.SessionKey), apiScope, proxyURL)
+	token, err := exchangeClaudeSessionKey(r.Context(), sessionKey, apiScope, proxyURL)
 	if err != nil {
 		a.recordAuthorization(&accountID, nil, "", "session_key", false, err.Error(), "", requestIP(r))
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if err := a.saveAuthorizedClaudeToken(accountID, authType, token, leaseOwner, sourceSKHint(input.SessionKey)); err != nil {
+	if err := a.saveAuthorizedClaudeToken(accountID, authType, token, leaseOwner, sourceSKHint(sessionKey)); err != nil {
 		a.recordAuthorization(&accountID, nil, "", "session_key", false, err.Error(), token.SubscriptionType, requestIP(r))
 		if writeRuntimeCredentialOwnerError(w, err) {
 			return

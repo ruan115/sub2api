@@ -16,8 +16,11 @@ import (
 	"time"
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/pki"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -269,6 +272,208 @@ func TestDispatchRejectsSensitiveMetadata(t *testing.T) {
 	}
 }
 
+type recordingCommandObserver struct {
+	results chan *executionv1.CommandResult
+}
+
+func (o recordingCommandObserver) ObserveCommandResult(_ context.Context, _ string, result *executionv1.CommandResult) error {
+	o.results <- result
+	return nil
+}
+
+type recordingCredentialSink struct {
+	requests chan worker.SealedCredentialCommitRequest
+}
+
+type rejectingCredentialSink struct{}
+
+func (rejectingCredentialSink) CommitSealedCredential(context.Context, worker.SealedCredentialCommitRequest) (string, error) {
+	return "", errors.New("vault secret material must not escape")
+}
+
+func (s recordingCredentialSink) CommitSealedCredential(_ context.Context, request worker.SealedCredentialCommitRequest) (string, error) {
+	request.SealedCredentialBundle = append([]byte(nil), request.SealedCredentialBundle...)
+	s.requests <- request
+	return "33333333-4444-4555-8666-777777777777", nil
+}
+
+func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) {
+	observer := recordingCommandObserver{results: make(chan *executionv1.CommandResult, 1)}
+	sink := recordingCredentialSink{requests: make(chan worker.SealedCredentialCommitRequest, 1)}
+	test := newControlHarnessWithConfig(t, 2*time.Second, func(config *Config) {
+		config.CommandObserver = observer
+		config.CredentialSink = sink
+	})
+	stream := enrollAndOpenControl(t, test, secureHelloEvent("srv74"))
+
+	keyCommand := &executionv1.NodeControlServiceControlResponse{
+		Event: &executionv1.NodeControlServiceControlResponse_CredentialKeyCommand{CredentialKeyCommand: &executionv1.CredentialKeyCommand{
+			CommandId: "cmd-key-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 7,
+			ImageDigest: "sha256:" + strings.Repeat("d", 64), Deadline: timestamppb.New(test.now.Add(time.Minute)),
+		}},
+	}
+	if err := test.server.Dispatch(context.Background(), "srv74", keyCommand); err != nil {
+		t.Fatal(err)
+	}
+	if delivered, err := stream.Recv(); err != nil || delivered.GetCredentialKeyCommand().GetCommandId() != "cmd-key-1" {
+		t.Fatalf("credential-key delivery = %+v, err = %v", delivered, err)
+	}
+	recipient, err := credential.NewRecipient(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recipient.Destroy()
+	keyID, publicKey, err := recipient.PublicKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&executionv1.NodeControlServiceControlRequest{
+		Event: &executionv1.NodeControlServiceControlRequest_CommandResult{CommandResult: &executionv1.CommandResult{
+			CommandId: "cmd-key-1", Succeeded: true,
+			Slot: &executionv1.SlotObservation{
+				SlotId: "slot-1", ProviderRef: "container-1", ExecutionEpoch: 7, ActualState: "running", Healthy: true,
+				ImageDigest: "sha256:" + strings.Repeat("d", 64),
+			},
+			CredentialTransportKey: &executionv1.CredentialTransportKeyOutput{KeyId: keyID, PublicKey: publicKey},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case observed := <-observer.results:
+		if observed.GetCredentialTransportKey().GetKeyId() != keyID {
+			t.Fatalf("observed key result = %+v", observed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for credential-key observer")
+	}
+
+	activationCommand := &executionv1.NodeControlServiceControlResponse{
+		Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
+			CommandId: "cmd-activate-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 7,
+			ImageDigest: "sha256:" + strings.Repeat("d", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
+			EncryptedCredentialBundle: []byte("process-bound-ciphertext"), Deadline: timestamppb.New(test.now.Add(time.Minute)),
+		}},
+	}
+	if err := test.server.Dispatch(context.Background(), "srv74", activationCommand); err != nil {
+		t.Fatal(err)
+	}
+	if delivered, err := stream.Recv(); err != nil || delivered.GetSecureActivationCommand().GetCommandId() != "cmd-activate-1" {
+		t.Fatalf("secure activation delivery = %+v, err = %v", delivered, err)
+	}
+	sealed := []byte("orchestrator-sealed-rotation")
+	if err := stream.Send(&executionv1.NodeControlServiceControlRequest{
+		Event: &executionv1.NodeControlServiceControlRequest_CredentialCommit{CredentialCommit: &executionv1.ControlCredentialCommit{
+			CommandId: "cmd-activate-1", AccountBinding: provider.RuntimeAccountID("account-1"), SlotId: "slot-1", ExecutionEpoch: 7,
+			CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1", SealedCredentialBundle: sealed,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case committed := <-sink.requests:
+		if string(committed.SealedCredentialBundle) != string(sealed) || committed.AccountBinding != provider.RuntimeAccountID("account-1") {
+			t.Fatalf("credential sink request = %+v", committed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for credential sink")
+	}
+	ack, err := stream.Recv()
+	if err != nil || !ack.GetCredentialCommitAck().GetAccepted() || ack.GetCredentialCommitAck().GetVersionId() == "" {
+		t.Fatalf("credential commit ack = %+v, err = %v", ack, err)
+	}
+	if err := stream.Send(&executionv1.NodeControlServiceControlRequest{
+		Event: &executionv1.NodeControlServiceControlRequest_CommandResult{CommandResult: &executionv1.CommandResult{
+			CommandId: "cmd-activate-1", Succeeded: true,
+			Slot: &executionv1.SlotObservation{
+				SlotId: "slot-1", ProviderRef: "container-1", ExecutionEpoch: 7, ActualState: "running", Healthy: true,
+				ImageDigest: "sha256:" + strings.Repeat("d", 64),
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		result, exists := test.repository.GetCommandResult("cmd-activate-1")
+		return exists && result.Succeeded
+	})
+	_ = stream.CloseSend()
+}
+
+func TestSecureActivationDispatchRequiresDependenciesAndCapability(t *testing.T) {
+	response := &executionv1.NodeControlServiceControlResponse{
+		Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
+			CommandId: "cmd-activate", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 1,
+			ImageDigest: "sha256:" + strings.Repeat("e", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
+			EncryptedCredentialBundle: []byte("ciphertext"), Deadline: timestamppb.New(time.Now().Add(time.Minute)),
+		}},
+	}
+	server := &Server{config: Config{Now: time.Now}, sessions: map[string]*nodeSession{"srv74": {
+		protocolMinor: CurrentProtocolMinor, capabilities: map[string]struct{}{secureActivationCapability: {}},
+		outbound: make(chan *executionv1.NodeControlServiceControlResponse, 1), done: make(chan struct{}),
+		pendingCommands: make(map[string]pendingCommand), maxPendingCommands: 4,
+	}}}
+	if err := server.Dispatch(context.Background(), "srv74", response); err == nil || !strings.Contains(err.Error(), "sink") {
+		t.Fatalf("missing sink dispatch error = %v", err)
+	}
+	server.config.CredentialSink = recordingCredentialSink{requests: make(chan worker.SealedCredentialCommitRequest, 1)}
+	server.config.CommandObserver = recordingCommandObserver{results: make(chan *executionv1.CommandResult, 1)}
+	server.sessions["srv74"].capabilities = map[string]struct{}{}
+	if err := server.Dispatch(context.Background(), "srv74", response); err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("missing capability dispatch error = %v", err)
+	}
+	keyResponse := &executionv1.NodeControlServiceControlResponse{
+		Event: &executionv1.NodeControlServiceControlResponse_CredentialKeyCommand{CredentialKeyCommand: &executionv1.CredentialKeyCommand{
+			CommandId: "cmd-key", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 1,
+			ImageDigest: "sha256:" + strings.Repeat("e", 64), Deadline: timestamppb.New(time.Now().Add(time.Minute)),
+		}},
+	}
+	server.sessions["srv74"].capabilities = map[string]struct{}{secureActivationCapability: {}}
+	server.config.CommandObserver = nil
+	if err := server.Dispatch(context.Background(), "srv74", keyResponse); err == nil || !strings.Contains(err.Error(), "observer") {
+		t.Fatalf("missing observer dispatch error = %v", err)
+	}
+	if err := server.Dispatch(context.Background(), "srv74", response); err == nil || !strings.Contains(err.Error(), "observer") {
+		t.Fatalf("missing activation observer dispatch error = %v", err)
+	}
+}
+
+func TestCredentialCommitRequiresExactSingleBindingAndMasksSinkFailure(t *testing.T) {
+	session := &nodeSession{
+		outbound: make(chan *executionv1.NodeControlServiceControlResponse, 1), done: make(chan struct{}),
+		pendingCommands: map[string]pendingCommand{"cmd-activate": {
+			kind: pendingSecureActivation, slotID: "slot-1", executionEpoch: 9,
+			accountBinding: provider.RuntimeAccountID("account-1"), credentialLeaseID: "lease-1", proxyLeaseID: "proxy-1",
+		}},
+		maxPendingCommands: 4,
+	}
+	server := &Server{config: Config{CredentialSink: rejectingCredentialSink{}}}
+	commit := func(accountBinding string) *executionv1.ControlCredentialCommit {
+		return &executionv1.ControlCredentialCommit{
+			CommandId: "cmd-activate", AccountBinding: accountBinding, SlotId: "slot-1", ExecutionEpoch: 9,
+			CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1", SealedCredentialBundle: []byte("sealed"),
+		}
+	}
+	if err := server.recordCredentialCommit(context.Background(), session, commit(provider.RuntimeAccountID("other-account"))); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("mismatched credential commit error = %v", err)
+	}
+	if err := server.recordCredentialCommit(context.Background(), session, commit(provider.RuntimeAccountID("account-1"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.recordCredentialCommit(context.Background(), session, commit(provider.RuntimeAccountID("account-1"))); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("duplicate credential commit error = %v", err)
+	}
+	select {
+	case response := <-session.outbound:
+		ack := response.GetCredentialCommitAck()
+		if ack.GetAccepted() || ack.GetVersionId() != "" || ack.GetErrorCode() != "commit_rejected" || strings.Contains(ack.GetErrorCode(), "secret") {
+			t.Fatalf("rejected credential commit ack = %+v", ack)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rejected credential commit ack")
+	}
+}
+
 func TestCommandResultMustBelongToCurrentSession(t *testing.T) {
 	session := &nodeSession{
 		pendingCommands:    make(map[string]pendingCommand),
@@ -294,6 +499,10 @@ type controlHarness struct {
 }
 
 func newControlHarness(t *testing.T, heartbeatTimeout time.Duration) *controlHarness {
+	return newControlHarnessWithConfig(t, heartbeatTimeout, nil)
+}
+
+func newControlHarnessWithConfig(t *testing.T, heartbeatTimeout time.Duration, configure func(*Config)) *controlHarness {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	authority, _, err := pki.NewEphemeralAuthority(func() time.Time { return now }, time.Hour)
@@ -314,6 +523,9 @@ func newControlHarness(t *testing.T, heartbeatTimeout time.Duration) *controlHar
 	config.RotateBefore = time.Hour
 	config.HeartbeatTimeout = heartbeatTimeout
 	config.Now = func() time.Time { return now }
+	if configure != nil {
+		configure(&config)
+	}
 	server, err := NewServer(repository, authority, config)
 	if err != nil {
 		t.Fatal(err)
@@ -335,6 +547,40 @@ func newControlHarness(t *testing.T, heartbeatTimeout time.Duration) *controlHar
 		_ = listener.Close()
 	})
 	return harness
+}
+
+func enrollAndOpenControl(t *testing.T, harness *controlHarness, hello *executionv1.NodeControlServiceControlRequest) executionv1.NodeControlService_ControlClient {
+	t.Helper()
+	token, err := harness.server.CreateEnrollment(context.Background(), "srv74")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, keyPEM, publicKeyPEM := generateNodeKey(t)
+	enrollmentClient := executionv1.NewNodeControlServiceClient(harness.dial(t, nil))
+	enrollment, err := enrollmentClient.EnrollNode(context.Background(), &executionv1.EnrollNodeRequest{
+		EnrollmentToken: token.Token, NodeId: "srv74", PublicKeyPem: string(publicKeyPEM),
+		ProtocolVersion: &executionv1.ProtocolVersion{Major: CurrentProtocolMajor, Minor: CurrentProtocolMinor},
+		Capabilities:    hello.GetHello().GetCapabilities(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := tls.X509KeyPair([]byte(enrollment.GetCertificatePem()), keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := executionv1.NewNodeControlServiceClient(harness.dial(t, &certificate)).Control(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(hello); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		node, getErr := harness.repository.GetNode(context.Background(), "srv74")
+		return getErr == nil && node.Status == "connected"
+	})
+	return stream
 }
 
 func (h *controlHarness) dial(t *testing.T, certificate *tls.Certificate) *grpc.ClientConn {
@@ -387,6 +633,12 @@ func helloEvent(nodeID string) *executionv1.NodeControlServiceControlRequest {
 			Labels: map[string]string{"region": "ap-shanghai", "host": "srv74"},
 		}},
 	}
+}
+
+func secureHelloEvent(nodeID string) *executionv1.NodeControlServiceControlRequest {
+	event := helloEvent(nodeID)
+	event.GetHello().Capabilities = append(event.GetHello().Capabilities, secureActivationCapability)
+	return event
 }
 
 func heartbeatEvent(nodeID string, observedAt time.Time, cli, api, total, allocated uint32) *executionv1.NodeControlServiceControlRequest {

@@ -340,13 +340,127 @@ Session ID 和哈希不能包含或暴露原始用户内容。
 ### 11.2 两阶段上号
 
 1. CCMAX 创建 pending 账号并预留独享代理；
-2. 事务写入 Outbox，账号不可调度；
-3. orchestrator 分配临时 slot 和 epoch；
-4. worker 在固定出口内完成凭证交换或验证；
-5. 成功凭证进入 KMS 信封加密 vault；
-6. worker 探活成功后账号变为 `ready + schedulable`；
-7. 失败时销毁临时容器，但保留 pending 账号与原代理预约供重试；
-8. Session Key、authorization code、PKCE verifier 等临时值到期立即擦除。
+2. CCMAX 通过内部 mTLS onboarding intake 提交 Session Key、authorization code、PKCE verifier 等临时材料；orchestrator 立即生成短期 KMS 信封加密 intent，默认有效期 30 分钟且生产配置不得短于 5 分钟；新建/重新上号请求必须携带稳定的外部 `Idempotency-Key`，CCMAX 为每个可轮换 attempt 另生成随机内部 intake key；
+3. CCMAX 必须先持久化只含 `intent_id + expires_at + exact attempt identity` 的 opaque receipt，再在同一业务事务中把 `onboarding_intent_id` 写入 Outbox，账号保持不可调度；Outbox、账号表、审计和错误中不得出现临时材料；
+4. orchestrator 按 account、目标 generation 和 provisioning owner claim intent，并分配临时 slot 与 epoch；
+5. orchestrator 先取得并验证该 slot/epoch/image 对应的 worker 进程公钥，再在内存中解密 intent，构造仅该 worker 可解开的激活包；
+6. worker 在固定出口内完成凭证交换或验证；
+7. 成功凭证进入 KMS 信封加密 vault，worker 获得精确 credential version ACK 且 slot 探活成功后，intent 才标记 consumed，账号才变为 `ready + schedulable`；
+8. 失败时销毁临时容器，但保留 pending 账号与原代理预约供重试；同一 provisioning owner 可在 claim 有效期内幂等重放，其他 owner 不得读取；
+9. 未完成 intent 在 claim 到期后可重新 claim，在 intent 到期后不可解密；Session Key、authorization code、PKCE verifier 等明文在请求输入、orchestrator 解密缓冲区和 worker 内存中使用后立即擦除。
+
+CCMAX 到 intake 的 Create、Recover 与 Result RPC 默认各自限制为 30 秒并可在安全范围内
+配置。Create 响应丢失时，CCMAX 必须以原内部 key 调用只读 Recover；Recover 不得解密
+intent，`NotFound / Aborted / FailedPrecondition / Unavailable` 分别表示精确 key 未创建、
+精确 intent 已过期、身份/生命周期冲突、持久层不可用。只有精确 `Aborted` 或已持久化
+receipt 失去提交余量时才允许 CAS 递增 attempt 并换内部 key；旧 attempt 的晚到响应
+不得写入新 attempt。Create 返回前必须清零其持有的材料，Recover 不消费材料。
+
+账号创建的外部幂等重放必须校验版本化的 canonical SHA-256 fingerprint。fingerprint
+只覆盖规范化的非秘密类型字段、group、代理池/代理选择和 strategy ID；凭证、Session
+Key、OAuth code/PKCE、代理文本/密码、名称、备注和自由文本不得参与或落库。首次写入
+后，自由文本采用 first-write-wins。创建失败但 pending 账号已经提交时，响应必须返回
+`pending_account_id + resume_url`。管理员可按账号查询不含 external/internal key 的状态，
+并由服务端使用原 canonical submission 恢复；resume 接口不得接受客户端提供的新
+`Idempotency-Key`，且必须重新校验 account、generation、proxy、migration、runtime
+lifecycle 与创建 fingerprint。已 ready、draining、destroying、archived 或 deleted 的
+生命周期不得被旧 submission 反向推进。
+
+CCMAX 是固定代理预约的唯一业务权威。execution onboarding 推进账号 generation 时，
+必须在同一账号事务内先创建 `runtime_proxy_reservations` 记录并写入
+`account.proxy_reservation.granted`，再写入引用 onboarding intent 的业务事件。授权 payload
+只能包含 opaque `reservation_id`、`proxy_binding_id` 和单调 `binding_revision`，不得包含
+代理 URL、host、用户名、密码或其他连接材料。grant 按 account + generation 唯一，revoke
+必须锁定并撤销精确 reservation/account/proxy/generation/revision；旧 generation 的 revoke
+不得影响更新 generation 的预约，grant/revoke event ID 均须数据库级唯一并支持精确重放。
+
+`proxy_binding_id` 固定为 CCMAX proxy row 的 canonical positive base-10 ID，不接受 host、IP、
+URL、前导零或自由文本。active reservation 以及尚未完成 grant、但已由 nonlegacy 账号引用的
+proxy 都视为已占用；代理 endpoint/credential/protocol、所属 pool 的 binding 字段、删除、恢复、
+quarantine 和管理端 probe 均必须先取得同一 proxy 数据库锁并 fail closed，任何网络 probe 都
+不得先于占用检查。allocator/可用数也必须排除 active reservation。successor onboarding 在
+同一事务内按 `revoke(old) -> generation CAS -> grant(new) -> onboarding event` 排队；普通
+drain/destroy 等 transition 不得误撤销预约。旧 archive/delete/restore 入口遇 runtime-owned
+账号整批返回冲突且零部分写，直到统一 lifecycle 实现“保留预约”或显式“归档并释放代理”。
+
+execution-plane 只把上述事件投影为无秘密 `proxy_reservation_grants`。具体
+`proxy_leases` 只有在 reservation 仍有效、slot/assignment 的 desired generation 完全一致、
+assignment 健康运行且 image 匹配、execution lease 未撤销且未过期时才能创建或继续有效。
+`actual_generation` 只表示 actual state 变化次数，严禁拿它冒充 desired generation；
+assignment 必须在分配时单独固化 desired generation。升级前缺少 reservation provenance 或
+assignment generation 的旧行必须 fail closed，不得通过 migration 删除或静默补成有效授权。
+
+reconcile 遇到 assignment desired generation 与 slot 不一致时，即使 image digest 未变化也必须
+按 drain -> destroy -> release 收敛；旧 generation 0 只代表需清退，不得被当成当前授权。
+proxy/execution lease 与 reservation 的 `created_at` 都不得晚于校验时刻，所有 durable 时间按
+MySQL `DATETIME(6)` 的 UTC 微秒精度比较，SQL 与 memory replay 语义必须一致。
+
+healthy-slot starter 是唯一 durable workflow 创建边界：它在单个 MySQL transaction 中锁定
+metadata-only pending intent、同 generation/image 的 ready slot 与 healthy/fresh running
+assignment、未撤销未过期的 execution lease 和 trusted reservation，再原子创建一个
+`proxy_lease` 与一个 `onboarding_workflow`。每个 intent 由数据库唯一键限制为至多一个
+workflow；exact replay 必须先于可变 health 检查并返回原绑定。旧的直接 workflow create
+入口不得由 production repository 暴露。intent claim/decrypt 前后还必须重新验证当前
+proxy lease authority；在第二次校验前发生的 revoke 必须擦除已打开材料并禁止 worker dispatch。
+该 starter 当前是 repository/service library，生产 CCMAX outbox router、候选 intent/slot 扫描
+和批量 duplicate drain/archive 仍属于后续协调器工作，不能将库函数完成描述为端到端接通。
+
+worker credential commit 成功后，orchestrator 允许从同一份已认证规范化 credential
+中提取邮箱、organization/account ID、scope、订阅类型、rate-limit tier 和过期时间；
+投影不得包含 AT/RT、API Key、Cookie、Session Key 或任意源材料。投影必须绑定
+workflow、intent、account、generation、slot/epoch、credential/proxy lease 和已提交的
+credential version 幂等落库。投影写入失败时不得给 worker version ACK；重试必须复用
+原 credential version 并补写投影。CCMAX 仅可通过独立 mTLS service identity 按
+`intent + account + generation` 精确读取 `completed` workflow 的结果，未完成时返回
+明确 pending，不能提前把账号标为 ready。
+
+完成结果还必须携带从同一 completed workflow 读取的稳定 `slot_id` 和
+`execution_epoch`。CCMAX 只能在当前 generation、slot、opaque intent 和空本地凭据全部
+一致时事务性切换为 `migrated + ready + schedulable`；API Key 结果只能启用
+`oauth_api`，不得误启 `cli_native`。重复邮箱结果保持不可调度并进入统一 drain/归档
+流程，不得在结果轮询回调中覆盖另一账号。
+
+worker commit 必须以 credential lease ID 作为稳定 rotation operation。Vault 应把
+`operation → credential version` 与 version 插入、active 切换和旧租约撤销放在同一
+事务；进程在 Vault 提交后、authorizer 记账前崩溃时，重试只能返回原 version，不能
+再生成一个版本。该映射不得保存凭证明文或明文派生摘要；材料摘要的重放校验和当前
+execution/proxy lease 授权仍由 durable rotation authorizer 独立负责。
+
+orchestrator 必须通过一个组合根同时装配 NodeControl、CCMAX intake、KMS-backed
+credential/intent Vault、command observer、credential sink 和 provisioning controller，
+不得允许只启动部分安全依赖的 RPC。两类 RPC 共用 TLS 1.3 listener：首次 node
+enrollment 可不携带客户端证书，其余 NodeControl/intake 方法在应用层校验各自精确
+SPIFFE 身份。有界 polling runner 默认每次最多扫描 100 个非终态 workflow，每个
+workflow 每轮只推进一步，单项失败不得阻塞同批其他账号。
+
+生产进程仅在 `EXECUTION_ORCHESTRATOR_RUNTIME_ENABLED=true` 时启用上述 RPC；启动
+顺序必须是：校验配置与 verified-TLS DSN、连接 MySQL、只读确认完整 runtime schema、
+用 CVM instance role 构造 KMS、加载 owner-only PKI 与 KMS 封装的固定 recipient、构造
+完整组件图，最后同时开放 health 与 TLS 1.3 RPC。任一步失败均不得监听 credential
+RPC。进程不得自动执行 schema migration，迁移是显式部署步骤；日志不得输出 DSN、
+代理凭证、KMS material 或 recipient 私钥。
+
+worker 回传凭证使用的 orchestrator X25519 rotation recipient 必须具有可恢复的固定
+私钥；私钥只允许从 KMS/受保护存储解密到内存后恢复，构造器消费并清零输入缓冲区。
+不得在 orchestrator 重启时静默生成新 recipient，否则重启前已下发的 activation
+回传会变成不可解密。进程退出和组合失败必须销毁内存私钥。
+
+生产 runtime 必须通过显式开关启用；MySQL DSN 仅接受 TCP、`parseTime=true`、
+`loc=UTC` 和服务端证书校验开启的 TLS 配置。CA/server 私钥及 rotation recipient
+KMS envelope 只从绝对路径、非符号链接、owner-only regular file 加载；证书文件不得
+允许 group/other 写入。server certificate 必须由同一 execution CA 签发，并覆盖显式
+配置的 TLS server name。rotation 私钥使用独立 `sub2api.service-key.v1` AAD schema，
+不得伪装成账号 credential envelope；腾讯云 KMS 只允许 CAM/CVM 实例角色，不接受
+长期 SecretId/SecretKey 环境变量。配置结构的字符串、Go 格式化和 JSON 输出不得包含
+MySQL DSN。
+
+CCMAX 单账号创建通过显式 `execution_onboarding` 开关选择新链路，默认仍为
+legacy。开启时必须先分配固定代理，账号以 `migrating + provisioning +
+schedulable=false` 保存且 `credentials_json={}`；intake 失败保留 pending 账号与
+代理供同一幂等键重试。已迁移账号的 Session Key 重新授权返回 `202
+provisioning`，不得在 CCMAX 内交换或保存 AT/RT。旧批量 Session Key 接口在 worker
+结果能够安全回填邮箱并通过统一 drain/归档状态机处理重复账号前不得直接切换；不得
+以直接覆盖已有账号或跳过旧 slot 销毁来冒充去重。
 
 ### 11.3 Token 刷新
 
@@ -574,6 +688,8 @@ unhealthy -> recreating | destroyed
 - `account.credential.migrate_requested`；
 - `account.credential.rotate_requested`；
 - `account.proxy.change_requested`；
+- `account.proxy_reservation.granted`；
+- `account.proxy_reservation.revoked`；
 - `slot.image.rollout_requested`；
 - `node.drain_requested`。
 
@@ -594,6 +710,7 @@ unhealthy -> recreating | destroyed
 - `groups.worker_image_channel`；
 - `account_mode_health`；
 - `runtime_outbox`；
+- `runtime_proxy_reservations`：固定代理预约的 CCMAX 权威记录与 grant/revoke event provenance，不保存代理连接材料副本；
 - `runtime_operation_audit`；
 - 回收站批量恢复/彻底清除所需字段。
 
@@ -607,11 +724,17 @@ unhealthy -> recreating | destroyed
 - `node_enrollments`：一次性注册令牌摘要和有效期；
 - `node_certificates`：证书序列号、状态和到期时间；
 - `slots`：稳定 slot ID、account ID、provider、desired state；
-- `slot_assignments`：node、container ref、epoch、image、actual state；
+- `slot_assignments`：node、container ref、epoch、分配时固化的 desired generation、image、actual state；
 - `execution_leases`：epoch、owner、有效期；
+- `onboarding_intents`：opaque intent ID、account/目标 generation/source/auth 绑定、KMS ciphertext/encrypted DEK/AAD、claim owner/expiry、intent expiry 和 consumed 状态，不存明文或可用于猜测明文的摘要；
+- `onboarding_workflows`：intent/owner/account/generation 与 node/slot/epoch/image、两个独立 command ID、公开 worker process key 和 durable step；状态按 `pending_key -> key_dispatched -> key_ready -> activation_dispatched -> activation_succeeded -> completed` 推进；
 - `credential_vault`：账号 active credential version；
 - `credential_versions`：ciphertext、encrypted DEK、AAD、KMS key version；
 - `credential_leases`：一次性领取状态；
+- `credential_version_operations`：credential lease 到唯一 credential version 的崩溃恢复映射；
+- `credential_rotation_commits`：认证材料摘要、runtime binding 和最终 version 的 durable authorizer 记录；
+- `proxy_reservation_grants`：从 CCMAX trusted outbox 投影的 reservation/account/generation/binding revision 与 grant/revoke provenance，不存代理地址和密码；
+- `proxy_leases`：只含 opaque proxy lease 与 reservation/account/generation/slot/epoch 的运行时授权，不存代理地址和密码；
 - `runtime_sessions`：session hash、slot、状态、到期时间，不存正文；
 - `provisioning_jobs`：步骤、重试、错误和幂等键；
 - `image_releases`：镜像 digest、CLI 版本、canary 状态；
@@ -823,6 +946,7 @@ host-agent 通过隔离 Docker 网络访问 worker，不发布宿主端口。每
 
 - worker-orchestrator 与现有 CCMAX 主站部署在同一控制面服务器，但作为独立容器/进程；
 - orchestrator 代码支持多副本，初期运行一个实例；
+- production runtime 默认关闭；只有数据库、PKI、KMS、固定 rotation recipient 和持久化 rotation authorizer 全部装配成功后才允许监听内部 RPC；
 - `43.172.83.39` 仅运行 host-agent 和 worker slots；
 - 通过 Ansible 安装 Docker Engine、WireGuard、host-agent、UFW 和 systemd；
 - Ansible 必须幂等，不覆盖已有 80/443 服务；
@@ -852,9 +976,13 @@ sub2api/
 │   ├── execution_audit.go               # COS 正文索引与访问审计
 │   ├── migrations/                      # CCMAX schema 增量
 │   └── web/
-│       ├── app.js                       # 节点/槽位/发布/审计 UI
-│       ├── index.html
-│       └── styles.css
+│       ├── src/                         # React + TypeScript 管理端源码
+│       │   ├── components/ui/           # shadcn/ui 本地组件
+│       │   ├── features/execution/      # 节点/槽位/发布/审计功能模块
+│       │   └── main.tsx
+│       ├── dist/                        # Vite 构建产物，由 Go embed 提供
+│       ├── vite.config.ts
+│       └── package.json
 ├── execution-plane/
 │   ├── go.mod
 │   ├── api/
@@ -1091,6 +1219,12 @@ sub2api/
 4. 批量操作；
 5. COS 正文审计与权限；
 6. 中文 UI 验证。
+
+管理 UI 在本阶段统一迁移为 React + TypeScript + Vite，并使用 shadcn/ui、
+Radix primitives、Tailwind CSS 与 lucide-react。视觉采用低装饰的中性色纯白/
+暗黑双主题，不使用渐变；主题由 CSS variables 表达。生产构建输出到 `web/dist`
+并继续由 CCMAX Go 服务内嵌提供，不引入独立 Node 运行时，也不改变现有管理 API。
+在阶段 6 之前只稳定后端状态机和公共 DTO，不继续扩展旧的原生 `app.js` UI。
 
 ### 阶段 7：发布、压测与试点准备
 

@@ -359,6 +359,15 @@ func quarantineProxyIDs(tx *databaseTx, proxyIDs []int64) error {
 		if liveOwners > 0 {
 			continue
 		}
+		if err := lockRuntimeProxyBindingsForMutationTx(context.Background(), tx, []int64{proxyID}); err != nil {
+			if errors.Is(err, errRuntimeProxyReservationActive) {
+				// Shared-data migration and legacy archive cleanup must not make
+				// startup unavailable merely because the execution lifecycle still
+				// owns this binding. The later explicit release workflow will move it.
+				continue
+			}
+			return err
+		}
 
 		var duplicateID int64
 		err = tx.QueryRow(`SELECT target.id
@@ -483,12 +492,20 @@ func proxyIdentityUnusedPredicate(alias string) string {
 		AND used_proxy.password = ` + alias + `.password))`
 }
 
+func proxyHasNoActiveRuntimeReservationPredicate(alias string) string {
+	return `NOT EXISTS (SELECT 1 FROM runtime_proxy_reservations runtime_reservation
+		WHERE runtime_reservation.proxy_id = ` + alias + `.id AND runtime_reservation.status = 'active')`
+}
+
 func proxyAvailableToAccountPredicate(proxyAlias, poolAlias string) string {
-	return `(` + poolAlias + `.single_use_enabled = 0
+	return `((` + poolAlias + `.single_use_enabled = 0
 		OR EXISTS (SELECT 1 FROM accounts current_owner
 			WHERE current_owner.id = ? AND current_owner.proxy_id = ` + proxyAlias + `.id
 			AND current_owner.deleted_at IS NULL AND current_owner.archived_at IS NULL)
-		OR ` + proxyIdentityUnusedPredicate(proxyAlias) + `)`
+		OR ` + proxyIdentityUnusedPredicate(proxyAlias) + `)
+		AND NOT EXISTS (SELECT 1 FROM runtime_proxy_reservations runtime_reservation
+			WHERE runtime_reservation.proxy_id = ` + proxyAlias + `.id
+			AND runtime_reservation.status = 'active' AND runtime_reservation.account_id != ?))`
 }
 
 var proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_headers_json, p.default_protocol, p.status, p.single_use_enabled,
@@ -496,6 +513,7 @@ var proxyPoolSelect = `SELECT p.id, p.name, p.source_type, p.api_url, p.api_head
 	(SELECT COUNT(*) FROM proxies x WHERE x.pool_id = p.id AND x.status = 'active' AND x.deleted_at IS NULL
 		AND ` + proxyNotQuarantinedPredicate("x") + `
 		AND (p.single_use_enabled = 0 OR ` + proxyIdentityUnusedPredicate("x") + `)
+		AND ` + proxyHasNoActiveRuntimeReservationPredicate("x") + `
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = x.id AND a.deleted_at IS NULL AND a.archived_at IS NULL)),
 	(SELECT COUNT(DISTINCT a.id) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.proxy_id IS NOT NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL),
 	p.last_sync_at, p.last_error, p.created_at, p.updated_at FROM proxy_pools p`
@@ -576,6 +594,45 @@ func (a *app) handleProxyPoolCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
+func writeRuntimeProxyMutationError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, errRuntimeProxyReservationActive) {
+		writeError(w, http.StatusConflict, errRuntimeProxyReservationActive.Error())
+		return true
+	}
+	return false
+}
+
+func lockProxyPoolBindingsForMutationTx(ctx context.Context, tx *databaseTx, poolID int64) error {
+	if ctx == nil || ctx.Err() != nil || tx == nil || poolID <= 0 {
+		return errRuntimeMigration
+	}
+	query := `SELECT id FROM proxies WHERE pool_id = ? AND deleted_at IS NULL ORDER BY id`
+	if tx.dialect == dialectMySQL {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, query, poolID)
+	if err != nil {
+		return err
+	}
+	proxyIDs := make([]int64, 0)
+	for rows.Next() {
+		var proxyID int64
+		if err := rows.Scan(&proxyID); err != nil {
+			rows.Close()
+			return err
+		}
+		proxyIDs = append(proxyIDs, proxyID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return lockRuntimeProxyBindingsForMutationTx(ctx, tx, proxyIDs)
+}
+
 func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -596,8 +653,12 @@ func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	var previousProtocol string
-	if err := tx.QueryRow(`SELECT default_protocol FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, id).Scan(&previousProtocol); err != nil {
+	var previousProtocol, previousStatus string
+	poolQuery := `SELECT default_protocol, status FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`
+	if tx.dialect == dialectMySQL {
+		poolQuery += ` FOR UPDATE`
+	}
+	if err := tx.QueryRowContext(r.Context(), poolQuery, id).Scan(&previousProtocol, &previousStatus); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "proxy pool not found")
 			return
@@ -607,6 +668,15 @@ func (a *app) handleProxyPoolUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var protocolSynced int64
+	if previousProtocol != input.DefaultProtocol || previousStatus != input.Status {
+		if err := lockProxyPoolBindingsForMutationTx(r.Context(), tx, id); err != nil {
+			if writeRuntimeProxyMutationError(w, err) {
+				return
+			}
+			writeDBError(w, err)
+			return
+		}
+	}
 	if previousProtocol != input.DefaultProtocol {
 		var collisions int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM (
@@ -666,9 +736,20 @@ func (a *app) handleProxyPoolDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var name string
-	if err := tx.QueryRow(`SELECT name FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`, id).Scan(&name); err != nil {
+	poolQuery := `SELECT name FROM proxy_pools WHERE id = ? AND deleted_at IS NULL AND system_kind = ''`
+	if tx.dialect == dialectMySQL {
+		poolQuery += ` FOR UPDATE`
+	}
+	if err := tx.QueryRowContext(r.Context(), poolQuery, id).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "proxy pool not found")
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+	if err := lockProxyPoolBindingsForMutationTx(r.Context(), tx, id); err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
 			return
 		}
 		writeDBError(w, err)
@@ -812,8 +893,12 @@ func (a *app) handleProxyRestore(w http.ResponseWriter, r *http.Request) {
 	var protocol, host, username, password, systemKind string
 	var port int
 	var deletedAt sql.NullString
-	if err := tx.QueryRow(`SELECT x.protocol, x.host, x.port, x.username, x.password, p.system_kind, x.deleted_at
-		FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id WHERE x.id = ?`, id).Scan(&protocol, &host, &port, &username, &password, &systemKind, &deletedAt); err != nil {
+	proxyQuery := `SELECT x.protocol, x.host, x.port, x.username, x.password, p.system_kind, x.deleted_at
+		FROM proxies x JOIN proxy_pools p ON p.id = x.pool_id WHERE x.id = ?`
+	if tx.dialect == dialectMySQL {
+		proxyQuery += ` FOR UPDATE`
+	}
+	if err := tx.QueryRowContext(r.Context(), proxyQuery, id).Scan(&protocol, &host, &port, &username, &password, &systemKind, &deletedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "archived proxy not found")
 			return
@@ -842,6 +927,13 @@ func (a *app) handleProxyRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if duplicate > 0 {
 		writeError(w, http.StatusConflict, "the same proxy endpoint already exists in an active pool")
+		return
+	}
+	if err := lockRuntimeProxyBindingsForMutationTx(r.Context(), tx, []int64{id}); err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
+			return
+		}
+		writeDBError(w, err)
 		return
 	}
 	if _, err := tx.Exec(`UPDATE proxies SET pool_id = ?, status = 'active', last_error = '', deleted_at = NULL,
@@ -901,8 +993,11 @@ func (a *app) handleProxyBatchDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 proxies")
 		return
 	}
-	result, err := a.deleteProxies(ids)
+	result, err := a.deleteProxies(r.Context(), ids)
 	if err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
@@ -1310,13 +1405,25 @@ func (a *app) handleProxyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid proxy status")
 		return
 	}
+	tx, err := a.db.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	if err := lockRuntimeProxyBindingsForMutationTx(r.Context(), tx, []int64{id}); err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
 	var result sql.Result
-	var err error
 	if input.Password == "" {
-		result, err = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		result, err = tx.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 			AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), id)
 	} else {
-		result, err = a.db.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, password = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
+		result, err = tx.Exec(`UPDATE proxies SET name = ?, status = ?, username = ?, password = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL
 			AND EXISTS (SELECT 1 FROM proxy_pools pool WHERE pool.id = proxies.pool_id AND pool.system_kind = '')`, strings.TrimSpace(input.Name), input.Status, strings.TrimSpace(input.Username), input.Password, id)
 	}
 	if err != nil {
@@ -1325,6 +1432,10 @@ func (a *app) handleProxyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if count, _ := result.RowsAffected(); count == 0 {
 		writeError(w, http.StatusNotFound, "proxy not found")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, err)
 		return
 	}
 	item, err := scanProxy(a.db.QueryRow(proxySelect+` WHERE x.id = ? AND x.deleted_at IS NULL AND p.system_kind = ''`, id))
@@ -1340,8 +1451,11 @@ func (a *app) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := a.deleteProxies([]int64{id})
+	result, err := a.deleteProxies(r.Context(), []int64{id})
 	if err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
@@ -1357,9 +1471,9 @@ func (a *app) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
+func (a *app) deleteProxies(ctx context.Context, ids []int64) (proxyBatchDeleteResponse, error) {
 	result := proxyBatchDeleteResponse{}
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return result, err
 	}
@@ -1374,7 +1488,7 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 	type assignedAccount struct {
 		ID        int64
 		Name      string
-		PoolID    int64
+		ProxyID   int64
 		AutoProxy bool
 	}
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
@@ -1384,9 +1498,12 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 	if result.Matched == 0 {
 		return result, nil
 	}
-	rows, err := tx.Query(`SELECT a.id, a.name, p.pool_id, a.auto_proxy
-		FROM accounts a JOIN proxies p ON p.id = a.proxy_id JOIN proxy_pools pool ON pool.id = p.pool_id
-		WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND pool.system_kind = '' AND a.proxy_id IN (`+placeholders+`)`, args...)
+	accountQuery := `SELECT id, name, proxy_id, auto_proxy FROM accounts
+		WHERE deleted_at IS NULL AND archived_at IS NULL AND proxy_id IN (` + placeholders + `) ORDER BY id`
+	if tx.dialect == dialectMySQL {
+		accountQuery += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, accountQuery, args...)
 	if err != nil {
 		return result, err
 	}
@@ -1394,7 +1511,7 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 	for rows.Next() {
 		var item assignedAccount
 		var autoProxy int
-		if err := rows.Scan(&item.ID, &item.Name, &item.PoolID, &autoProxy); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.ProxyID, &autoProxy); err != nil {
 			rows.Close()
 			return result, err
 		}
@@ -1406,6 +1523,9 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 		return result, err
 	}
 	if err := rows.Close(); err != nil {
+		return result, err
+	}
+	if err := lockRuntimeProxyBindingsForMutationTx(ctx, tx, ids); err != nil {
 		return result, err
 	}
 	updateResult, err := tx.Exec(`UPDATE proxies SET status = 'disabled', deleted_at = `+nowSQL+`, updated_at = `+nowSQL+`
@@ -1422,7 +1542,10 @@ func (a *app) deleteProxies(ids []int64) (proxyBatchDeleteResponse, error) {
 
 	for _, account := range assigned {
 		if account.AutoProxy {
-			poolID := account.PoolID
+			var poolID int64
+			if err := tx.QueryRowContext(ctx, `SELECT pool_id FROM proxies WHERE id = ?`, account.ProxyID).Scan(&poolID); err != nil {
+				return result, err
+			}
 			replacement, assignErr := assignAccountProxy(tx, account.ID, &poolID, nil, true)
 			if assignErr == nil && replacement != nil {
 				if _, err := tx.Exec(`UPDATE accounts SET proxy_id = ?, updated_at = `+nowSQL+` WHERE id = ?`, replacement, account.ID); err != nil {
@@ -1452,19 +1575,39 @@ func (a *app) handleProxyTest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result := a.probeProxy(r.Context(), id, "")
-	if result.Error != "proxy not found or disabled" {
-		if err := a.persistProxyTestResults([]proxyTestResult{result}); err != nil {
-			writeDBError(w, err)
+	tx, err := a.db.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	if err := lockProxyTestTargetsTx(r.Context(), tx, []int64{id}); err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
 			return
 		}
+		writeDBError(w, err)
+		return
+	}
+	proxyURL, err := proxyURLForTestTx(r.Context(), tx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "proxy not found or disabled")
+		return
+	}
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	result := probeProxyURL(r.Context(), id, "", proxyURL)
+	if err := persistProxyTestResultsTx(tx, []proxyTestResult{result}); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, err)
+		return
 	}
 	if !result.Success {
-		status := http.StatusBadGateway
-		if result.Error == "proxy not found or disabled" {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, result.Error)
+		writeError(w, http.StatusBadGateway, result.Error)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1485,6 +1628,12 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 	if input.Concurrency > 20 {
 		input.Concurrency = 20
 	}
+	tx, err := a.db.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	defer tx.Rollback()
 	query := `SELECT p.id, p.name FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
 		WHERE p.deleted_at IS NULL AND p.status != 'disabled' AND pool.system_kind = ''`
 	query += ` AND ` + proxyNotQuarantinedPredicate("p")
@@ -1505,7 +1654,10 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	query += ` ORDER BY p.id`
-	rows, err := a.db.Query(query, args...)
+	if tx.dialect == dialectMySQL {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -1532,6 +1684,32 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "batch proxy testing is limited to 500 proxies")
 		return
 	}
+	targetIDs := make([]int64, len(targets))
+	for index, target := range targets {
+		targetIDs[index] = target.ID
+	}
+	// Validate every target before starting any worker. Keeping these locks until
+	// the results commit prevents a runtime grant or identity mutation from
+	// crossing the network-probe boundary.
+	if err := lockProxyTestTargetsTx(r.Context(), tx, targetIDs); err != nil {
+		if writeRuntimeProxyMutationError(w, err) {
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+	proxyURLs := make([]*url.URL, len(targets))
+	for index, target := range targets {
+		proxyURLs[index], err = proxyURLForTestTx(r.Context(), tx, target.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusConflict, "proxy selection changed during batch test")
+			return
+		}
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+	}
 	items := make([]proxyTestResult, len(targets))
 	jobs := make(chan int)
 	var workers sync.WaitGroup
@@ -1541,7 +1719,7 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				items[index] = a.probeProxy(r.Context(), targets[index].ID, targets[index].Name)
+				items[index] = probeProxyURL(r.Context(), targets[index].ID, targets[index].Name, proxyURLs[index])
 			}
 		}()
 	}
@@ -1550,7 +1728,11 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 	}
 	close(jobs)
 	workers.Wait()
-	if err := a.persistProxyTestResults(items); err != nil {
+	if err := persistProxyTestResultsTx(tx, items); err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -1565,13 +1747,8 @@ func (a *app) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (a *app) probeProxy(parent context.Context, id int64, name string) proxyTestResult {
+func probeProxyURL(parent context.Context, id int64, name string, proxyURL *url.URL) proxyTestResult {
 	result := proxyTestResult{ID: id, Name: name}
-	proxyURL, err := a.proxyURLForTest(id)
-	if err != nil {
-		result.Error = "proxy not found or disabled"
-		return result
-	}
 	client, err := clientForProxy(proxyURL)
 	if err != nil {
 		result.Error = err.Error()
@@ -1604,11 +1781,52 @@ func (a *app) persistProxyTestResults(items []proxyTestResult) error {
 	if len(items) == 0 {
 		return nil
 	}
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	proxyIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		if item.ID > 0 && item.Error != "proxy not found or disabled" {
+			proxyIDs = append(proxyIDs, item.ID)
+		}
+	}
+	if err := lockProxyTestTargetsTx(context.Background(), tx, proxyIDs); err != nil {
+		return err
+	}
+	if err := persistProxyTestResultsTx(tx, items); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// lockProxyTestTargetsTx is the probe-side half of the runtime proxy authority
+// fence. MySQL obtains row locks in lockRuntimeProxyBindingsForMutationTx. The
+// no-op SQLite write also covers in-memory databases that do not use the
+// connection-level BEGIN IMMEDIATE option.
+func lockProxyTestTargetsTx(ctx context.Context, tx *databaseTx, proxyIDs []int64) error {
+	if len(proxyIDs) == 0 {
+		return nil
+	}
+	if tx != nil && tx.dialect == dialectSQLite {
+		ids := uniquePositiveIDs(proxyIDs, len(proxyIDs)+1)
+		if len(ids) == 0 {
+			return errRuntimeMigration
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for index, id := range ids {
+			args[index] = id
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE proxies SET id = id WHERE id IN (`+placeholders+`)`, args...); err != nil {
+			return err
+		}
+	}
+	return lockRuntimeProxyBindingsForMutationTx(ctx, tx, proxyIDs)
+}
+
+func persistProxyTestResultsTx(tx *databaseTx, items []proxyTestResult) error {
 	for _, item := range items {
 		if item.Error == "proxy not found or disabled" {
 			continue
@@ -1623,13 +1841,13 @@ func (a *app) persistProxyTestResults(items []proxyTestResult) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
-func (a *app) proxyURLForTest(id int64) (*url.URL, error) {
+func proxyURLForTestTx(ctx context.Context, tx *databaseTx, id int64) (*url.URL, error) {
 	var protocol, host, username, password string
 	var port int
-	if err := a.db.QueryRow(`SELECT p.protocol, p.host, p.port, p.username, p.password
+	if err := tx.QueryRowContext(ctx, `SELECT p.protocol, p.host, p.port, p.username, p.password
 		FROM proxies p JOIN proxy_pools pool ON pool.id = p.pool_id
 		WHERE p.id = ? AND p.status != 'disabled' AND p.deleted_at IS NULL AND pool.system_kind = ''
 		AND `+proxyNotQuarantinedPredicate("p"), id).Scan(&protocol, &host, &port, &username, &password); err != nil {
@@ -1674,6 +1892,7 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 			AND `+proxyNotQuarantinedPredicate("p")+`
 			AND (pool.single_use_enabled = 0 OR `+proxyIdentityUnusedPredicate("p")+`)
+			AND `+proxyHasNoActiveRuntimeReservationPredicate("p")+`
 			AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)`, *selected, *poolID).Scan(&available)
 		if err != nil {
 			return nil, "", err
@@ -1692,6 +1911,7 @@ func (a *app) selectProxyForNewAccount(poolID, requestedProxyID *int64, auto boo
 			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 			AND `+proxyNotQuarantinedPredicate("p")+`
 			AND (pool.single_use_enabled = 0 OR `+proxyIdentityUnusedPredicate("p")+`)
+			AND `+proxyHasNoActiveRuntimeReservationPredicate("p")+`
 			AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.deleted_at IS NULL)
 			ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID).Scan(&id)
 		if err != nil {
@@ -1925,7 +2145,7 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 			WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 			AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 			AND `+proxyNotQuarantinedPredicate("p")+`
-			AND `+proxyAvailableToAccountPredicate("p", "pool"), *requestedProxyID, *poolID, accountID).Scan(&exists); err != nil || exists == 0 {
+			AND `+proxyAvailableToAccountPredicate("p", "pool"), *requestedProxyID, *poolID, accountID, accountID).Scan(&exists); err != nil || exists == 0 {
 			return nil, errors.New("selected proxy is unavailable")
 		}
 		var exclusiveOwner int
@@ -1934,6 +2154,12 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 		}
 		if exclusiveOwner > 0 {
 			return nil, errors.New("selected proxy is already assigned to another account")
+		}
+		if err := validateRuntimeProxyBindingForGrantTx(context.Background(), tx, accountID, *requestedProxyID); err != nil {
+			if errors.Is(err, errRuntimeProxyReservationActive) {
+				return nil, errors.New("selected proxy is reserved by another runtime account")
+			}
+			return nil, err
 		}
 		return requestedProxyID, nil
 	}
@@ -1946,9 +2172,15 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 				WHERE p.id = ? AND p.pool_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
 				AND pool.status = 'active' AND pool.deleted_at IS NULL AND pool.system_kind = ''
 				AND `+proxyNotQuarantinedPredicate("p")+`
-				AND `+proxyAvailableToAccountPredicate("p", "pool"), *requestedProxyID, *poolID, accountID).Scan(&valid)
+				AND `+proxyAvailableToAccountPredicate("p", "pool"), *requestedProxyID, *poolID, accountID, accountID).Scan(&valid)
 			if valid > 0 {
-				return requestedProxyID, nil
+				if err := validateRuntimeProxyBindingForGrantTx(context.Background(), tx, accountID, *requestedProxyID); err != nil {
+					if !errors.Is(err, errRuntimeProxyReservationActive) {
+						return nil, err
+					}
+				} else {
+					return requestedProxyID, nil
+				}
 			}
 		}
 	}
@@ -1959,9 +2191,15 @@ func assignAccountProxy(tx *databaseTx, accountID int64, poolID, requestedProxyI
 		AND `+proxyNotQuarantinedPredicate("p")+`
 		AND `+proxyAvailableToAccountPredicate("p", "pool")+`
 		AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.proxy_id = p.id AND a.id != ? AND a.deleted_at IS NULL)
-		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID, accountID, accountID).Scan(&id)
+		ORDER BY CASE WHEN p.last_test_at IS NULL THEN 1 ELSE 0 END, p.latency_ms, p.id LIMIT 1`, *poolID, accountID, accountID, accountID).Scan(&id)
 	if err != nil {
 		return nil, errors.New("no unassigned active proxy is available in this pool")
+	}
+	if err := validateRuntimeProxyBindingForGrantTx(context.Background(), tx, accountID, id); err != nil {
+		if errors.Is(err, errRuntimeProxyReservationActive) {
+			return nil, errors.New("no unassigned active proxy is available in this pool")
+		}
+		return nil, err
 	}
 	return &id, nil
 }

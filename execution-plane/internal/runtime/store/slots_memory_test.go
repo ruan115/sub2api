@@ -94,7 +94,7 @@ func TestAssignmentObservationAndReleaseAreEpochFenced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if assignment.ExecutionEpoch != 1 || assignment.ActualGeneration != 1 {
+	if assignment.ExecutionEpoch != 1 || assignment.DesiredGeneration != 1 || assignment.ActualGeneration != 1 {
 		t.Fatalf("initial assignment = %+v", assignment)
 	}
 	if _, err := repository.ObserveAssignment(context.Background(), AssignmentObservation{
@@ -145,7 +145,7 @@ func TestAssignmentObservationAndReleaseAreEpochFenced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.ExecutionEpoch != 2 {
+	if second.ExecutionEpoch != 2 || second.DesiredGeneration != 1 {
 		t.Fatalf("replacement epoch = %d", second.ExecutionEpoch)
 	}
 }

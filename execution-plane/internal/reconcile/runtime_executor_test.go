@@ -71,8 +71,9 @@ func TestRuntimeReconcilePlacesAtomicallyThenDispatchesCreate(t *testing.T) {
 	}
 	input.Assignment = &Assignment{
 		ID: assignment.ID, SlotID: assignment.SlotID, NodeID: assignment.NodeID,
-		ExecutionEpoch: assignment.ExecutionEpoch, ActualGeneration: assignment.ActualGeneration,
-		ImageDigest: assignment.ImageDigest, ActualState: ActualMissing,
+		ExecutionEpoch: assignment.ExecutionEpoch, DesiredGeneration: assignment.DesiredGeneration,
+		ActualGeneration: assignment.ActualGeneration,
+		ImageDigest:      assignment.ImageDigest, ActualState: ActualMissing,
 	}
 	created, err := controller.Reconcile(context.Background(), input)
 	if err != nil {

@@ -200,6 +200,107 @@ type OnboardingResult struct {
 	RateLimitTier    string
 }
 
+// CredentialProjection contains only identity and plan metadata that may cross
+// back to the CCMAX control plane. It never contains tokens, API keys, cookies
+// or source onboarding material.
+type CredentialProjection struct {
+	AuthType          string
+	ExpiresAt         time.Time
+	EmailAddress      string
+	OrganizationID    string
+	UpstreamAccountID string
+	Scope             string
+	SubscriptionType  string
+	RateLimitTier     string
+}
+
+func (p CredentialProjection) String() string {
+	return fmt.Sprintf("CredentialProjection{AuthType:%q ExpiresAt:%s EmailAddress:%q OrganizationID:%q UpstreamAccountID:%q Scope:%q SubscriptionType:%q RateLimitTier:%q}",
+		p.AuthType, p.ExpiresAt.UTC().Format(time.RFC3339Nano), p.EmailAddress, p.OrganizationID,
+		p.UpstreamAccountID, p.Scope, p.SubscriptionType, p.RateLimitTier)
+}
+
+func (p CredentialProjection) GoString() string { return p.String() }
+
+func (p CredentialProjection) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		AuthType          string    `json:"auth_type"`
+		ExpiresAt         time.Time `json:"expires_at,omitempty"`
+		EmailAddress      string    `json:"email_address,omitempty"`
+		OrganizationID    string    `json:"organization_id,omitempty"`
+		UpstreamAccountID string    `json:"upstream_account_id,omitempty"`
+		Scope             string    `json:"scope,omitempty"`
+		SubscriptionType  string    `json:"subscription_type,omitempty"`
+		RateLimitTier     string    `json:"rate_limit_tier,omitempty"`
+	}{p.AuthType, p.ExpiresAt, p.EmailAddress, p.OrganizationID, p.UpstreamAccountID, p.Scope, p.SubscriptionType, p.RateLimitTier})
+}
+
+// ProjectCredential parses the exact normalized credential accepted by the
+// oauth_api worker and returns only bounded non-secret fields. Unknown fields,
+// mixed auth material and malformed metadata fail closed.
+func ProjectCredential(authType string, payload []byte) (CredentialProjection, error) {
+	if len(payload) == 0 || len(payload) > maxOnboardingMaterial {
+		return CredentialProjection{}, ErrActivationRejected
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var normalized normalizedCredential
+	if err := decoder.Decode(&normalized); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return CredentialProjection{}, ErrActivationRejected
+	}
+	switch authType {
+	case AuthTypeOAuth, AuthTypeSetupToken:
+		if strings.TrimSpace(normalized.AccessToken) == "" || normalized.APIKey != "" || strings.ContainsAny(normalized.AccessToken, "\x00\r\n") {
+			return CredentialProjection{}, ErrActivationRejected
+		}
+	case AuthTypeAPIKey:
+		if strings.TrimSpace(normalized.APIKey) == "" || normalized.AccessToken != "" || normalized.RefreshToken != "" || strings.ContainsAny(normalized.APIKey, "\x00\r\n") {
+			return CredentialProjection{}, ErrActivationRejected
+		}
+	default:
+		return CredentialProjection{}, ErrActivationRejected
+	}
+	email := strings.ToLower(strings.TrimSpace(normalized.EmailAddress))
+	if email != "" && (!safeProjectionValue(email, 320) || strings.Count(email, "@") != 1 || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@")) {
+		return CredentialProjection{}, ErrActivationRejected
+	}
+	for _, value := range []struct {
+		text string
+		max  int
+	}{
+		{normalized.OrgUUID, 128}, {normalized.AccountUUID, 128}, {normalized.Scope, 1024},
+		{normalized.SubscriptionType, 128}, {normalized.RateLimitTier, 128},
+	} {
+		if value.text != "" && !safeProjectionValue(value.text, value.max) {
+			return CredentialProjection{}, ErrActivationRejected
+		}
+	}
+	projection := CredentialProjection{
+		AuthType: authType, EmailAddress: email, OrganizationID: strings.TrimSpace(normalized.OrgUUID),
+		UpstreamAccountID: strings.TrimSpace(normalized.AccountUUID), Scope: strings.TrimSpace(normalized.Scope),
+		SubscriptionType: strings.TrimSpace(normalized.SubscriptionType), RateLimitTier: strings.TrimSpace(normalized.RateLimitTier),
+	}
+	if normalized.ExpiresAt > 0 {
+		projection.ExpiresAt = time.Unix(normalized.ExpiresAt, 0).UTC()
+		if projection.ExpiresAt.Year() < 2020 || projection.ExpiresAt.Year() > 2200 {
+			return CredentialProjection{}, ErrActivationRejected
+		}
+	}
+	return projection, nil
+}
+
+func safeProjectionValue(value string, maxBytes int) bool {
+	if value == "" || len(value) > maxBytes || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func (r OnboardingResult) String() string {
 	return fmt.Sprintf("OnboardingResult{AuthType:%q ExpiresAt:%s EmailAddress:%q OrganizationID:%q AccountID:%q Scope:%q SubscriptionType:%q RateLimitTier:%q CredentialJSON:[REDACTED]}",
 		r.AuthType, r.ExpiresAt.UTC().Format(time.RFC3339Nano), r.EmailAddress, r.OrganizationID,

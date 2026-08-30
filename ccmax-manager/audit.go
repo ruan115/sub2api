@@ -117,6 +117,12 @@ func redactAuditValue(value any) any {
 
 func sensitiveAuditKey(key string) bool {
 	key = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
+	// OAuth PKCE verifier material enters the account API through this
+	// deliberately generic field name. Treat it as credential material even
+	// though the name itself does not contain token/secret/code.
+	if key == "onboardingauxiliary" {
+		return true
+	}
 	for _, fragment := range []string{"password", "secret", "token", "apikey", "apiheaders", "apiurl", "sessionkey", "cookie", "credential", "authorization", "proxytext", "code"} {
 		if strings.Contains(key, fragment) {
 			return true
@@ -203,6 +209,9 @@ func auditAction(r *http.Request) (string, string, string) {
 	}
 	if strings.HasSuffix(path, "/oauth-exchange") || strings.HasSuffix(path, "/session-auth") {
 		action = "account.reauthorize"
+	}
+	if strings.HasSuffix(path, "/runtime-onboarding/resume") {
+		action = "account.runtime_onboarding_resume"
 	}
 	if path == "auth/logout" {
 		action, targetType = "auth.logout", "session"

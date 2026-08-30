@@ -83,6 +83,113 @@ func TestCommitCredentialVersionRollsBackBeforeActiveSwitchOnInsertFailure(t *te
 	}
 }
 
+func TestCommitCredentialVersionForOperationBindsVersionInSameTransaction(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repository, _ := NewRepository(db)
+	now := time.Unix(2_000_000_000, 0).UTC()
+	version := testCredentialVersion(t, now)
+	operationID := "credential-lease-10380"
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`(?s)INSERT INTO credential_vault.*ON DUPLICATE KEY UPDATE`).
+		WithArgs(version.AccountID, version.AuthType, now, now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`(?s)SELECT active_version_id, auth_type FROM credential_vault.*FOR UPDATE`).
+		WithArgs(version.AccountID).
+		WillReturnRows(sqlmock.NewRows([]string{"active_version_id", "auth_type"}).AddRow(nil, version.AuthType))
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version_number\), 0\) FROM credential_versions`).
+		WithArgs(version.AccountID).
+		WillReturnRows(sqlmock.NewRows([]string{"version_number"}).AddRow(0))
+	mock.ExpectExec(`(?s)INSERT INTO credential_versions`).
+		WithArgs(
+			version.ID, version.AccountID, version.VersionNumber, version.Envelope.Ciphertext,
+			version.Envelope.EncryptedDEK, version.Envelope.Nonce, version.Envelope.AADJSON,
+			version.Envelope.KMSKeyID, version.Envelope.KMSKeyVersion, version.Hint, now,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`(?s)INSERT INTO credential_version_operations`).
+		WithArgs(operationID, version.ID, version.AccountID, version.AuthType, now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`(?s)UPDATE credential_vault SET active_version_id`).
+		WithArgs(version.ID, version.AuthType, now, version.AccountID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`(?s)UPDATE credential_leases SET revoked_at`).
+		WithArgs(now, version.AccountID, version.ID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	if err := repository.CommitCredentialVersionForOperation(context.Background(), operationID, version); err != nil {
+		t.Fatalf("commit credential operation: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommitCredentialVersionForOperationRollsBackWhenBindingFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repository, _ := NewRepository(db)
+	now := time.Unix(2_000_000_000, 0).UTC()
+	version := testCredentialVersion(t, now)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`(?s)INSERT INTO credential_vault`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`(?s)SELECT active_version_id, auth_type FROM credential_vault.*FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"active_version_id", "auth_type"}).AddRow(nil, version.AuthType))
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version_number\), 0\) FROM credential_versions`).
+		WillReturnRows(sqlmock.NewRows([]string{"version_number"}).AddRow(0))
+	mock.ExpectExec(`(?s)INSERT INTO credential_versions`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`(?s)INSERT INTO credential_version_operations`).WillReturnError(errors.New("operation identity already bound"))
+	mock.ExpectRollback()
+
+	if err := repository.CommitCredentialVersionForOperation(context.Background(), "credential-lease-10380", version); err == nil {
+		t.Fatal("operation mapping failure was accepted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetCredentialVersionByOperationReturnsBoundVersion(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repository, _ := NewRepository(db)
+	now := time.Unix(2_000_000_000, 0).UTC()
+	version := testCredentialVersion(t, now)
+	operationID := "credential-lease-10380"
+	columns := []string{
+		"version_id", "account_id", "version_number", "auth_type", "ciphertext", "encrypted_dek",
+		"nonce", "aad_json", "kms_key_id", "kms_key_version", "credential_hint", "created_at",
+	}
+	mock.ExpectQuery(`(?s)FROM credential_version_operations cvo.*WHERE cvo.operation_id = \?`).
+		WithArgs(operationID).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(
+			version.ID, version.AccountID, version.VersionNumber, version.AuthType,
+			version.Envelope.Ciphertext, version.Envelope.EncryptedDEK, version.Envelope.Nonce,
+			version.Envelope.AADJSON, version.Envelope.KMSKeyID, version.Envelope.KMSKeyVersion,
+			version.Hint, version.CreatedAt,
+		))
+
+	got, err := repository.GetCredentialVersionByOperation(context.Background(), operationID)
+	if err != nil || got.ID != version.ID || got.AuthType != version.AuthType {
+		t.Fatalf("get credential operation = %+v, err=%v", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIssueCredentialLeaseStoresOnlyDigestAndCurrentBinding(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

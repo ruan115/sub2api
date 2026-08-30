@@ -5,7 +5,7 @@
 - [x] 0.3 固定源 commit、首台节点只读清单和 CCMAX Go 测试基线
 - [x] 0.4 串行安装前端冻结依赖并完成 typecheck/Vitest 基线
 - [x] 0.5 创建 proposal/design/specs/tasks/verification
-- [ ] 0.6 在实现偏离时先更新 OpenSpec 再改代码
+- [x] 0.6 在实现偏离时先更新 OpenSpec 再改代码
 
 ## 1. 工程骨架与协议
 
@@ -47,7 +47,23 @@
 - [x] 5.2 实现 credential vault/version/one-time lease/rotation
 - [x] 5.3 实现 host-agent HTTP CONNECT egress 与 HTTP/HTTPS/SOCKS5 转换
 - [x] 5.4 实现 worker 网络不可绕过测试
+- [x] 5.4a 实现短期 KMS onboarding intent、owner claim/重放、generation 绑定和 opaque outbox 引用
+- [x] 5.4b 实现 durable onboarding workflow、NodeControl 双命令 observer 和可重启 polling controller
+- [x] 5.4c 实现 CCMAX service mTLS intake、opaque receipt bridge 和显式单账号 execution onboarding
+- [x] 5.4d 组合 orchestrator credential trust boundary、TLS 1.3 双 RPC 注册和有界 durable workflow runner
+- [x] 5.4e 实现生产配置校验、受保护 PKI 加载和 KMS 信封封装的固定 rotation recipient 恢复
+- [x] 5.4f 实现 worker 凭证安全结果投影、持久化 fencing 和 CCMAX mTLS 完成结果查询
+- [x] 5.4g 实现 credential lease → version 原子幂等映射并接入 worker commit
+- [x] 5.4h 实现 durable rotation 摘要授权、opaque proxy lease 权威校验和组合根自动接线
+- [x] 5.4i 接通 opt-in production orchestrator MySQL/KMS/PKI/RPC bootstrap 与只读 schema gate
 - [ ] 5.5 迁移 Session Key/OAuth/Setup Token/API Key/Cookie 上号到 worker
+- [x] 5.5a 实现 completed worker result 的 slot/epoch 回传与 CCMAX generation-fenced 原子 ready 投影
+- [x] 5.5b 实现单账号 Session Key/OAuth code/Setup Token/API Key/Cookie/credential import 的统一 worker intake
+- [x] 5.5b1 实现 durable receipt recovery、非秘密创建 fingerprint 与按账号 canonical resume
+- [x] 5.5c1 实现 CCMAX trusted proxy reservation grant/revoke、execution-plane 无秘密投影与 assignment-generation fenced proxy lease
+- [x] 5.5c2 固化 runtime proxy 的不可变/占用权威、换代 revoke→grant 顺序，并令旧 lifecycle 写入口 fail closed
+- [x] 5.5c3 实现 healthy slot + live execution/proxy authority → workflow/proxy lease 的单事务幂等启动边界
+- [ ] 5.5c 实现 healthy slot → workflow/proxy lease 启动协调器与重复身份 drain/归档批处理
 - [ ] 5.6 实现 Token 刷新和原子 credential version 切换
 - [ ] 5.7 实现 canary/批量单向明文凭证迁移与校验报告
 
@@ -86,7 +102,7 @@
 - [ ] 9.1 实现强制敏感字段剔除、正文脱敏和 2 MiB 上限
 - [ ] 9.2 实现 COS 压缩/信封加密、默认 3 天 lifecycle 和清理任务
 - [ ] 9.3 实现正文独立 RBAC、查看/搜索/下载审计和默认禁用导出
-- [ ] 9.4 实现中文节点、槽位、账号 runtime、镜像、队列和审计 UI
+- [ ] 9.4 以 React + TypeScript + Vite + shadcn/ui 实现中文节点、槽位、账号 runtime、镜像、队列和审计 UI（纯白/暗黑双主题，Go embed）
 - [ ] 9.5 实现批量 drain/recreate/migrate/archive/delete/restore/purge
 - [ ] 9.6 完成 Prometheus/OTLP 与 Webhook 告警
 

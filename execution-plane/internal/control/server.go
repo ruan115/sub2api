@@ -16,8 +16,11 @@ import (
 	"time"
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/pki"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -29,7 +32,10 @@ import (
 
 const (
 	CurrentProtocolMajor uint32 = 1
-	CurrentProtocolMinor uint32 = 0
+	CurrentProtocolMinor uint32 = 1
+
+	secureActivationCapability = "secure_activation"
+	maxCredentialBundleBytes   = 2 << 20
 )
 
 var (
@@ -47,7 +53,16 @@ type Config struct {
 	HeartbeatTimeout  time.Duration
 	CommandRetryDelay time.Duration
 	OutboundQueue     int
+	CredentialSink    worker.SealedCredentialSink
+	CommandObserver   CommandObserver
 	Now               func() time.Time
+}
+
+// CommandObserver is the durable, idempotent handoff from NodeControl into the
+// provisioning workflow. Implementations must tolerate the same command result
+// more than once after a stream reconnect or repository retry.
+type CommandObserver interface {
+	ObserveCommandResult(ctx context.Context, nodeID string, result *executionv1.CommandResult) error
 }
 
 func DefaultConfig() Config {
@@ -77,6 +92,8 @@ type Server struct {
 type nodeSession struct {
 	id                 string
 	capacity           store.Capacity
+	protocolMinor      uint32
+	capabilities       map[string]struct{}
 	outbound           chan *executionv1.NodeControlServiceControlResponse
 	done               chan struct{}
 	commandMu          sync.Mutex
@@ -85,9 +102,25 @@ type nodeSession struct {
 }
 
 type pendingCommand struct {
-	slotID         string
-	executionEpoch uint64
+	kind              pendingCommandKind
+	slotID            string
+	executionEpoch    uint64
+	accountBinding    string
+	credentialLeaseID string
+	proxyLeaseID      string
+	imageDigest       string
+	deadline          time.Time
+	commitStarted     bool
 }
+
+type pendingCommandKind uint8
+
+const (
+	pendingSlotCommand pendingCommandKind = iota + 1
+	pendingEpochRevocation
+	pendingCredentialKey
+	pendingSecureActivation
+)
 
 func NewServer(repository store.NodeRepository, authority *pki.Authority, config Config) (*Server, error) {
 	if repository == nil || authority == nil {
@@ -235,7 +268,8 @@ func (s *Server) Control(stream executionv1.NodeControlService_ControlServer) er
 		return status.Error(codes.Internal, "create node session")
 	}
 	session := &nodeSession{
-		id: sessionID, capacity: capacity,
+		id: sessionID, capacity: capacity, protocolMinor: hello.GetProtocolVersion().GetMinor(),
+		capabilities:       capabilitySet(hello.GetCapabilities()),
 		outbound:           make(chan *executionv1.NodeControlServiceControlResponse, s.config.OutboundQueue),
 		done:               make(chan struct{}),
 		pendingCommands:    make(map[string]pendingCommand),
@@ -306,6 +340,10 @@ func (s *Server) Control(stream executionv1.NodeControlService_ControlServer) er
 				if err := s.recordCommandResult(stream.Context(), identity.nodeID, session, commandResult); err != nil {
 					return err
 				}
+			} else if credentialCommit := result.request.GetCredentialCommit(); credentialCommit != nil {
+				if err := s.recordCredentialCommit(stream.Context(), session, credentialCommit); err != nil {
+					return err
+				}
 			} else {
 				return status.Error(codes.InvalidArgument, "control event is required")
 			}
@@ -328,12 +366,34 @@ func (s *Server) Dispatch(ctx context.Context, nodeID string, response *executio
 	if err := validateControlResponse(cloned); err != nil {
 		return err
 	}
+	if deadline := controlDeadline(cloned); !deadline.IsZero() && !deadline.After(s.config.Now().UTC()) {
+		return errors.New("control command deadline has expired")
+	}
 	commandID := controlCommandID(cloned)
 	s.mu.RLock()
 	session := s.sessions[nodeID]
 	s.mu.RUnlock()
 	if session == nil {
 		return store.ErrNodeNotFound
+	}
+	if cloned.GetCredentialKeyCommand() != nil {
+		if s.config.CommandObserver == nil {
+			return errors.New("credential-key command observer is not configured")
+		}
+		if !session.supportsSecureActivation() {
+			return errors.New("node does not support secure activation control commands")
+		}
+	}
+	if cloned.GetSecureActivationCommand() != nil {
+		if s.config.CredentialSink == nil {
+			return errors.New("secure activation credential sink is not configured")
+		}
+		if s.config.CommandObserver == nil {
+			return errors.New("secure activation command observer is not configured")
+		}
+		if !session.supportsSecureActivation() {
+			return errors.New("node does not support secure activation control commands")
+		}
 	}
 	if !session.reserveCommand(commandID, pendingFromResponse(cloned)) {
 		return errors.New("control command is duplicate or node command capacity is full")
@@ -466,7 +526,7 @@ func (s *Server) recordHeartbeat(ctx context.Context, nodeID, sessionID string, 
 }
 
 func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session *nodeSession, result *executionv1.CommandResult) error {
-	if result.GetCommandId() == "" || len(result.GetCommandId()) > 128 || len(result.GetErrorCode()) > 64 {
+	if result.GetCommandId() == "" || len(result.GetCommandId()) > 128 || len(result.GetErrorCode()) > 64 || containsSensitiveWord(result.GetErrorCode()) {
 		return status.Error(codes.InvalidArgument, "command result identity is invalid")
 	}
 	pending, issued := session.command(result.GetCommandId())
@@ -478,6 +538,29 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	}
 	if err := validateSlotObservation(result.GetSlot()); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if pending.kind == pendingCredentialKey {
+		if result.GetSlot().GetImageDigest() != pending.imageDigest {
+			return status.Error(codes.InvalidArgument, "credential-key result image does not match its issued command")
+		}
+		if result.GetSucceeded() {
+			transportKey := result.GetCredentialTransportKey()
+			if transportKey == nil || credential.ValidateRecipientKey(transportKey.GetKeyId(), transportKey.GetPublicKey()) != nil {
+				return status.Error(codes.InvalidArgument, "credential transport key result is invalid")
+			}
+		} else if result.GetCredentialTransportKey() != nil {
+			return status.Error(codes.InvalidArgument, "failed credential-key result must not contain a transport key")
+		}
+	} else if pending.kind == pendingSecureActivation && result.GetSlot().GetImageDigest() != pending.imageDigest {
+		return status.Error(codes.InvalidArgument, "secure activation result image does not match its issued command")
+	} else if result.GetCredentialTransportKey() != nil {
+		return status.Error(codes.InvalidArgument, "command result contains an unexpected credential transport key")
+	}
+	if pending.kind == pendingCredentialKey || pending.kind == pendingSecureActivation {
+		observed, ok := proto.Clone(result).(*executionv1.CommandResult)
+		if !ok || s.config.CommandObserver == nil || s.config.CommandObserver.ObserveCommandResult(ctx, nodeID, observed) != nil {
+			return status.Error(codes.Internal, "observe secure onboarding command result failed")
+		}
 	}
 	observation, err := protojson.Marshal(result.GetSlot())
 	if err != nil {
@@ -505,6 +588,50 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	return nil
 }
 
+func (s *Server) recordCredentialCommit(ctx context.Context, session *nodeSession, commit *executionv1.ControlCredentialCommit) error {
+	if s.config.CredentialSink == nil {
+		return status.Error(codes.FailedPrecondition, "secure activation credential sink is unavailable")
+	}
+	pending, err := session.beginCredentialCommit(commit)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, "credential commit does not match its secure activation command")
+	}
+	commandID := commit.GetCommandId()
+	sealed := append([]byte(nil), commit.GetSealedCredentialBundle()...)
+	zeroControlBytes(commit.SealedCredentialBundle)
+	commit.SealedCredentialBundle = nil
+	go func() {
+		defer zeroControlBytes(sealed)
+		commitContext := ctx
+		cancel := func() {}
+		if !pending.deadline.IsZero() {
+			commitContext, cancel = context.WithDeadline(ctx, pending.deadline)
+		}
+		defer cancel()
+		versionID, commitErr := s.config.CredentialSink.CommitSealedCredential(commitContext, worker.SealedCredentialCommitRequest{
+			AccountBinding: pending.accountBinding, SlotID: pending.slotID, ExecutionEpoch: pending.executionEpoch,
+			CredentialLeaseID: pending.credentialLeaseID, ProxyLeaseID: pending.proxyLeaseID,
+			SealedCredentialBundle: sealed,
+		})
+		ack := &executionv1.ControlCredentialCommitAck{CommandId: commandID}
+		if commitErr == nil && credential.ValidateTransportID(versionID) == nil {
+			ack.Accepted = true
+			ack.VersionId = versionID
+		} else {
+			ack.ErrorCode = "commit_rejected"
+		}
+		response := &executionv1.NodeControlServiceControlResponse{
+			Event: &executionv1.NodeControlServiceControlResponse_CredentialCommitAck{CredentialCommitAck: ack},
+		}
+		select {
+		case session.outbound <- response:
+		case <-session.done:
+		case <-ctx.Done():
+		}
+	}()
+	return nil
+}
+
 func (s *nodeSession) reserveCommand(commandID string, command pendingCommand) bool {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
@@ -529,6 +656,35 @@ func (s *nodeSession) releaseCommand(commandID string) {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 	delete(s.pendingCommands, commandID)
+}
+
+func (s *nodeSession) beginCredentialCommit(commit *executionv1.ControlCredentialCommit) (pendingCommand, error) {
+	if commit == nil || credential.ValidateTransportID(commit.GetCommandId()) != nil ||
+		credential.ValidateTransportID(commit.GetAccountBinding()) != nil || credential.ValidateTransportID(commit.GetSlotId()) != nil ||
+		commit.GetExecutionEpoch() == 0 || credential.ValidateTransportID(commit.GetCredentialLeaseId()) != nil ||
+		credential.ValidateTransportID(commit.GetProxyLeaseId()) != nil || len(commit.GetSealedCredentialBundle()) == 0 ||
+		len(commit.GetSealedCredentialBundle()) > maxCredentialBundleBytes {
+		return pendingCommand{}, errors.New("credential commit is invalid")
+	}
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	pending, exists := s.pendingCommands[commit.GetCommandId()]
+	if !exists || pending.kind != pendingSecureActivation || pending.commitStarted || pending.slotID != commit.GetSlotId() ||
+		pending.executionEpoch != commit.GetExecutionEpoch() || pending.accountBinding != commit.GetAccountBinding() ||
+		pending.credentialLeaseID != commit.GetCredentialLeaseId() || pending.proxyLeaseID != commit.GetProxyLeaseId() {
+		return pendingCommand{}, errors.New("credential commit binding is invalid")
+	}
+	pending.commitStarted = true
+	s.pendingCommands[commit.GetCommandId()] = pending
+	return pending, nil
+}
+
+func (s *nodeSession) supportsSecureActivation() bool {
+	if s == nil || s.protocolMinor < 1 {
+		return false
+	}
+	_, supported := s.capabilities[secureActivationCapability]
+	return supported
 }
 
 func validateProtocol(version *executionv1.ProtocolVersion) error {
@@ -625,7 +781,34 @@ func validateControlResponse(response *executionv1.NodeControlServiceControlResp
 		}
 		return nil
 	}
+	if command := response.GetCredentialKeyCommand(); command != nil {
+		if err := validateSecureCommandBinding(
+			command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(), command.GetDeadline(),
+		); err != nil {
+			return errors.New("credential-key command is invalid")
+		}
+		return nil
+	}
+	if command := response.GetSecureActivationCommand(); command != nil {
+		if err := validateSecureCommandBinding(
+			command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(), command.GetDeadline(),
+		); err != nil || credential.ValidateTransportID(command.GetCredentialLeaseId()) != nil ||
+			credential.ValidateTransportID(command.GetProxyLeaseId()) != nil || len(command.GetEncryptedCredentialBundle()) == 0 ||
+			len(command.GetEncryptedCredentialBundle()) > maxCredentialBundleBytes {
+			return errors.New("secure activation command is invalid")
+		}
+		return nil
+	}
 	return errors.New("control response event is required")
+}
+
+func validateSecureCommandBinding(commandID, slotID, accountID string, epoch uint64, imageDigest string, deadline *timestamppb.Timestamp) error {
+	if credential.ValidateTransportID(commandID) != nil || credential.ValidateTransportID(slotID) != nil ||
+		credential.ValidateTransportID(accountID) != nil || epoch == 0 || !imageDigestPattern.MatchString(imageDigest) ||
+		deadline == nil || deadline.CheckValid() != nil {
+		return errors.New("secure control command binding is invalid")
+	}
+	return nil
 }
 
 func controlCommandID(response *executionv1.NodeControlServiceControlResponse) string {
@@ -635,17 +818,49 @@ func controlCommandID(response *executionv1.NodeControlServiceControlResponse) s
 	if revoke := response.GetRevokeEpoch(); revoke != nil {
 		return revoke.GetCommandId()
 	}
+	if command := response.GetCredentialKeyCommand(); command != nil {
+		return command.GetCommandId()
+	}
+	if command := response.GetSecureActivationCommand(); command != nil {
+		return command.GetCommandId()
+	}
 	return ""
 }
 
 func pendingFromResponse(response *executionv1.NodeControlServiceControlResponse) pendingCommand {
 	if command := response.GetSlotCommand(); command != nil {
-		return pendingCommand{slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch()}
+		return pendingCommand{kind: pendingSlotCommand, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch()}
 	}
 	if revoke := response.GetRevokeEpoch(); revoke != nil {
-		return pendingCommand{slotID: revoke.GetSlotId(), executionEpoch: revoke.GetExecutionEpoch()}
+		return pendingCommand{kind: pendingEpochRevocation, slotID: revoke.GetSlotId(), executionEpoch: revoke.GetExecutionEpoch()}
+	}
+	if command := response.GetCredentialKeyCommand(); command != nil {
+		return pendingCommand{
+			kind: pendingCredentialKey, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch(), imageDigest: command.GetImageDigest(),
+			deadline: command.GetDeadline().AsTime(),
+		}
+	}
+	if command := response.GetSecureActivationCommand(); command != nil {
+		return pendingCommand{
+			kind: pendingSecureActivation, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch(),
+			accountBinding: provider.RuntimeAccountID(command.GetAccountId()), credentialLeaseID: command.GetCredentialLeaseId(),
+			proxyLeaseID: command.GetProxyLeaseId(), imageDigest: command.GetImageDigest(), deadline: command.GetDeadline().AsTime(),
+		}
 	}
 	return pendingCommand{}
+}
+
+func controlDeadline(response *executionv1.NodeControlServiceControlResponse) time.Time {
+	if command := response.GetSlotCommand(); command != nil && command.GetDeadline() != nil {
+		return command.GetDeadline().AsTime()
+	}
+	if command := response.GetCredentialKeyCommand(); command != nil && command.GetDeadline() != nil {
+		return command.GetDeadline().AsTime()
+	}
+	if command := response.GetSecureActivationCommand(); command != nil && command.GetDeadline() != nil {
+		return command.GetDeadline().AsTime()
+	}
+	return time.Time{}
 }
 
 func certificateRecord(nodeID string, issued pki.IssuedCertificate, createdAt time.Time) store.Certificate {
@@ -730,4 +945,18 @@ func cloneLabels(labels map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func capabilitySet(capabilities []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		result[capability] = struct{}{}
+	}
+	return result
+}
+
+func zeroControlBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }

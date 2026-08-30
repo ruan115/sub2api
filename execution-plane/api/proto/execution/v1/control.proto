@@ -90,6 +90,12 @@ message CommandResult {
   string error_code = 3;
   string error_message = 4;
   SlotObservation slot = 5;
+  CredentialTransportKeyOutput credential_transport_key = 6;
+}
+
+message CredentialTransportKeyOutput {
+  string key_id = 1;
+  bytes public_key = 2;
 }
 
 message NodeControlServiceControlRequest {
@@ -97,6 +103,7 @@ message NodeControlServiceControlRequest {
     NodeHello hello = 1;
     NodeHeartbeat heartbeat = 2;
     CommandResult command_result = 3;
+    ControlCredentialCommit credential_commit = 4;
   }
 }
 
@@ -128,9 +135,50 @@ message RevokeEpochCommand {
   string reason = 4;
 }
 
+message CredentialKeyCommand {
+  string command_id = 1;
+  string slot_id = 2;
+  string account_id = 3;
+  uint64 execution_epoch = 4;
+  string image_digest = 5;
+  google.protobuf.Timestamp deadline = 6;
+}
+
+message SecureActivationCommand {
+  string command_id = 1;
+  string slot_id = 2;
+  string account_id = 3;
+  uint64 execution_epoch = 4;
+  string image_digest = 5;
+  string credential_lease_id = 6;
+  string proxy_lease_id = 7;
+  bytes encrypted_credential_bundle = 8;
+  google.protobuf.Timestamp deadline = 9;
+}
+
+message ControlCredentialCommit {
+  string command_id = 1;
+  string account_binding = 2;
+  string slot_id = 3;
+  uint64 execution_epoch = 4;
+  string credential_lease_id = 5;
+  string proxy_lease_id = 6;
+  bytes sealed_credential_bundle = 7;
+}
+
+message ControlCredentialCommitAck {
+  string command_id = 1;
+  bool accepted = 2;
+  string version_id = 3;
+  string error_code = 4;
+}
+
 message NodeControlServiceControlResponse {
   oneof event {
     SlotCommand slot_command = 1;
     RevokeEpochCommand revoke_epoch = 2;
+    CredentialKeyCommand credential_key_command = 3;
+    SecureActivationCommand secure_activation_command = 4;
+    ControlCredentialCommitAck credential_commit_ack = 5;
   }
 }

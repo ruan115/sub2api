@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/onboarding"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 )
@@ -38,13 +40,15 @@ type RotationCommitAuthorizer interface {
 }
 
 type CredentialRotator interface {
-	Rotate(ctx context.Context, accountID, authType, hint string, plaintext []byte) (credential.VersionRecord, error)
+	RotateIdempotent(ctx context.Context, operationID, accountID, authType, hint string, plaintext []byte) (credential.VersionRecord, error)
 }
 
 type CredentialRotationSinkConfig struct {
-	Recipient  *credential.Recipient
-	Authorizer RotationCommitAuthorizer
-	Vault      CredentialRotator
+	Recipient        *credential.Recipient
+	Authorizer       RotationCommitAuthorizer
+	Vault            CredentialRotator
+	ResultRepository onboarding.ResultProjectionRepository
+	Now              func() time.Time
 }
 
 // CredentialRotationSink is the orchestrator-only endpoint of the encrypted
@@ -54,6 +58,8 @@ type CredentialRotationSink struct {
 	recipient  *credential.Recipient
 	authorizer RotationCommitAuthorizer
 	vault      CredentialRotator
+	results    onboarding.ResultProjectionRepository
+	now        func() time.Time
 }
 
 func NewCredentialRotationSink(config CredentialRotationSinkConfig) (*CredentialRotationSink, error) {
@@ -63,7 +69,13 @@ func NewCredentialRotationSink(config CredentialRotationSinkConfig) (*Credential
 	if _, _, err := config.Recipient.PublicKey(); err != nil {
 		return nil, errors.New("credential rotation recipient is unavailable")
 	}
-	return &CredentialRotationSink{recipient: config.Recipient, authorizer: config.Authorizer, vault: config.Vault}, nil
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	return &CredentialRotationSink{
+		recipient: config.Recipient, authorizer: config.Authorizer, vault: config.Vault,
+		results: config.ResultRepository, now: config.Now,
+	}, nil
 }
 
 func (s *CredentialRotationSink) CommitSealedCredential(ctx context.Context, request worker.SealedCredentialCommitRequest) (string, error) {
@@ -107,7 +119,9 @@ func (s *CredentialRotationSink) CommitSealedCredential(ctx context.Context, req
 		if callbackContext == nil || callbackContext.Err() != nil || provider.RuntimeAccountID(accountID) != request.AccountBinding {
 			return "", ErrCredentialRotationRejected
 		}
-		record, err := s.vault.Rotate(callbackContext, accountID, material.AuthType, material.AuthType+":***", material.Plaintext)
+		record, err := s.vault.RotateIdempotent(
+			callbackContext, claim.CredentialLeaseID, accountID, material.AuthType, material.AuthType+":***", material.Plaintext,
+		)
 		if err != nil || credential.ValidateTransportID(record.ID) != nil || record.AccountID != accountID || record.AuthType != material.AuthType {
 			return "", ErrCredentialRotationRejected
 		}
@@ -115,6 +129,26 @@ func (s *CredentialRotationSink) CommitSealedCredential(ctx context.Context, req
 	})
 	if err != nil || credential.ValidateTransportID(versionID) != nil {
 		return "", ErrCredentialRotationRejected
+	}
+	if s.results != nil {
+		projection, err := worker.ProjectCredential(material.AuthType, material.Plaintext)
+		if err != nil {
+			return "", ErrCredentialRotationRejected
+		}
+		_, err = s.results.ProjectProvisioningResult(ctx, onboarding.ResultProjectionCommit{
+			AccountBinding: request.AccountBinding, SlotID: request.SlotID, ExecutionEpoch: request.ExecutionEpoch,
+			CredentialLeaseID: request.CredentialLeaseID, ProxyLeaseID: request.ProxyLeaseID,
+			CredentialVersionID: versionID,
+			Projection: onboarding.ResultProjection{
+				AuthType: projection.AuthType, ExpiresAt: projection.ExpiresAt, EmailAddress: projection.EmailAddress,
+				OrganizationID: projection.OrganizationID, UpstreamAccountID: projection.UpstreamAccountID,
+				Scope: projection.Scope, SubscriptionType: projection.SubscriptionType, RateLimitTier: projection.RateLimitTier,
+			},
+			CommittedAt: s.now().UTC(),
+		})
+		if err != nil {
+			return "", ErrCredentialRotationRejected
+		}
 	}
 	return versionID, nil
 }

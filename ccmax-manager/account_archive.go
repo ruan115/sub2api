@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
@@ -21,8 +23,11 @@ func (a *app) handleAccountArchive(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := a.archiveAccounts([]int64{id})
+	result, err := a.archiveAccounts(r.Context(), []int64{id})
 	if err != nil {
+		if writeRuntimeRoutingOwnerError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
@@ -47,8 +52,11 @@ func (a *app) handleAccountBatchArchive(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
 		return
 	}
-	result, err := a.archiveAccounts(ids)
+	result, err := a.archiveAccounts(r.Context(), ids)
 	if err != nil {
+		if writeRuntimeRoutingOwnerError(w, err) {
+			return
+		}
 		writeDBError(w, err)
 		return
 	}
@@ -64,12 +72,32 @@ func (a *app) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
 	defer tx.Rollback()
+	accountQuery := `SELECT id FROM accounts WHERE id = ? AND deleted_at IS NULL AND archived_at IS NOT NULL`
+	if tx.dialect == dialectMySQL {
+		accountQuery += ` FOR UPDATE`
+	}
+	var lockedAccountID int64
+	if err := tx.QueryRowContext(r.Context(), accountQuery, id).Scan(&lockedAccountID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "archived account not found")
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
+	if err := requireLegacyAccountLifecycleTx(r.Context(), tx, lockedAccountID); err != nil {
+		if writeRuntimeRoutingOwnerError(w, err) {
+			return
+		}
+		writeDBError(w, err)
+		return
+	}
 	// Restoring clears archived_proxy_id, which for accounts archived before the
 	// history table existed is the last record that the address was consumed.
 	// Preserve it first so a single-use address stays burned.
@@ -114,7 +142,7 @@ func (a *app) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "restored": true})
 }
 
-func (a *app) archiveAccounts(ids []int64) (accountArchiveResult, error) {
+func (a *app) archiveAccounts(ctx context.Context, ids []int64) (accountArchiveResult, error) {
 	result := accountArchiveResult{}
 	if len(ids) == 0 {
 		return result, errors.New("no accounts selected")
@@ -124,15 +152,44 @@ func (a *app) archiveAccounts(ids []int64) (accountArchiveResult, error) {
 	for index, id := range ids {
 		args[index] = id
 	}
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return result, err
 	}
 	defer tx.Rollback()
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (`+placeholders+`)`, args...).Scan(&result.Matched); err != nil {
+	deadCondition := accountStatePredicate("accounts", "error")
+	lockQuery := `SELECT id FROM accounts
+		WHERE deleted_at IS NULL AND archived_at IS NULL AND id IN (` + placeholders + `)
+		ORDER BY id`
+	if tx.dialect == dialectMySQL {
+		lockQuery += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, lockQuery, args...)
+	if err != nil {
 		return result, err
 	}
-	deadCondition := accountStatePredicate("accounts", "error")
+	matchedIDs := make([]int64, 0, len(ids))
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil {
+			rows.Close()
+			return result, err
+		}
+		result.Matched++
+		matchedIDs = append(matchedIDs, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, err
+	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
+	for _, accountID := range matchedIDs {
+		if err := requireLegacyAccountLifecycleTx(ctx, tx, accountID); err != nil {
+			return result, err
+		}
+	}
 	if _, err := tx.Exec(`INSERT INTO account_lifecycle_events (account_id, event_type, reason)
 		SELECT id, 'invalidated', COALESCE(NULLIF(auth_error, ''), error_message) FROM accounts
 		WHERE deleted_at IS NULL AND archived_at IS NULL AND onboarded_at IS NOT NULL AND invalidated_at IS NULL
@@ -159,7 +216,7 @@ func (a *app) archiveAccounts(ids []int64) (accountArchiveResult, error) {
 	}
 	result.Skipped = result.Matched - result.Archived
 	archivedAccountSubquery := `SELECT id FROM accounts WHERE archived_at IS NOT NULL AND id IN (` + placeholders + `)`
-	rows, err := tx.Query(`SELECT DISTINCT archived_proxy_id FROM accounts
+	rows, err = tx.Query(`SELECT DISTINCT archived_proxy_id FROM accounts
 		WHERE archived_at IS NOT NULL AND archived_proxy_id IS NOT NULL AND id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return result, err
@@ -192,4 +249,72 @@ func (a *app) archiveAccounts(ids []int64) (accountArchiveResult, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+func (a *app) deleteAccounts(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, errors.New("no accounts selected")
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		if id <= 0 {
+			return 0, errors.New("invalid account id")
+		}
+		args[index] = id
+	}
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	query := `SELECT id FROM accounts WHERE deleted_at IS NULL AND id IN (` + placeholders + `) ORDER BY id`
+	if tx.dialect == dialectMySQL {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	accountIDs := make([]int64, 0, len(ids))
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, accountID := range accountIDs {
+		if err := requireLegacyAccountLifecycleTx(ctx, tx, accountID); err != nil {
+			return 0, err
+		}
+	}
+	if len(accountIDs) == 0 {
+		return 0, nil
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE accounts SET status = 'disabled', schedulable = 0,
+		deleted_at = `+nowSQL+`, updated_at = `+nowSQL+`
+		WHERE deleted_at IS NULL AND id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if deleted != int64(len(accountIDs)) {
+		return 0, errRuntimeMigration
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
