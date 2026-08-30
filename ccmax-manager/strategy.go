@@ -251,8 +251,40 @@ func (a *app) listDispatchStrategies() ([]dispatchStrategy, error) {
 	return strategies, rows.Err()
 }
 
-func (a *app) handleStrategies(w http.ResponseWriter, _ *http.Request) {
+func (a *app) scopeDispatchStrategies(user panelUser, strategies []dispatchStrategy) ([]dispatchStrategy, error) {
+	if !isScopedUserRole(user.Role) {
+		return strategies, nil
+	}
+	groupCondition, groupArgs := scopedGroupCondition(user, "scope_group.id")
+	accountCondition, accountArgs := scopedAccountCondition(user, "scope_account")
+	result := make([]dispatchStrategy, 0, len(strategies))
+	for _, strategy := range strategies {
+		args := []any{strategy.ID}
+		args = append(args, groupArgs...)
+		args = append(args, strategy.ID, strategy.ID)
+		args = append(args, accountArgs...)
+		if err := a.db.QueryRow(`SELECT
+			(SELECT COUNT(*) FROM groups scope_group WHERE scope_group.strategy_id = ? AND `+groupCondition+`),
+			(SELECT COUNT(DISTINCT scope_account.id) FROM accounts scope_account
+				WHERE scope_account.deleted_at IS NULL AND scope_account.archived_at IS NULL
+				AND (scope_account.strategy_id = ? OR (scope_account.strategy_id IS NULL AND EXISTS (
+					SELECT 1 FROM account_groups strategy_ag JOIN groups strategy_group ON strategy_group.id = strategy_ag.group_id
+					WHERE strategy_ag.account_id = scope_account.id AND strategy_group.strategy_id = ?)))
+				AND `+accountCondition+`)`, args...).Scan(&strategy.BoundGroups, &strategy.BoundAccounts); err != nil {
+			return nil, err
+		}
+		if strategy.BoundGroups > 0 || strategy.BoundAccounts > 0 {
+			result = append(result, strategy)
+		}
+	}
+	return result, nil
+}
+
+func (a *app) handleStrategies(w http.ResponseWriter, r *http.Request) {
 	strategies, err := a.listDispatchStrategies()
+	if err == nil {
+		strategies, err = a.scopeDispatchStrategies(currentUser(r), strategies)
+	}
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -409,15 +441,22 @@ type strategyObservation struct {
 
 // handleStrategyObserve returns every strategy with its live per-account load
 // so the observation page can render cards and the accordion table.
-func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
+func (a *app) handleStrategyObserve(w http.ResponseWriter, r *http.Request) {
 	strategies, err := a.listDispatchStrategies()
+	user := currentUser(r)
+	if err == nil {
+		strategies, err = a.scopeDispatchStrategies(user, strategies)
+	}
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
 	result := []strategyObservation{}
+	accountScope, accountScopeArgs := scopedAccountCondition(user, "a")
 	for _, strategy := range strategies {
 		observation := strategyObservation{dispatchStrategy: strategy, Accounts: []strategyAccountObservation{}}
+		queryArgs := []any{strategy.ID, strategy.ID}
+		queryArgs = append(queryArgs, accountScopeArgs...)
 		rows, err := a.db.Query(`SELECT a.id, a.name, a.status, a.base_rpm, a.concurrency, a.extra_json,
 			COALESCE((SELECT GROUP_CONCAT(ag2.group_id, ',') FROM account_groups ag2 WHERE ag2.account_id = a.id), '') AS group_ids,
 			CASE WHEN `+accountStatePredicate("a", "normal")+` THEN 1 ELSE 0 END AS alive,
@@ -435,7 +474,8 @@ func (a *app) handleStrategyObserve(w http.ResponseWriter, _ *http.Request) {
 			AND (a.strategy_id = ? OR (a.strategy_id IS NULL AND EXISTS (
 				SELECT 1 FROM account_groups ag JOIN groups g ON g.id = ag.group_id
 				WHERE ag.account_id = a.id AND g.strategy_id = ?)))
-			ORDER BY alive DESC, current_rpm DESC, a.id`, strategy.ID, strategy.ID)
+			AND `+accountScope+`
+			ORDER BY alive DESC, current_rpm DESC, a.id`, queryArgs...)
 		if err != nil {
 			writeDBError(w, err)
 			return

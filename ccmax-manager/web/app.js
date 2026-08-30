@@ -778,7 +778,10 @@ function configureRole() {
   state.viewLoadedAt = {};
   state.viewLoading = {};
   $("#app-shell").dataset.role = state.me.role;
-  document.body.classList.toggle("ordinary-user", state.me.role === "user");
+  document.body.classList.toggle(
+    "ordinary-user",
+    state.me.role === "user" || isOnboardingUser(),
+  );
   document.body.classList.toggle("onboarding-user", isOnboardingUser());
   $("#identity-name").textContent = state.me.name || state.me.username;
   $("#identity-role").textContent = roleName(state.me.role);
@@ -3463,7 +3466,9 @@ function renderBilling() {
     ),
   ];
   $("#billing-metrics").innerHTML = (
-    state.me.role === "user" ? userMetrics : managerMetrics
+    state.me.role === "user" || isOnboardingUser()
+      ? userMetrics
+      : managerMetrics
   ).join("");
   renderBreakdown();
   $("#usage-body").innerHTML = usageRows(
@@ -3493,7 +3498,7 @@ function renderBreakdown() {
       ? rows
           .map(
             (item) =>
-              `<div class="breakdown-row"><div><strong title="${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}">${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}</strong><small>${item.requests} 次请求</small></div><div class="breakdown-bar"><span style="width:${maxValue ? Math.max((item.billed_cost / maxValue) * 100, 2) : 0}%"></span></div><div class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</div></div>`,
+              `<div class="breakdown-row"><div><strong title="${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}">${escapeHTML(state.breakdown === "group" ? `${item.key.toUpperCase()} 分组` : item.name)}</strong><small>${item.requests} 次请求</small></div><div class="breakdown-bar"><span style="width:${maxValue ? Math.max((item.billed_cost / maxValue) * 100, 2) : 0}%"></span></div><div class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" || isOnboardingUser() ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</div></div>`,
           )
           .join("")
       : '<div class="empty-state"><strong>暂无拆分数据</strong></div>';
@@ -3520,7 +3525,7 @@ function billingAccountBreakdownMarkup(item, maxValue) {
     <button type="button" class="billing-account-summary" data-billing-account="${accountID}" aria-expanded="${expanded}">
       <span class="billing-account-identity"><strong title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</strong><small>#${accountID} · ${item.requests.toLocaleString("zh-CN")} 次请求</small></span>
       <span class="breakdown-bar" aria-hidden="true"><span style="width:${width}%"></span></span>
-      <span class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</span>
+      <span class="breakdown-values"><strong>${money(item.billed_cost)}</strong>${state.me.role === "user" || isOnboardingUser() ? "" : `<small>成本 ${money(item.actual_cost)}</small>`}</span>
       <i data-lucide="chevron-down" class="billing-account-chevron"></i>
     </button>
     ${expanded ? billingAccountModelsMarkup(accountID) : ""}
@@ -4270,7 +4275,7 @@ function syncUserRole(resetPages = false) {
     });
   }
   $$('input[name="user-page"]').forEach((node) => {
-    node.disabled = onboarding;
+    node.disabled = false;
   });
   $("#user-account-columns").hidden = admin || onboarding;
   $("#user-account-blocks").hidden = admin || onboarding;

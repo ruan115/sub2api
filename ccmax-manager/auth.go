@@ -219,9 +219,6 @@ func normalizedVisiblePages(role string, input []string) []string {
 	if role == roleAdmin {
 		return defaultVisiblePages(role)
 	}
-	if role == roleOnboardingUser {
-		return defaultVisiblePages(role)
-	}
 	valid := map[string]bool{}
 	for _, page := range panelPages {
 		valid[page] = true
@@ -263,12 +260,6 @@ func userCanSeeAnyPage(user panelUser, pages ...string) bool {
 }
 
 func userCanReadAPI(user panelUser, path string) bool {
-	if user.Role == roleOnboardingUser && strings.HasPrefix(path, "/api/accounts") {
-		return false
-	}
-	if user.Role == roleOnboardingUser && strings.HasPrefix(path, "/api/proxies") {
-		return false
-	}
 	switch {
 	case path == "/api/me" || path == "/api/auth/logout":
 		return true
@@ -279,9 +270,11 @@ func userCanReadAPI(user panelUser, path string) bool {
 	case strings.HasPrefix(path, "/api/groups") || strings.HasPrefix(path, "/api/purposes"):
 		return userCanSeeAnyPage(user, "overview", "accounts", "onboarding", "billing", "access")
 	case strings.HasPrefix(path, "/api/accounts"):
-		return userCanSeeAnyPage(user, "accounts", "dead", "onboarding")
-	case strings.HasPrefix(path, "/api/proxy-pools") || strings.HasPrefix(path, "/api/proxies"):
+		return userCanSeeAnyPage(user, "accounts", "dead")
+	case strings.HasPrefix(path, "/api/proxy-pools"):
 		return userCanSeeAnyPage(user, "proxies", "onboarding")
+	case strings.HasPrefix(path, "/api/proxies"):
+		return userCanSeePage(user, "proxies")
 	case strings.HasPrefix(path, "/api/prices"):
 		return userCanSeePage(user, "pricing")
 	case strings.HasPrefix(path, "/api/billing") || strings.HasPrefix(path, "/api/usage"):
@@ -339,7 +332,7 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 				return
 			}
-			if user.Role == roleOnboardingUser && onboardingUserCanWrite(path, r.Method) {
+			if user.Role == roleOnboardingUser && onboardingUserCanWrite(user, path, r.Method) {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 				return
 			}
@@ -358,15 +351,15 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func onboardingUserCanWrite(path, method string) bool {
+func onboardingUserCanWrite(user panelUser, path, method string) bool {
 	if method == http.MethodPost && path == "/api/accounts/batch-authorize" {
-		return true
+		return userCanSeePage(user, "onboarding")
 	}
 	if method != http.MethodPut || !strings.HasPrefix(path, "/api/groups/") {
 		return false
 	}
 	id := strings.TrimPrefix(path, "/api/groups/")
-	return groupIDPattern.MatchString(id)
+	return userCanSeePage(user, "overview") && groupIDPattern.MatchString(id)
 }
 
 func (a *app) handleAuthSession(w http.ResponseWriter, r *http.Request) {

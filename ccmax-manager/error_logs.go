@@ -133,9 +133,35 @@ const errorEventsCTE = `WITH error_events AS (
 	WHERE ps.status = 'error' OR TRIM(ps.last_error) != ''
 )`
 
+func errorGroupIDPredicate(dialect databaseDialect) string {
+	if dialect == dialectMySQL {
+		return "FIND_IN_SET(?, group_ids) > 0"
+	}
+	return "instr(',' || group_ids || ',', ',' || ? || ',') > 0"
+}
+
+func appendScopedErrorGroups(dialect databaseDialect, user panelUser, where *[]string, args *[]any) {
+	if !isScopedUserRole(user.Role) {
+		return
+	}
+	groups := scopedGroupIDs(user)
+	if len(groups) == 0 {
+		*where = append(*where, "0 = 1")
+		return
+	}
+	predicates := make([]string, 0, len(groups))
+	for _, groupID := range groups {
+		predicates = append(predicates, errorGroupIDPredicate(dialect))
+		*args = append(*args, groupID)
+	}
+	*where = append(*where, "("+strings.Join(predicates, " OR ")+")")
+}
+
 func (a *app) handleErrorLogs(w http.ResponseWriter, r *http.Request) {
 	where := []string{"1 = 1"}
 	args := []any{}
+	user := currentUser(r)
+	appendScopedErrorGroups(a.db.dialect, user, &where, &args)
 	if source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source"))); source != "" {
 		switch source {
 		case "account", "authorization", "gateway", "proxy", "audit", "system":
@@ -155,8 +181,12 @@ func (a *app) handleErrorLogs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid group")
 			return
 		}
-		where = append(where, "(',' || group_ids || ',') LIKE ?")
-		args = append(args, "%,"+groupID+",%")
+		if isScopedUserRole(user.Role) && !userCanAccessGroup(user, groupID) {
+			writeError(w, http.StatusForbidden, "group permission denied")
+			return
+		}
+		where = append(where, errorGroupIDPredicate(a.db.dialect))
+		args = append(args, groupID)
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
@@ -303,6 +333,12 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	where := []string{"ge.status_code = ?", "ge.account_id IS NOT NULL"}
 	args := []any{status}
+	user := currentUser(r)
+	if isScopedUserRole(user.Role) {
+		condition, scopeArgs := scopedGroupCondition(user, "ge.group_id")
+		where = append(where, condition)
+		args = append(args, scopeArgs...)
+	}
 	if groupID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_id"))); groupID != "" {
 		if !groupIDPattern.MatchString(groupID) {
 			writeError(w, http.StatusBadRequest, "invalid group")
@@ -310,6 +346,10 @@ func (a *app) handleErrorInsights(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := a.validateGroupIDs([]string{groupID}, false); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid group")
+			return
+		}
+		if isScopedUserRole(user.Role) && !userCanAccessGroup(user, groupID) {
+			writeError(w, http.StatusForbidden, "group permission denied")
 			return
 		}
 		where = append(where, "ge.group_id = ?")

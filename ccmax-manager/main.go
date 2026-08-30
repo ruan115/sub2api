@@ -1923,28 +1923,20 @@ func accountStrategyFilterCondition(r *http.Request, alias, groupID string) (str
 	)))`, []any{strategyID, strategyID}, nil
 }
 
-func (a *app) handleAccountStrategyOptions(w http.ResponseWriter, _ *http.Request) {
-	// The account page only needs stable IDs and labels. Returning every active
-	// strategy keeps the filter usable after a batch binding changes which
-	// strategies currently have accounts, without exposing strategy limits.
-	rows, err := a.db.Query(`SELECT id, name FROM dispatch_strategies WHERE deleted_at IS NULL ORDER BY name, id`)
+func (a *app) handleAccountStrategyOptions(w http.ResponseWriter, r *http.Request) {
+	// The account page only needs stable IDs and labels. Scoped users receive
+	// strategies that are bound to one of their allowed groups or accounts.
+	strategies, err := a.listDispatchStrategies()
+	if err == nil {
+		strategies, err = a.scopeDispatchStrategies(currentUser(r), strategies)
+	}
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	defer rows.Close()
-	items := []accountStrategyOption{}
-	for rows.Next() {
-		var item accountStrategyOption
-		if err := rows.Scan(&item.ID, &item.Name); err != nil {
-			writeDBError(w, err)
-			return
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		writeDBError(w, err)
-		return
+	items := make([]accountStrategyOption, 0, len(strategies))
+	for _, strategy := range strategies {
+		items = append(items, accountStrategyOption{ID: strategy.ID, Name: strategy.Name})
 	}
 	writeJSON(w, http.StatusOK, items)
 }
