@@ -837,6 +837,10 @@ svg {
   font-family: var(--font-ui);
   font-size: 13px;
 }
+.group-card.onboarding-summary .group-stat-line.emphasis strong {
+  color: var(--a);
+  font-size: 14px;
+}
 .group-mode-setting {
   display: flex;
   align-items: center;
@@ -2765,6 +2769,12 @@ textarea:focus {
 }
 .onboarding-user #group-form > .form-stack > :not(.onboarding-group-setting) {
   display: none !important;
+}
+.onboarding-user #group-form .group-basic-settings > :not(.onboarding-group-setting) {
+  display: none !important;
+}
+.onboarding-user #group-form .group-basic-settings {
+  grid-template-columns: minmax(0, 1fr);
 }
 .onboarding-user #group-dialog .modal-actions {
   position: sticky;

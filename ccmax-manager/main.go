@@ -175,10 +175,11 @@ type groupInput struct {
 }
 
 type onboardingGroupInput struct {
-	NormalRequestMode        *bool   `json:"normal_request_mode"`
-	ClaudeCLIVersion         *string `json:"claude_cli_version"`
-	RejectAnthropicDowngrade *bool   `json:"reject_anthropic_downgrade_enabled"`
-	RejectDistillation       *bool   `json:"reject_distillation_enabled"`
+	RateMultiplier           *float64 `json:"rate_multiplier"`
+	NormalRequestMode        *bool    `json:"normal_request_mode"`
+	ClaudeCLIVersion         *string  `json:"claude_cli_version"`
+	RejectAnthropicDowngrade *bool    `json:"reject_anthropic_downgrade_enabled"`
+	RejectDistillation       *bool    `json:"reject_distillation_enabled"`
 }
 
 type account struct {
@@ -1579,11 +1580,18 @@ func (a *app) handleOnboardingGroupUpdate(w http.ResponseWriter, r *http.Request
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if input.NormalRequestMode == nil && input.ClaudeCLIVersion == nil && input.RejectAnthropicDowngrade == nil && input.RejectDistillation == nil {
+	if input.RateMultiplier == nil && input.NormalRequestMode == nil && input.ClaudeCLIVersion == nil && input.RejectAnthropicDowngrade == nil && input.RejectDistillation == nil {
 		writeError(w, http.StatusBadRequest, "no permitted group settings supplied")
 		return
 	}
-	var normalRequestMode, claudeCLIVersionValue, rejectAnthropicDowngrade, rejectDistillation any
+	var rateMultiplier, normalRequestMode, claudeCLIVersionValue, rejectAnthropicDowngrade, rejectDistillation any
+	if input.RateMultiplier != nil {
+		if *input.RateMultiplier < 0 {
+			writeError(w, http.StatusBadRequest, "rate multiplier must be non-negative")
+			return
+		}
+		rateMultiplier = *input.RateMultiplier
+	}
 	if input.NormalRequestMode != nil {
 		normalRequestMode = boolInt(*input.NormalRequestMode)
 	}
@@ -1601,7 +1609,7 @@ func (a *app) handleOnboardingGroupUpdate(w http.ResponseWriter, r *http.Request
 	if input.RejectDistillation != nil {
 		rejectDistillation = boolInt(*input.RejectDistillation)
 	}
-	result, err := a.db.Exec(`UPDATE groups SET normal_request_mode = COALESCE(?, normal_request_mode), claude_cli_version = COALESCE(?, claude_cli_version), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), updated_at = `+nowSQL+` WHERE id = ?`, normalRequestMode, claudeCLIVersionValue, rejectAnthropicDowngrade, rejectDistillation, id)
+	result, err := a.db.Exec(`UPDATE groups SET rate_multiplier = COALESCE(?, rate_multiplier), normal_request_mode = COALESCE(?, normal_request_mode), claude_cli_version = COALESCE(?, claude_cli_version), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), updated_at = `+nowSQL+` WHERE id = ?`, rateMultiplier, normalRequestMode, claudeCLIVersionValue, rejectAnthropicDowngrade, rejectDistillation, id)
 	if err != nil {
 		writeDBError(w, err)
 		return

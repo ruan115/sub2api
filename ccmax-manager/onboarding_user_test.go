@@ -55,6 +55,7 @@ func TestOnboardingUserPermissionsAndRestrictedGroupSettings(t *testing.T) {
 	}
 
 	requestJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"rate_multiplier":                    1.25,
 		"normal_request_mode":                true,
 		"claude_cli_version":                 "2.3.4",
 		"reject_anthropic_downgrade_enabled": true,
@@ -64,9 +65,12 @@ func TestOnboardingUserPermissionsAndRestrictedGroupSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !updated.NormalRequestMode || updated.ClaudeCLIVersion != "2.3.4" || !updated.RejectAnthropicDowngrade || !updated.RejectDistillation {
+	if updated.RateMultiplier != 1.25 || !updated.NormalRequestMode || updated.ClaudeCLIVersion != "2.3.4" || !updated.RejectAnthropicDowngrade || !updated.RejectDistillation {
 		t.Fatalf("restricted group settings were not saved: %+v", updated)
 	}
+	requestJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
+		"rate_multiplier": -1,
+	}, userCookie, "", http.StatusBadRequest, nil)
 
 	requestJSON(t, handler, http.MethodPut, "/api/groups/a", map[string]any{
 		"normal_request_mode": false,
