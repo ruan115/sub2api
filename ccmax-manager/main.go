@@ -174,6 +174,13 @@ type groupInput struct {
 	StrategyShares *[]groupStrategyShareInput `json:"strategy_shares"`
 }
 
+type onboardingGroupInput struct {
+	NormalRequestMode        *bool   `json:"normal_request_mode"`
+	ClaudeCLIVersion         *string `json:"claude_cli_version"`
+	RejectAnthropicDowngrade *bool   `json:"reject_anthropic_downgrade_enabled"`
+	RejectDistillation       *bool   `json:"reject_distillation_enabled"`
+}
+
 type account struct {
 	ID                      int64          `json:"id"`
 	Name                    string         `json:"name"`
@@ -1025,7 +1032,7 @@ func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	usageScope := usageFilters{}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		usageScope.UserID = user.ID
 	}
 	if err == nil {
@@ -1045,7 +1052,7 @@ func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		redactBillingTotals(&result.Today)
 		redactBillingTotals(&result.Month)
 		redactUsageCosts(result.RecentUsage)
@@ -1066,7 +1073,7 @@ func (a *app) handleGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) scopeGroups(user panelUser, groups []group) ([]group, error) {
-	if user.Role != "user" {
+	if !isScopedUserRole(user.Role) {
 		return groups, nil
 	}
 	allowed := map[string]bool{}
@@ -1352,6 +1359,10 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid group id")
 		return
 	}
+	if user := currentUser(r); user.Role == roleOnboardingUser {
+		a.handleOnboardingGroupUpdate(w, r, user, id)
+		return
+	}
 	var input groupInput
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1559,6 +1570,56 @@ func (a *app) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (a *app) handleOnboardingGroupUpdate(w http.ResponseWriter, r *http.Request, user panelUser, id string) {
+	if !userCanAccessGroup(user, id) {
+		writeError(w, http.StatusForbidden, "group permission denied")
+		return
+	}
+	var input onboardingGroupInput
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.NormalRequestMode == nil && input.ClaudeCLIVersion == nil && input.RejectAnthropicDowngrade == nil && input.RejectDistillation == nil {
+		writeError(w, http.StatusBadRequest, "no permitted group settings supplied")
+		return
+	}
+	var normalRequestMode, claudeCLIVersionValue, rejectAnthropicDowngrade, rejectDistillation any
+	if input.NormalRequestMode != nil {
+		normalRequestMode = boolInt(*input.NormalRequestMode)
+	}
+	if input.ClaudeCLIVersion != nil {
+		version := strings.TrimSpace(*input.ClaudeCLIVersion)
+		if !claudeCLIVersionPattern.MatchString(version) {
+			writeError(w, http.StatusBadRequest, "Claude CLI version must use X.Y.Z format")
+			return
+		}
+		claudeCLIVersionValue = version
+	}
+	if input.RejectAnthropicDowngrade != nil {
+		rejectAnthropicDowngrade = boolInt(*input.RejectAnthropicDowngrade)
+	}
+	if input.RejectDistillation != nil {
+		rejectDistillation = boolInt(*input.RejectDistillation)
+	}
+	result, err := a.db.Exec(`UPDATE groups SET normal_request_mode = COALESCE(?, normal_request_mode), claude_cli_version = COALESCE(?, claude_cli_version), reject_anthropic_downgrade_enabled = COALESCE(?, reject_anthropic_downgrade_enabled), reject_distillation_enabled = COALESCE(?, reject_distillation_enabled), updated_at = `+nowSQL+` WHERE id = ?`, normalRequestMode, claudeCLIVersionValue, rejectAnthropicDowngrade, rejectDistillation, id)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		if _, err := a.getGroup(id); errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "group not found")
+			return
+		}
+	}
+	item, err := a.getGroup(id)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
 func (a *app) handlePurposes(w http.ResponseWriter, r *http.Request) {
 	items, err := a.listPurposes()
 	if err != nil {
@@ -1569,7 +1630,7 @@ func (a *app) handlePurposes(w http.ResponseWriter, r *http.Request) {
 }
 
 func scopePurposes(user panelUser, items []purpose) []purpose {
-	if user.Role != "user" {
+	if !isScopedUserRole(user.Role) {
 		return items
 	}
 	result := make([]purpose, 0, len(items))
@@ -1896,7 +1957,7 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	user := currentUser(r)
 	restrictedView := user.Role != "admin"
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		condition, scopeArgs := scopedAccountCondition(user, "a")
 		where += ` AND ` + condition
 		args = append(args, scopeArgs...)
@@ -2006,7 +2067,7 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	for index := range items {
 		item := &items[index]
 		item.GroupIDs = groupIDs[item.ID]
-		if user.Role == "user" {
+		if isScopedUserRole(user.Role) {
 			visibleGroups := make([]string, 0, len(item.GroupIDs))
 			for _, groupID := range item.GroupIDs {
 				if userCanAccessGroup(user, groupID) {
@@ -3597,7 +3658,7 @@ type usageFilters struct {
 func (a *app) handleUsageList(w http.ResponseWriter, r *http.Request) {
 	filters := filtersFromRequest(r)
 	user := currentUser(r)
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		filters.UserID = user.ID
 	}
 	items, err := a.listUsage(filters)
@@ -3605,7 +3666,7 @@ func (a *app) handleUsageList(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		redactUsageCosts(items)
 	}
 	total, err := a.countUsage(filters)
@@ -3705,7 +3766,7 @@ func (a *app) countUsage(filters usageFilters) (int64, error) {
 func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 	filters := filtersFromRequest(r)
 	user := currentUser(r)
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		filters.UserID = user.ID
 	}
 	if filters.From == "" {
@@ -3724,7 +3785,7 @@ func (a *app) handleBilling(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, err)
 		return
 	}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		summary.AvailableBalance = user.Balance
 		redactBillingTotals(&summary.Totals)
 		redactBillingBreakdowns(summary.ByGroup)
@@ -3746,7 +3807,7 @@ func (a *app) handleBillingAccountModels(w http.ResponseWriter, r *http.Request)
 		filters.From = startOfMonthUTC()
 	}
 	user := currentUser(r)
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		filters.UserID = user.ID
 	}
 	items, total, err := a.queryAccountModelBreakdown(filters)
@@ -3754,7 +3815,7 @@ func (a *app) handleBillingAccountModels(w http.ResponseWriter, r *http.Request)
 		writeDBError(w, err)
 		return
 	}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		redactBillingModelBreakdowns(items)
 	}
 	page := filters.Offset/filters.Limit + 1

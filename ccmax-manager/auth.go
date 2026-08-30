@@ -20,6 +20,16 @@ import (
 
 const sessionCookie = "ccmax_session"
 
+const (
+	roleAdmin          = "admin"
+	roleReadOnlyAdmin  = "readonly_admin"
+	roleUser           = "user"
+	roleOnboardingUser = "onboarding_user"
+
+	userKindStandard   = "standard"
+	userKindOnboarding = "onboarding"
+)
+
 var panelPages = []string{"overview", "accounts", "dead", "onboarding", "daily", "authorization", "errors", "strategies", "proxies", "access", "pricing", "billing", "audit"}
 
 type authContextKey struct{}
@@ -109,6 +119,7 @@ func (a *app) migrateFeatures() error {
 			name TEXT NOT NULL DEFAULT '',
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'readonly_admin', 'user')),
+			user_kind TEXT NOT NULL DEFAULT 'standard',
 			status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
 			allowed_group_ids_json TEXT NOT NULL DEFAULT '[]',
 			account_view_json TEXT NOT NULL DEFAULT '{}',
@@ -166,6 +177,9 @@ func (a *app) migrateFeatures() error {
 	if err := addColumnIfMissing(a.db, "users", "balance", "REAL"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(a.db, "users", "user_kind", "TEXT NOT NULL DEFAULT 'standard'"); err != nil {
+		return err
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -190,17 +204,22 @@ func (a *app) migrateFeatures() error {
 
 func defaultVisiblePages(role string) []string {
 	switch role {
-	case "admin":
+	case roleAdmin:
 		return append([]string{}, panelPages...)
-	case "readonly_admin":
+	case roleReadOnlyAdmin:
 		return []string{"overview", "accounts", "dead", "daily", "authorization", "errors", "proxies", "pricing", "billing", "audit"}
+	case roleOnboardingUser:
+		return []string{"overview", "onboarding", "access"}
 	default:
 		return []string{"accounts", "access"}
 	}
 }
 
 func normalizedVisiblePages(role string, input []string) []string {
-	if role == "admin" {
+	if role == roleAdmin {
+		return defaultVisiblePages(role)
+	}
+	if role == roleOnboardingUser {
 		return defaultVisiblePages(role)
 	}
 	valid := map[string]bool{}
@@ -223,7 +242,7 @@ func normalizedVisiblePages(role string, input []string) []string {
 }
 
 func userCanSeePage(user panelUser, page string) bool {
-	if user.Role == "admin" {
+	if user.Role == roleAdmin {
 		return true
 	}
 	for _, allowed := range user.VisiblePages {
@@ -244,6 +263,12 @@ func userCanSeeAnyPage(user panelUser, pages ...string) bool {
 }
 
 func userCanReadAPI(user panelUser, path string) bool {
+	if user.Role == roleOnboardingUser && strings.HasPrefix(path, "/api/accounts") {
+		return false
+	}
+	if user.Role == roleOnboardingUser && strings.HasPrefix(path, "/api/proxies") {
+		return false
+	}
 	switch {
 	case path == "/api/me" || path == "/api/auth/logout":
 		return true
@@ -287,7 +312,7 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 		}
 		var user panelUser
 		if a.authDisabled {
-			user = panelUser{ID: 0, Username: "development", Name: "Development", Role: "admin", Status: "active", AllowedGroupIDs: []string{"a", "b"}, VisiblePages: defaultVisiblePages("admin")}
+			user = panelUser{ID: 0, Username: "development", Name: "Development", Role: roleAdmin, Status: "active", AllowedGroupIDs: []string{"a", "b"}, VisiblePages: defaultVisiblePages(roleAdmin)}
 		} else {
 			cookie, err := r.Cookie(sessionCookie)
 			if err != nil || strings.TrimSpace(cookie.Value) == "" {
@@ -301,27 +326,31 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if user.Role != "admin" && path == "/api/users" {
+		if user.Role != roleAdmin && path == "/api/users" {
 			writeError(w, http.StatusForbidden, "permission denied")
 			return
 		}
-		if user.Role != "admin" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if user.Role != roleAdmin && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if path == "/api/auth/logout" {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 				return
 			}
-			if user.Role == "user" && strings.HasPrefix(path, "/api/api-keys") && userCanSeePage(user, "access") {
+			if isOwnedAccessRole(user.Role) && strings.HasPrefix(path, "/api/api-keys") && userCanSeePage(user, "access") {
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
+				return
+			}
+			if user.Role == roleOnboardingUser && onboardingUserCanWrite(path, r.Method) {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 				return
 			}
 			message := "permission denied"
-			if user.Role == "readonly_admin" {
+			if user.Role == roleReadOnlyAdmin {
 				message = "read-only administrator cannot modify data"
 			}
 			writeError(w, http.StatusForbidden, message)
 			return
 		}
-		if user.Role != "admin" && !userCanReadAPI(user, path) {
+		if user.Role != roleAdmin && !userCanReadAPI(user, path) {
 			writeError(w, http.StatusForbidden, "page permission denied")
 			return
 		}
@@ -329,9 +358,20 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func onboardingUserCanWrite(path, method string) bool {
+	if method == http.MethodPost && path == "/api/accounts/batch-authorize" {
+		return true
+	}
+	if method != http.MethodPut || !strings.HasPrefix(path, "/api/groups/") {
+		return false
+	}
+	id := strings.TrimPrefix(path, "/api/groups/")
+	return groupIDPattern.MatchString(id)
+}
+
 func (a *app) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 	if a.authDisabled {
-		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": panelUser{ID: 0, Username: "development", Name: "Development", Role: "admin", Status: "active", AllowedGroupIDs: []string{"a", "b"}, VisiblePages: defaultVisiblePages("admin")}})
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": panelUser{ID: 0, Username: "development", Name: "Development", Role: roleAdmin, Status: "active", AllowedGroupIDs: []string{"a", "b"}, VisiblePages: defaultVisiblePages(roleAdmin)}})
 		return
 	}
 	cookie, err := r.Cookie(sessionCookie)
@@ -354,7 +394,7 @@ func currentUser(r *http.Request) panelUser {
 }
 
 func scopedGroupIDs(user panelUser) []string {
-	if user.Role != "user" {
+	if !isScopedUserRole(user.Role) {
 		return []string{"a", "b"}
 	}
 	return uniqueGroups(user.AllowedGroupIDs)
@@ -375,11 +415,19 @@ func scopedGroupCondition(user panelUser, column string) (string, []any) {
 }
 
 func scopedAccountCondition(user panelUser, accountAlias string) (string, []any) {
-	if user.Role != "user" {
+	if !isScopedUserRole(user.Role) {
 		return "1 = 1", nil
 	}
 	condition, args := scopedGroupCondition(user, "scope_ag.group_id")
 	return "EXISTS (SELECT 1 FROM account_groups scope_ag WHERE scope_ag.account_id = " + accountAlias + ".id AND " + condition + ")", args
+}
+
+func isScopedUserRole(role string) bool {
+	return role == roleUser || role == roleOnboardingUser
+}
+
+func isOwnedAccessRole(role string) bool {
+	return isScopedUserRole(role)
 }
 
 func userCanAccessGroup(user panelUser, groupID string) bool {
@@ -392,7 +440,7 @@ func userCanAccessGroup(user panelUser, groupID string) bool {
 }
 
 func (a *app) userBySession(token string) (panelUser, error) {
-	return a.scanUser(a.db.QueryRow(`SELECT u.id, u.username, u.name, u.role, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.account_view_json, u.balance, u.rpm_limit, u.created_at, u.updated_at
+	return a.scanUser(a.db.QueryRow(`SELECT u.id, u.username, u.name, u.role, u.user_kind, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.account_view_json, u.balance, u.rpm_limit, u.created_at, u.updated_at
 		FROM panel_sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ? AND s.expires_at > `+nowSQL+` AND u.status = 'active' AND u.deleted_at IS NULL`, hashToken(token)))
 }
@@ -408,20 +456,15 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var user panelUser
-	var passwordHash, allowed, visible, accountView string
+	var passwordHash, userKind, allowed, visible, accountView string
 	var balance sql.NullFloat64
-	err := a.db.QueryRow(`SELECT id, username, name, password_hash, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE username = ? AND deleted_at IS NULL`, strings.TrimSpace(input.Username)).Scan(&user.ID, &user.Username, &user.Name, &passwordHash, &user.Role, &user.Status, &allowed, &visible, &accountView, &balance, &user.RPM, &user.CreatedAt, &user.UpdatedAt)
+	err := a.db.QueryRow(`SELECT id, username, name, password_hash, role, user_kind, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE username = ? AND deleted_at IS NULL`, strings.TrimSpace(input.Username)).Scan(&user.ID, &user.Username, &user.Name, &passwordHash, &user.Role, &userKind, &user.Status, &allowed, &visible, &accountView, &balance, &user.RPM, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil || user.Status != "active" || bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(input.Password)) != nil {
 		a.recordLoginAudit(r, panelUser{}, input.Username, http.StatusUnauthorized, started)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
-	_ = json.Unmarshal([]byte(allowed), &user.AllowedGroupIDs)
-	_ = json.Unmarshal([]byte(visible), &user.VisiblePages)
-	_ = json.Unmarshal([]byte(accountView), &user.AccountView)
-	user.Balance = floatPointer(balance)
-	user.VisiblePages = normalizedVisiblePages(user.Role, user.VisiblePages)
-	user.AccountView = normalizeAccountView(user.Role, user.AccountView)
+	finishScannedUser(&user, userKind, allowed, visible, accountView, balance)
 	token := randomSecret(32)
 	expires := time.Now().UTC().Add(24 * time.Hour)
 	if _, err := a.db.Exec(`INSERT INTO panel_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)`, hashToken(token), user.ID, expires.Format(time.RFC3339Nano)); err != nil {
@@ -451,7 +494,7 @@ func expiredSessionCookie() *http.Cookie {
 
 func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
-	if err := a.populateUserAccessSummary(&user, user.Role == "admin"); err != nil {
+	if err := a.populateUserAccessSummary(&user, user.Role == roleAdmin); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -460,19 +503,22 @@ func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) scanUser(row scanner) (panelUser, error) {
 	var item panelUser
-	var allowed, visible, accountView string
+	var userKind, allowed, visible, accountView string
 	var balance sql.NullFloat64
-	err := row.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &userKind, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt)
 	if err == nil {
-		finishScannedUser(&item, allowed, visible, accountView, balance)
+		finishScannedUser(&item, userKind, allowed, visible, accountView, balance)
 	}
 	return item, err
 }
 
-func finishScannedUser(item *panelUser, allowed, visible, accountView string, balance sql.NullFloat64) {
+func finishScannedUser(item *panelUser, userKind, allowed, visible, accountView string, balance sql.NullFloat64) {
 	_ = json.Unmarshal([]byte(allowed), &item.AllowedGroupIDs)
 	_ = json.Unmarshal([]byte(visible), &item.VisiblePages)
 	_ = json.Unmarshal([]byte(accountView), &item.AccountView)
+	if item.Role == roleUser && userKind == userKindOnboarding {
+		item.Role = roleOnboardingUser
+	}
 	item.Balance = floatPointer(balance)
 	item.VisiblePages = normalizedVisiblePages(item.Role, item.VisiblePages)
 	item.AccountView = normalizeAccountView(item.Role, item.AccountView)
@@ -495,7 +541,7 @@ func (a *app) populateUserAccessSummary(item *panelUser, includeArchived bool) e
 }
 
 func (a *app) handleUsers(w http.ResponseWriter, _ *http.Request) {
-	rows, err := a.db.Query(`SELECT u.id, u.username, u.name, u.role, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.account_view_json, u.balance, u.rpm_limit, u.created_at, u.updated_at,
+	rows, err := a.db.Query(`SELECT u.id, u.username, u.name, u.role, u.user_kind, u.status, u.allowed_group_ids_json, u.visible_pages_json, u.account_view_json, u.balance, u.rpm_limit, u.created_at, u.updated_at,
 		COALESCE(usage_summary.billed_cost, 0), COALESCE(usage_summary.request_count, 0),
 		COALESCE(key_summary.active_count, 0), COALESCE(key_summary.archived_count, 0)
 		FROM users u
@@ -519,13 +565,13 @@ func (a *app) handleUsers(w http.ResponseWriter, _ *http.Request) {
 	items := []panelUser{}
 	for rows.Next() {
 		var item panelUser
-		var allowed, visible, accountView string
+		var userKind, allowed, visible, accountView string
 		var balance sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt, &item.Consumed, &item.UsageRequests, &item.ActiveKeyCount, &item.ArchivedKeyCount); err != nil {
+		if err := rows.Scan(&item.ID, &item.Username, &item.Name, &item.Role, &userKind, &item.Status, &allowed, &visible, &accountView, &balance, &item.RPM, &item.CreatedAt, &item.UpdatedAt, &item.Consumed, &item.UsageRequests, &item.ActiveKeyCount, &item.ArchivedKeyCount); err != nil {
 			writeDBError(w, err)
 			return
 		}
-		finishScannedUser(&item, allowed, visible, accountView, balance)
+		finishScannedUser(&item, userKind, allowed, visible, accountView, balance)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -536,7 +582,7 @@ func (a *app) handleUsers(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) handleUserAccessDetails(w http.ResponseWriter, r *http.Request) {
-	if currentUser(r).Role != "admin" {
+	if currentUser(r).Role != roleAdmin {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
@@ -544,7 +590,7 @@ func (a *app) handleUserAccessDetails(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
+	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, user_kind, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
@@ -642,25 +688,32 @@ func normalizeUserInput(input *userInput, requirePassword bool) error {
 		value := money(*input.Balance)
 		input.Balance = &value
 	}
-	if input.Role != "admin" && input.Role != "readonly_admin" && input.Role != "user" {
+	if input.Role != roleAdmin && input.Role != roleReadOnlyAdmin && input.Role != roleUser && input.Role != roleOnboardingUser {
 		return errors.New("invalid role")
 	}
 	if input.Status != "active" && input.Status != "disabled" {
 		return errors.New("invalid status")
 	}
-	if input.Role == "user" && len(input.AllowedGroupIDs) == 0 {
+	if isScopedUserRole(input.Role) && len(input.AllowedGroupIDs) == 0 {
 		return errors.New("select at least one allowed group")
 	}
 	if len(input.VisiblePages) == 0 {
 		return errors.New("select at least one visible page")
 	}
-	if input.Role != "admin" && len(input.AccountView.Columns) == 0 {
+	if input.Role != roleAdmin && len(input.AccountView.Columns) == 0 {
 		return errors.New("select at least one account pool column")
 	}
 	if input.Password != "" && len(input.Password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
 	return nil
+}
+
+func storedUserRole(role string) (string, string) {
+	if role == roleOnboardingUser {
+		return roleUser, userKindOnboarding
+	}
+	return role, userKindStandard
 }
 
 func (a *app) handleUserCreate(w http.ResponseWriter, r *http.Request) {
@@ -680,7 +733,8 @@ func (a *app) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	allowed, _ := json.Marshal(input.AllowedGroupIDs)
 	visible, _ := json.Marshal(input.VisiblePages)
 	accountView, _ := json.Marshal(input.AccountView)
-	result, err := a.db.Exec(`INSERT INTO users (username, name, password_hash, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM)
+	storedRole, userKind := storedUserRole(input.Role)
+	result, err := a.db.Exec(`INSERT INTO users (username, name, password_hash, role, user_kind, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Username, input.Name, string(hash), storedRole, userKind, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			writeError(w, http.StatusConflict, "username already exists")
@@ -690,7 +744,7 @@ func (a *app) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := result.LastInsertId()
-	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ?`, id))
+	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, user_kind, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ?`, id))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -718,21 +772,22 @@ func (a *app) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	allowed, _ := json.Marshal(input.AllowedGroupIDs)
 	visible, _ := json.Marshal(input.VisiblePages)
 	accountView, _ := json.Marshal(input.AccountView)
+	storedRole, userKind := storedUserRole(input.Role)
 	var err error
 	if input.Password != "" {
 		hash, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, password_hash = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, account_view_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, string(hash), input.Role, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM, id)
+		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, password_hash = ?, role = ?, user_kind = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, account_view_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, string(hash), storedRole, userKind, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM, id)
 		if err == nil {
 			_, err = a.db.Exec(`DELETE FROM panel_sessions WHERE user_id = ?`, id)
 		}
 	} else {
-		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, role = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, account_view_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, input.Role, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM, id)
+		_, err = a.db.Exec(`UPDATE users SET username = ?, name = ?, role = ?, user_kind = ?, status = ?, allowed_group_ids_json = ?, visible_pages_json = ?, account_view_json = ?, balance = ?, rpm_limit = ?, updated_at = `+nowSQL+` WHERE id = ? AND deleted_at IS NULL`, input.Username, input.Name, storedRole, userKind, input.Status, string(allowed), string(visible), string(accountView), input.Balance, input.RPM, id)
 	}
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
-	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
+	item, err := a.scanUser(a.db.QueryRow(`SELECT id, username, name, role, user_kind, status, allowed_group_ids_json, visible_pages_json, account_view_json, balance, rpm_limit, created_at, updated_at FROM users WHERE id = ? AND deleted_at IS NULL`, id))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -763,13 +818,13 @@ func (a *app) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
-	includeArchived := user.Role == "admin" && strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_archived")), "true")
+	includeArchived := user.Role == roleAdmin && strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_archived")), "true")
 	query := apiKeySelect + ` WHERE 1 = 1`
 	args := []any{}
 	if !includeArchived {
 		query += ` AND k.deleted_at IS NULL`
 	}
-	if user.Role == "user" {
+	if isOwnedAccessRole(user.Role) {
 		query += ` AND k.user_id = ?`
 		args = append(args, user.ID)
 	} else if id, _ := strconv.ParseInt(r.URL.Query().Get("user_id"), 10, 64); id > 0 {
@@ -804,7 +859,7 @@ func (a *app) handleAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := currentUser(r)
-	if user.Role == "user" {
+	if isOwnedAccessRole(user.Role) {
 		input.UserID = user.ID
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -851,7 +906,7 @@ func (a *app) handleAPIKeyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "API key not found")
 		return
 	}
-	if user.Role == "user" && ownerID != user.ID {
+	if isOwnedAccessRole(user.Role) && ownerID != user.ID {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
@@ -896,7 +951,7 @@ func (a *app) handleAPIKeyStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "API key not found")
 		return
 	}
-	if user.Role == "user" && ownerID != user.ID {
+	if isOwnedAccessRole(user.Role) && ownerID != user.ID {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
@@ -920,7 +975,7 @@ func (a *app) handleAPIKeyDelete(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	query := `UPDATE api_keys SET status = 'disabled', deleted_at = ` + nowSQL + `, updated_at = ` + nowSQL + ` WHERE id = ? AND deleted_at IS NULL`
 	args := []any{id}
-	if user.Role == "user" {
+	if isOwnedAccessRole(user.Role) {
 		query += ` AND user_id = ?`
 		args = append(args, user.ID)
 	}
@@ -967,10 +1022,10 @@ func scanAPIKeyWithUsage(row scanner) (apiKeyRecord, error) {
 }
 
 func canRevealAPIKey(user panelUser, ownerID int64) bool {
-	if user.Role == "admin" {
+	if user.Role == roleAdmin {
 		return true
 	}
-	return user.Role == "user" && user.ID == ownerID
+	return isOwnedAccessRole(user.Role) && user.ID == ownerID
 }
 
 func (a *app) userCanUseGroup(userID int64, groupID string) (bool, error) {
@@ -982,7 +1037,7 @@ func (a *app) userCanUseGroup(userID int64, groupID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if role == "admin" || role == "readonly_admin" {
+	if role == roleAdmin || role == roleReadOnlyAdmin {
 		return true, nil
 	}
 	groups := []string{}
@@ -996,7 +1051,7 @@ func (a *app) userCanUseGroup(userID int64, groupID string) (bool, error) {
 }
 
 func (a *app) prepareUserGroups(input *userInput) error {
-	if input.Role == "admin" || input.Role == "readonly_admin" {
+	if input.Role == roleAdmin || input.Role == roleReadOnlyAdmin {
 		rows, err := a.db.Query(`SELECT id FROM groups ORDER BY id`)
 		if err != nil {
 			return err

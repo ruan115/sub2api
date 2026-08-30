@@ -246,7 +246,7 @@ func requestIP(r *http.Request) string {
 func (a *app) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	where := []string{"1 = 1"}
 	args := []any{}
-	if user := currentUser(r); user.Role == "user" {
+	if user := currentUser(r); isScopedUserRole(user.Role) {
 		where = append(where, "actor_user_id = ?")
 		args = append(args, user.ID)
 	}

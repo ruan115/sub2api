@@ -141,6 +141,7 @@ func (a *app) migrateMySQL() error {
 			name VARCHAR(255) NOT NULL DEFAULT '',
 			password_hash VARCHAR(255) NOT NULL,
 			role VARCHAR(32) NOT NULL DEFAULT 'user',
+			user_kind VARCHAR(32) NOT NULL DEFAULT 'standard',
 			status VARCHAR(16) NOT NULL DEFAULT 'active',
 			allowed_group_ids_json LONGTEXT NOT NULL DEFAULT ('[]'),
 			visible_pages_json LONGTEXT NOT NULL DEFAULT ('[]'),
@@ -732,6 +733,9 @@ func (a *app) migrateMySQL() error {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "accounts", "reauthorization_count", "INT NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureMySQLColumn(a.db.DB, "users", "user_kind", "VARCHAR(32) NOT NULL DEFAULT 'standard'"); err != nil {
 		return err
 	}
 	if err := ensureMySQLColumn(a.db.DB, "proxy_pools", "single_use_enabled", "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {

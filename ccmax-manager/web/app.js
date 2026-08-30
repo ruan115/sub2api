@@ -111,6 +111,7 @@ const rolePageDefaults = {
     "audit",
   ],
   user: ["accounts", "access"],
+  onboarding_user: ["overview", "onboarding", "access"],
 };
 const restrictedAccountViewDefault = {
   columns: ["account", "status", "subscription", "quota", "requests", "tpm"],
@@ -169,6 +170,7 @@ function beginButtonRequest(button, busyText = "") {
 }
 
 const isAdmin = () => state.me?.role === "admin";
+const isOnboardingUser = () => state.me?.role === "onboarding_user";
 const isManager = () =>
   state.me?.role === "admin" || state.me?.role === "readonly_admin";
 const canView = (page) =>
@@ -732,7 +734,12 @@ function confirmAction(title, message, confirmLabel = "确认") {
 }
 function roleName(role) {
   return (
-    { admin: "管理员", readonly_admin: "只读管理员", user: "普通用户" }[role] ||
+    {
+      admin: "管理员",
+      readonly_admin: "只读管理员",
+      user: "普通用户",
+      onboarding_user: "上号用户",
+    }[role] ||
     role
   );
 }
@@ -772,6 +779,7 @@ function configureRole() {
   state.viewLoading = {};
   $("#app-shell").dataset.role = state.me.role;
   document.body.classList.toggle("ordinary-user", state.me.role === "user");
+  document.body.classList.toggle("onboarding-user", isOnboardingUser());
   $("#identity-name").textContent = state.me.name || state.me.username;
   $("#identity-role").textContent = roleName(state.me.role);
   $("#readonly-banner").hidden = state.me.role !== "readonly_admin";
@@ -779,8 +787,18 @@ function configureRole() {
     node.hidden = !canView(node.dataset.view);
   });
   $$(".write-action").forEach((node) => {
-    node.hidden = !isAdmin();
+    node.hidden =
+      !isAdmin() && !(isOnboardingUser() && node.id === "batch-auth-submit");
   });
+  $$(".onboarding-hidden").forEach((node) => {
+    node.hidden = isOnboardingUser();
+  });
+  if (isOnboardingUser()) {
+    $("#batch-quota-threshold-enabled").checked = true;
+    $("#batch-quota-threshold-percent").value = "95";
+    $("#batch-7d-quota-threshold-enabled").checked = true;
+    $("#batch-7d-quota-threshold-percent").value = "95";
+  }
   configureAccountView();
   const accountRefreshLabel = isAdmin()
     ? "检测当前页账号存活状态并刷新列表"
@@ -854,9 +872,18 @@ const viewLoaders = {
   errors: loadErrors,
   strategies: loadStrategies,
   onboarding: async () => {
-    if (!state.proxyPools.length) await loadProxyInventory();
-    await ensureStrategiesLoaded();
-    fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value);
+    if (!state.proxyPools.length) {
+      if (isOnboardingUser()) {
+        state.proxyPools = await api("/api/proxy-pools");
+      } else {
+        await loadProxyInventory();
+      }
+      populateSelects();
+    }
+    if (!isOnboardingUser()) {
+      await ensureStrategiesLoaded();
+      fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value);
+    }
   },
 };
 
@@ -1092,7 +1119,7 @@ async function loadPricingInventory() {
 async function loadAccessInventory() {
   if (!canView("access")) return;
   const expandedUserID = state.expandedUserID;
-  if (state.me.role === "user") {
+  if (state.me.role === "user" || isOnboardingUser()) {
     state.me = await api("/api/me");
     $("#identity-name").textContent = state.me.name || state.me.username;
   }
@@ -2120,7 +2147,7 @@ function renderDashboard() {
         item.speed_passthrough_enabled,
         item.anthropic_beta_passthrough_enabled,
       ].filter(Boolean).length;
-      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>CLI 版本</span><strong>${escapeHTML(item.claude_cli_version || "2.1.220")}</strong></div><div class="group-stat-line"><span>日期规范化</span><strong>${item.dateline_normalization_enabled ?? true ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>格式过滤</span><strong>${item.request_format_filter_enabled ? "拦截" : "关闭"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>短冷却阶梯</span><strong>${item.rate_limit_stepped_cooldown_enabled ? `+${Number(item.rate_limit_cooldown_step_seconds || 30)}s` : "关闭"}</strong></div><div class="group-stat-line"><span>降峰时长</span><strong>${item.rate_limit_downweight_stepped_cooldown_enabled ? `${Number(item.rate_limit_downweight_base_minutes || 60)}m + ${Number(item.rate_limit_downweight_step_minutes || 60)}m` : "跟随 5h"}</strong></div><div class="group-stat-line"><span>5h 刷新错峰</span><strong>${item.five_hour_release_stagger_enabled ?? true ? `${Number(item.five_hour_release_stagger_min_minutes ?? 15)}–${Number(item.five_hour_release_stagger_max_minutes ?? 30)}m` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() || isOnboardingUser() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>CLI 版本</span><strong>${escapeHTML(item.claude_cli_version || "2.1.220")}</strong></div><div class="group-stat-line"><span>日期规范化</span><strong>${item.dateline_normalization_enabled ?? true ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>格式过滤</span><strong>${item.request_format_filter_enabled ? "拦截" : "关闭"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>短冷却阶梯</span><strong>${item.rate_limit_stepped_cooldown_enabled ? `+${Number(item.rate_limit_cooldown_step_seconds || 30)}s` : "关闭"}</strong></div><div class="group-stat-line"><span>降峰时长</span><strong>${item.rate_limit_downweight_stepped_cooldown_enabled ? `${Number(item.rate_limit_downweight_base_minutes || 60)}m + ${Number(item.rate_limit_downweight_step_minutes || 60)}m` : "跟随 5h"}</strong></div><div class="group-stat-line"><span>5h 刷新错峰</span><strong>${item.five_hour_release_stagger_enabled ?? true ? `${Number(item.five_hour_release_stagger_min_minutes ?? 15)}–${Number(item.five_hour_release_stagger_max_minutes ?? 30)}m` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -3205,7 +3232,7 @@ function userAccessDetailMarkup(userID) {
 
 function renderAccess() {
   const admin = isAdmin();
-  const canManageKeys = admin || state.me.role === "user";
+  const canManageKeys = admin || state.me.role === "user" || isOnboardingUser();
   $("#user-toolbar").hidden = !admin;
   $("#users-panel").hidden = !admin;
   if (admin) {
@@ -3236,7 +3263,7 @@ function renderAccess() {
     .join("");
   $("#gateway-endpoint").textContent = `${location.origin}/v1/messages`;
   const balanceSummary = $("#user-balance-summary");
-  balanceSummary.hidden = state.me.role !== "user";
+  balanceSummary.hidden = state.me.role !== "user" && !isOnboardingUser();
   if (!balanceSummary.hidden)
     balanceSummary.textContent = `可支配额度 ${state.me.balance == null ? "不限" : money(state.me.balance)} · 已消费 ${money(state.me.consumed || 0)}`;
   refreshIcons($("#view-access"));
@@ -3643,7 +3670,9 @@ function setView(view, { load = true, force = false } = {}) {
   $("#primary-action-label").textContent = action;
   const canAct =
     Boolean(action) &&
-    (isAdmin() || (state.me?.role === "user" && view === "access"));
+    (isAdmin() ||
+      ((state.me?.role === "user" || isOnboardingUser()) &&
+        view === "access"));
   $("#primary-action").hidden = !canAct;
   const activeView = $(`#view-${view}`);
   initializeChoices(activeView);
@@ -4032,7 +4061,11 @@ function collectGroupStrategyShares() {
 function openGroup(item = null) {
   $("#group-form").reset();
   $("#group-id").value = item?.id || "";
-  $("#group-dialog-title").textContent = item ? "编辑分组" : "新增分组";
+  $("#group-dialog-title").textContent = isOnboardingUser()
+    ? "分组兼容设置"
+    : item
+      ? "编辑分组"
+      : "新增分组";
   $("#group-name").value = item?.name || "";
   $("#group-description").value = item?.description || "";
   $("#group-rate").value = item?.rate_multiplier ?? 1;
@@ -4040,11 +4073,13 @@ function openGroup(item = null) {
   $("#group-daily").value = item?.daily_limit_usd ?? "";
   $("#group-monthly").value = item?.monthly_limit_usd ?? "";
   $("#group-reserve-pool").checked = Boolean(item?.reserve_pool_enabled);
-  fillStrategySelect($("#group-strategy"), item?.strategy_id);
-  ensureStrategiesLoaded().then(() =>
-    fillStrategySelect($("#group-strategy"), item?.strategy_id),
-  );
-  renderGroupStrategyShares(item?.id);
+  if (!isOnboardingUser()) {
+    fillStrategySelect($("#group-strategy"), item?.strategy_id);
+    ensureStrategiesLoaded().then(() =>
+      fillStrategySelect($("#group-strategy"), item?.strategy_id),
+    );
+    renderGroupStrategyShares(item?.id);
+  }
   $("#group-normal-request-mode").checked = Boolean(item?.normal_request_mode);
   $("#group-claude-code-identity").checked = Boolean(
     item?.claude_code_identity_enabled,
@@ -4212,8 +4247,9 @@ function openUser(item = null) {
   showInitializedDialog("#user-dialog");
 }
 function syncUserRole(resetPages = false) {
-  const manager = $("#user-role").value !== "user";
+  const manager = ["admin", "readonly_admin"].includes($("#user-role").value);
   const admin = $("#user-role").value === "admin";
+  const onboarding = $("#user-role").value === "onboarding_user";
   $$('input[name="user-group"]').forEach((node) => {
     if (manager) node.checked = true;
     node.disabled = manager;
@@ -4230,12 +4266,15 @@ function syncUserRole(resetPages = false) {
       node.checked = restrictedAccountViewDefault.blocks.includes(node.value);
     });
   }
-  $("#user-account-columns").hidden = admin;
-  $("#user-account-blocks").hidden = admin;
+  $$('input[name="user-page"]').forEach((node) => {
+    node.disabled = onboarding;
+  });
+  $("#user-account-columns").hidden = admin || onboarding;
+  $("#user-account-blocks").hidden = admin || onboarding;
 }
 function syncKeyGroups(selected = "") {
   const owner =
-    state.me.role === "user"
+    state.me.role === "user" || isOnboardingUser()
       ? state.me
       : state.users.find(
           (user) => String(user.id) === String($("#key-user").value),
@@ -4244,7 +4283,8 @@ function syncKeyGroups(selected = "") {
   const groups = availableGroups().filter(
     (group) =>
       !group.reserve_pool_enabled &&
-      (owner?.role !== "user" || allowed.has(group.id)),
+      (!["user", "onboarding_user"].includes(owner?.role) ||
+        allowed.has(group.id)),
   );
   $("#key-group").innerHTML = groups
     .map((group) => groupOption(group, selected))
@@ -4259,7 +4299,8 @@ function openKey(item = null) {
   $("#key-quota").value = item?.quota || 0;
   $("#key-expires").value = dateTimeInput(item?.expires_at);
   $("#key-status").value = item?.status || "active";
-  $("#key-user-field").hidden = state.me.role === "user";
+  $("#key-user-field").hidden =
+    state.me.role === "user" || isOnboardingUser();
   $("#key-status-field").hidden = !item;
   if (item) $("#key-user").value = item.user_id;
   else if (state.users.length)
@@ -5496,19 +5537,21 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
         base_rpm: Number($("#batch-base-rpm").value || 0),
         rpm_strategy: $("#batch-rpm-strategy").value,
         rpm_sticky_buffer: Number($("#batch-rpm-buffer").value || 0),
-        strategy_id: strategySelectPayload($("#batch-strategy")),
-        quota_5h_threshold_enabled: $(
-          "#batch-quota-threshold-enabled",
-        ).checked,
-        quota_5h_threshold_percent: Number(
-          $("#batch-quota-threshold-percent").value || 80,
-        ),
-        quota_7d_threshold_enabled: $(
-          "#batch-7d-quota-threshold-enabled",
-        ).checked,
-        quota_7d_threshold_percent: Number(
-          $("#batch-7d-quota-threshold-percent").value || 80,
-        ),
+        strategy_id: isOnboardingUser()
+          ? null
+          : strategySelectPayload($("#batch-strategy")),
+        quota_5h_threshold_enabled: isOnboardingUser()
+          ? true
+          : $("#batch-quota-threshold-enabled").checked,
+        quota_5h_threshold_percent: isOnboardingUser()
+          ? 95
+          : Number($("#batch-quota-threshold-percent").value || 80),
+        quota_7d_threshold_enabled: isOnboardingUser()
+          ? true
+          : $("#batch-7d-quota-threshold-enabled").checked,
+        quota_7d_threshold_percent: isOnboardingUser()
+          ? 95
+          : Number($("#batch-7d-quota-threshold-percent").value || 80),
       }),
     });
     $("#batch-result-panel").hidden = false;
@@ -5755,87 +5798,107 @@ $("#group-form").addEventListener("submit", async (event) => {
     const optional = (selector) =>
       $(selector).value === "" ? null : Number($(selector).value);
     const id = $("#group-id").value;
+    if (isOnboardingUser() && !id)
+      throw new Error("上号用户不能创建分组");
+    const onboardingPayload = {
+      normal_request_mode: $("#group-normal-request-mode").checked,
+      claude_cli_version: $("#group-claude-cli-version").value.trim(),
+      reject_anthropic_downgrade_enabled: $(
+        "#group-reject-anthropic-downgrade",
+      ).checked,
+      reject_distillation_enabled: $("#group-reject-distillation").checked,
+    };
+    const payload = isOnboardingUser()
+      ? onboardingPayload
+      : {
+          name: $("#group-name").value,
+          description: $("#group-description").value,
+          rate_multiplier: Number($("#group-rate").value),
+          status: $("#group-status").value,
+          daily_limit_usd: optional("#group-daily"),
+          monthly_limit_usd: optional("#group-monthly"),
+          reserve_pool_enabled: $("#group-reserve-pool").checked,
+          normal_request_mode: $("#group-normal-request-mode").checked,
+          claude_code_identity_enabled: $("#group-claude-code-identity")
+            .checked,
+          claude_cli_version: $("#group-claude-cli-version").value.trim(),
+          reject_anthropic_downgrade_enabled: $(
+            "#group-reject-anthropic-downgrade",
+          ).checked,
+          reject_distillation_enabled: $("#group-reject-distillation")
+            .checked,
+          request_format_filter_enabled: $("#group-request-format-filter")
+            .checked,
+          quota_header_masking_enabled: $("#group-quota-header-masking")
+            .checked,
+          cache_creation_detail_enabled: $("#group-cache-creation-detail")
+            .checked,
+          extra_usage_failover_enabled: $("#group-extra-usage-failover")
+            .checked,
+          opencode_scrub_enabled: $("#group-opencode-scrub").checked,
+          dateline_normalization_enabled: $("#group-dateline-normalization")
+            .checked,
+          stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
+          adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
+          rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
+          mcp_tool_names_enabled: $("#group-mcp-tool-names").checked,
+          service_tier_passthrough_enabled: $(
+            "#group-passthrough-service-tier",
+          ).checked,
+          inference_geo_passthrough_enabled: $(
+            "#group-passthrough-inference-geo",
+          ).checked,
+          speed_passthrough_enabled: $("#group-passthrough-speed").checked,
+          anthropic_beta_passthrough_enabled: $(
+            "#group-passthrough-anthropic-beta",
+          ).checked,
+          overload_cooldown_seconds: Number(
+            $("#group-overload-cooldown").value,
+          ),
+          rate_limit_downweight_enabled: $(
+            "#group-rate-limit-downweight-enabled",
+          ).checked,
+          rate_limit_cooling_threshold: Number(
+            $("#group-rate-limit-cooling-threshold").value,
+          ),
+          rate_limit_wait_seconds: Number(
+            $("#group-rate-limit-wait-seconds").value,
+          ),
+          rate_limit_stepped_cooldown_enabled: $(
+            "#group-rate-limit-stepped-cooldown",
+          ).checked,
+          rate_limit_cooldown_step_seconds: Number(
+            $("#group-rate-limit-cooldown-step").value,
+          ),
+          rate_limit_downweight_stepped_cooldown_enabled: $(
+            "#group-rate-limit-downweight-stepped",
+          ).checked,
+          rate_limit_downweight_base_minutes: Number(
+            $("#group-rate-limit-downweight-base").value,
+          ),
+          rate_limit_downweight_step_minutes: Number(
+            $("#group-rate-limit-downweight-step").value,
+          ),
+          five_hour_release_stagger_enabled: $(
+            "#group-five-hour-stagger-enabled",
+          ).checked,
+          five_hour_release_stagger_min_minutes: Number(
+            $("#group-five-hour-stagger-min").value,
+          ),
+          five_hour_release_stagger_max_minutes: Number(
+            $("#group-five-hour-stagger-max").value,
+          ),
+          strategy_required_enabled: $("#group-strategy-required").checked,
+          capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,
+          capacity_queue_timeout_seconds: Number(
+            $("#group-capacity-queue-timeout").value,
+          ),
+          strategy_id: strategySelectPayload($("#group-strategy")),
+          strategy_shares: collectGroupStrategyShares(),
+        };
     await api(id ? `/api/groups/${id}` : "/api/groups", {
       method: id ? "PUT" : "POST",
-      body: JSON.stringify({
-        name: $("#group-name").value,
-        description: $("#group-description").value,
-        rate_multiplier: Number($("#group-rate").value),
-        status: $("#group-status").value,
-        daily_limit_usd: optional("#group-daily"),
-        monthly_limit_usd: optional("#group-monthly"),
-        reserve_pool_enabled: $("#group-reserve-pool").checked,
-        normal_request_mode: $("#group-normal-request-mode").checked,
-        claude_code_identity_enabled: $("#group-claude-code-identity").checked,
-        claude_cli_version: $("#group-claude-cli-version").value.trim(),
-        reject_anthropic_downgrade_enabled: $(
-          "#group-reject-anthropic-downgrade",
-        ).checked,
-        reject_distillation_enabled: $("#group-reject-distillation").checked,
-        request_format_filter_enabled: $("#group-request-format-filter").checked,
-        quota_header_masking_enabled: $("#group-quota-header-masking").checked,
-        cache_creation_detail_enabled: $("#group-cache-creation-detail")
-          .checked,
-        extra_usage_failover_enabled: $("#group-extra-usage-failover").checked,
-        opencode_scrub_enabled: $("#group-opencode-scrub").checked,
-        dateline_normalization_enabled: $("#group-dateline-normalization")
-          .checked,
-        stream_hedge_enabled: $("#group-stream-hedge-enabled").checked,
-        adaptive_hedge_enabled: $("#group-adaptive-hedge-enabled").checked,
-        rpm_dispatch_enabled: $("#group-rpm-dispatch-enabled").checked,
-        mcp_tool_names_enabled: $("#group-mcp-tool-names").checked,
-        service_tier_passthrough_enabled: $(
-          "#group-passthrough-service-tier",
-        ).checked,
-        inference_geo_passthrough_enabled: $(
-          "#group-passthrough-inference-geo",
-        ).checked,
-        speed_passthrough_enabled: $("#group-passthrough-speed").checked,
-        anthropic_beta_passthrough_enabled: $(
-          "#group-passthrough-anthropic-beta",
-        ).checked,
-        overload_cooldown_seconds: Number($("#group-overload-cooldown").value),
-        rate_limit_downweight_enabled: $(
-          "#group-rate-limit-downweight-enabled",
-        ).checked,
-        rate_limit_cooling_threshold: Number(
-          $("#group-rate-limit-cooling-threshold").value,
-        ),
-        rate_limit_wait_seconds: Number(
-          $("#group-rate-limit-wait-seconds").value,
-        ),
-        rate_limit_stepped_cooldown_enabled: $(
-          "#group-rate-limit-stepped-cooldown",
-        ).checked,
-        rate_limit_cooldown_step_seconds: Number(
-          $("#group-rate-limit-cooldown-step").value,
-        ),
-        rate_limit_downweight_stepped_cooldown_enabled: $(
-          "#group-rate-limit-downweight-stepped",
-        ).checked,
-        rate_limit_downweight_base_minutes: Number(
-          $("#group-rate-limit-downweight-base").value,
-        ),
-        rate_limit_downweight_step_minutes: Number(
-          $("#group-rate-limit-downweight-step").value,
-        ),
-        five_hour_release_stagger_enabled: $(
-          "#group-five-hour-stagger-enabled",
-        ).checked,
-        five_hour_release_stagger_min_minutes: Number(
-          $("#group-five-hour-stagger-min").value,
-        ),
-        five_hour_release_stagger_max_minutes: Number(
-          $("#group-five-hour-stagger-max").value,
-        ),
-        strategy_required_enabled: $("#group-strategy-required").checked,
-        capacity_queue_enabled: $("#group-capacity-queue-enabled").checked,
-        capacity_queue_timeout_seconds: Number(
-          $("#group-capacity-queue-timeout").value,
-        ),
-        strategy_id: strategySelectPayload($("#group-strategy")),
-        strategy_shares: collectGroupStrategyShares(),
-      }),
+      body: JSON.stringify(payload),
     });
     $("#group-dialog").close();
     toast(id ? "分组已更新" : "分组已创建");
@@ -6141,7 +6204,9 @@ $("#key-form").addEventListener("submit", async (event) => {
     const id = $("#key-id").value;
     const payload = {
       user_id:
-        state.me.role === "user" ? state.me.id : Number($("#key-user").value),
+        state.me.role === "user" || isOnboardingUser()
+          ? state.me.id
+          : Number($("#key-user").value),
       name: $("#key-name").value,
       group_id: $("#key-group").value,
       quota: Number($("#key-quota").value),

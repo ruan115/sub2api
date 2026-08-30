@@ -550,11 +550,11 @@
               <label><span>基础 RPM</span><input id="batch-base-rpm" type="number" min="0" max="10000" value="15" /></label>
               <label><span>RPM 策略</span><select id="batch-rpm-strategy"><option value="tiered">三区模型</option><option value="sticky_exempt">粘性豁免</option><option value="fixed">固定硬限</option></select></label>
               <label><span>粘性缓冲 n</span><input id="batch-rpm-buffer" type="number" min="0" value="0" /><small id="batch-rpm-buffer-hint">三区模型：n 为粘性缓冲；0 按并发与会话数自动计算</small></label>
-              <label><span>调度策略</span><select id="batch-strategy"><option value="">跟随分组</option></select><small>绑定后该账号的限流与算法优先使用策略配置</small></label>
-              <label class="toggle-field"><span>启用提前冷却</span><input type="checkbox" id="batch-quota-threshold-enabled" /><i></i></label>
-              <label class="quota-threshold-value-field"><span>5h 使用率阈值</span><span class="percent-input"><input id="batch-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 5h 刷新时间，并沿用所属分组的刷新错峰配置</small></label>
-              <label class="toggle-field"><span>启用 7d 提前冷却</span><input type="checkbox" id="batch-7d-quota-threshold-enabled" /><i></i></label>
-              <label class="quota-threshold-value-field"><span>7d 使用率阈值</span><span class="percent-input"><input id="batch-7d-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 7d 刷新时间</small></label>
+              <label class="onboarding-hidden"><span>调度策略</span><select id="batch-strategy"><option value="">跟随分组</option></select><small>绑定后该账号的限流与算法优先使用策略配置</small></label>
+              <label class="toggle-field onboarding-hidden"><span>启用提前冷却</span><input type="checkbox" id="batch-quota-threshold-enabled" /><i></i></label>
+              <label class="quota-threshold-value-field onboarding-hidden"><span>5h 使用率阈值</span><span class="percent-input"><input id="batch-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 5h 刷新时间，并沿用所属分组的刷新错峰配置</small></label>
+              <label class="toggle-field onboarding-hidden"><span>启用 7d 提前冷却</span><input type="checkbox" id="batch-7d-quota-threshold-enabled" /><i></i></label>
+              <label class="quota-threshold-value-field onboarding-hidden"><span>7d 使用率阈值</span><span class="percent-input"><input id="batch-7d-quota-threshold-percent" type="number" min="1" max="100" step="1" value="80" required disabled /><b>%</b></span><small>达到阈值后冷却至 7d 刷新时间</small></label>
               <fieldset class="group-picker" id="batch-group-picker"><legend>所属分组</legend><label class="group-choice group-a"><input type="checkbox" name="batch-group" value="a" checked /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>A 分组</b></label><label class="group-choice group-b"><input type="checkbox" name="batch-group" value="b" /><span class="group-choice-icon"><svg aria-hidden="true"><use href="#claude-group-icon"></use></svg></span><b>B 分组</b></label></fieldset>
               <div class="span-2 batch-auth-actions"><button class="button primary write-action" id="batch-auth-submit" type="submit"><i data-lucide="key-round"></i><span>开始批量授权</span></button></div>
             </form>
@@ -1748,7 +1748,7 @@
               <i></i>
             </label>
           </div>
-          <div class="group-mode-setting">
+          <div class="group-mode-setting onboarding-group-setting">
             <div>
               <strong>蒸馏兼容模式</strong>
               <small title="关闭：Sub2API 原版；开启：保留 billing 与客户端 system/messages/tools；缓存 TTL 未传时默认 5m，显式传入 5m 或 1h 时原样保留；不跨模型回退">关闭：Sub2API 原版；开启：保留请求内容，TTL 默认 5m、显式值优先，不跨模型回退</small>
@@ -1787,7 +1787,7 @@
               <i></i>
             </label>
           </div>
-          <div class="group-mode-setting">
+          <div class="group-mode-setting onboarding-group-setting">
             <div>
               <strong>Claude CLI 版本</strong>
               <small title="统一控制出站 User-Agent 与 billing attribution 的 cc_version">终端升级后填新版本，同时更新 UA 与 billing</small>
@@ -1805,7 +1805,7 @@
                 required />
             </label>
           </div>
-          <div class="group-mode-setting">
+          <div class="group-mode-setting onboarding-group-setting">
             <div>
               <strong>拒绝 Anthropic 静默模型降级</strong>
               <small title="开启后，Fable 5 或 Opus 5 被上游降级为 Opus 4.8 时向客户端返回错误；关闭时正常透传">开启后，Fable 5 或 Opus 5 被上游降级为 Opus 4.8 时向客户端返回错误；关闭时正常透传</small>
@@ -1818,7 +1818,7 @@
               <i></i>
             </label>
           </div>
-          <div class="group-mode-setting">
+          <div class="group-mode-setting onboarding-group-setting">
             <div>
               <strong>拒绝用户蒸馏探测</strong>
               <small title="检测用户提取系统提示词、隐藏指令、工具定义或内部参数的高置信度请求；命中后不进入账号调度，返回 588 Not allowed">检测提示词与工具定义提取行为；命中后返回 588 Not allowed</small>
@@ -2648,6 +2648,7 @@
             ><span>角色</span
             ><select id="user-role">
               <option value="user">普通用户</option>
+              <option value="onboarding_user">上号用户</option>
               <option value="readonly_admin">只读管理员</option>
               <option value="admin">管理员</option>
             </select></label

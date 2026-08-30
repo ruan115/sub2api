@@ -75,6 +75,25 @@ type batchAuthorizationInput struct {
 	Quota7DThresholdPercent *int     `json:"quota_7d_threshold_percent"`
 }
 
+func applyOnboardingBatchRules(user panelUser, input *batchAuthorizationInput) error {
+	if user.Role != roleOnboardingUser {
+		return nil
+	}
+	for _, groupID := range input.GroupIDs {
+		if !userCanAccessGroup(user, groupID) {
+			return fmt.Errorf("group %s is not assigned to this onboarding user", groupID)
+		}
+	}
+	enabled := true
+	percent := 95
+	input.StrategyID = nil
+	input.Quota5HThresholdEnabled = &enabled
+	input.Quota5HThresholdPercent = &percent
+	input.Quota7DThresholdEnabled = &enabled
+	input.Quota7DThresholdPercent = &percent
+	return nil
+}
+
 type batchAuthorizationResult struct {
 	Index        int    `json:"index"`
 	AccountID    int64  `json:"account_id,omitempty"`
@@ -329,7 +348,7 @@ func (a *app) recordAuthorization(accountID, proxyID *int64, accountName, method
 func (a *app) handleAuthorizationStats(w http.ResponseWriter, r *http.Request) {
 	where := []string{"1 = 1"}
 	args := []any{}
-	if user := currentUser(r); user.Role == "user" {
+	if user := currentUser(r); isScopedUserRole(user.Role) {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		where = append(where, `EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = authorization_logs.account_id AND `+condition+`)`)
 		args = append(args, scopeArgs...)
@@ -407,7 +426,7 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 	}
 	usageWhere := `date(created_at, '` + shanghaiOffset + `') BETWEEN ? AND ?`
 	usageArgs := []any{start, end}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		usageWhere += ` AND user_id = ?`
 		usageArgs = append(usageArgs, user.ID)
 	}
@@ -441,7 +460,7 @@ func (a *app) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 	}
 	authWhere := `date(created_at, '` + shanghaiOffset + `') BETWEEN ? AND ?`
 	authArgs := []any{start, end}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		authWhere += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = authorization_logs.account_id AND ` + condition + `)`
 		authArgs = append(authArgs, scopeArgs...)
@@ -539,7 +558,7 @@ func (a *app) mergeDailyAccountEvents(items map[string]*dailyStat, start, end, e
 	}
 	where := `event_type = ? AND date(created_at, '` + shanghaiOffset + `') BETWEEN ? AND ?`
 	args := []any{eventType, start, end}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		where += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.id = account_lifecycle_events.account_id AND ` + condition + `)`
 		args = append(args, scopeArgs...)
@@ -569,6 +588,11 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.GroupIDs = uniqueGroups(input.GroupIDs)
+	user := currentUser(r)
+	if err := applyOnboardingBatchRules(user, &input); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if input.ProxyPoolID <= 0 || len(input.GroupIDs) == 0 || input.AccountPrice < 0 {
 		writeError(w, http.StatusBadRequest, "proxy pool, account groups or account price is invalid")
 		return
@@ -649,6 +673,21 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if exists {
+			if isScopedUserRole(user.Role) {
+				allowed, accessErr := a.userCanAccessAccount(user, existingID)
+				if accessErr != nil {
+					item.Error = accessErr.Error()
+					response.Failed++
+					response.Items = append(response.Items, item)
+					continue
+				}
+				if !allowed {
+					item.Error = "existing account is outside the assigned groups"
+					response.Failed++
+					response.Items = append(response.Items, item)
+					continue
+				}
+			}
 			leaseOwner, leaseErr := a.acquireAccountTokenLease(r.Context(), existingID)
 			if leaseErr != nil {
 				item.Error = leaseErr.Error()
@@ -717,6 +756,17 @@ func (a *app) handleBatchAuthorization(w http.ResponseWriter, r *http.Request) {
 		a.recordAuthorization(&accountID, proxyID, item.Name, "batch_session_key", true, "authorization succeeded", token.SubscriptionType, requestIP(r))
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *app) userCanAccessAccount(user panelUser, accountID int64) (bool, error) {
+	if !isScopedUserRole(user.Role) {
+		return true, nil
+	}
+	condition, args := scopedGroupCondition(user, "ag.group_id")
+	queryArgs := append([]any{accountID}, args...)
+	var count int
+	err := a.db.QueryRow(`SELECT COUNT(*) FROM account_groups ag WHERE ag.account_id = ? AND `+condition, queryArgs...).Scan(&count)
+	return count > 0, err
 }
 
 func (a *app) exchangeBatchClaudeSessionKey(ctx context.Context, sessionKey, scope string, poolID int64) (*claudeTokenInfo, *int64, string, error) {

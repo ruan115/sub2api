@@ -2763,6 +2763,14 @@ textarea:focus {
 .ordinary-user .internal-cost-column {
   display: none;
 }
+.onboarding-user #group-form > .form-stack > :not(.onboarding-group-setting) {
+  display: none !important;
+}
+.onboarding-user #group-dialog .modal-actions {
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+}
 .app-shell:not([data-role="admin"]) .admin-only-column {
   display: none;
 }

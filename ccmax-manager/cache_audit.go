@@ -149,7 +149,7 @@ func (a *app) pruneCachePrefixEvents() {
 }
 
 func (a *app) handleCachePrefixAuditLogs(w http.ResponseWriter, r *http.Request) {
-	if currentUser(r).Role == "user" {
+	if isScopedUserRole(currentUser(r).Role) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权查看跨账号缓存审计"})
 		return
 	}

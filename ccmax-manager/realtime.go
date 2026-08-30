@@ -63,7 +63,7 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 	where := []string{"a.deleted_at IS NULL", "a.archived_at IS NULL"}
 	args := []any{}
 	user := currentUser(r)
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		condition, scopeArgs := scopedAccountCondition(user, "a")
 		where = append(where, condition)
 		args = append(args, scopeArgs...)
@@ -280,7 +280,7 @@ func (a *app) handleRealtimeStats(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) realtimeCapacityWaiters(groupID string, user panelUser) int64 {
 	if groupID != "" {
-		if user.Role == "user" && !userCanAccessGroup(user, groupID) {
+		if isScopedUserRole(user.Role) && !userCanAccessGroup(user, groupID) {
 			return 0
 		}
 		value, ok := a.capacityWaiters.Load(groupID)
@@ -292,7 +292,7 @@ func (a *app) realtimeCapacityWaiters(groupID string, user panelUser) int64 {
 	var total int64
 	a.capacityWaiters.Range(func(key, value any) bool {
 		candidate, _ := key.(string)
-		if user.Role != "user" || userCanAccessGroup(user, candidate) {
+		if !isScopedUserRole(user.Role) || userCanAccessGroup(user, candidate) {
 			total += max(int64(0), atomic.LoadInt64(value.(*int64)))
 		}
 		return true

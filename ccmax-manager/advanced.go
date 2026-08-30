@@ -721,7 +721,7 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	where := []string{"a.deleted_at IS NULL", "a.archived_at IS NULL"}
 	whereArgs := []any{}
 	user := currentUser(r)
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		condition, args := scopedAccountCondition(user, "a")
 		where = append(where, condition)
 		whereArgs = append(whereArgs, args...)
@@ -766,7 +766,7 @@ func (a *app) handleAccountSummary(w http.ResponseWriter, r *http.Request) {
 	whereArgs = append(whereArgs, quotaArgs...)
 	join := "LEFT JOIN usage_logs u ON u.account_id = a.id"
 	joinArgs := []any{}
-	if user.Role == "user" {
+	if isScopedUserRole(user.Role) {
 		join += " AND u.user_id = ?"
 		joinArgs = append(joinArgs, user.ID)
 	}
