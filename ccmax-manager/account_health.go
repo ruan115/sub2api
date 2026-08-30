@@ -89,6 +89,15 @@ func (a *app) handleAccountHealthRefresh(w http.ResponseWriter, r *http.Request)
 	if r.ContentLength > 0 && !decodeJSON(w, r, &input) {
 		return
 	}
+	if isScopedUserRole(currentUser(r).Role) {
+		if len(input.IDs) == 0 {
+			writeError(w, http.StatusBadRequest, "select accounts to refresh")
+			return
+		}
+		if !a.requireAccessibleAccountIDs(w, r, uniquePositiveIDs(input.IDs, 501)) {
+			return
+		}
+	}
 	result, err := a.refreshAccountHealth(r.Context(), input.IDs, true)
 	if err != nil {
 		if errors.Is(err, errAccountHealthRunning) {

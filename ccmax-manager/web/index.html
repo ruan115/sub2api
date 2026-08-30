@@ -265,14 +265,14 @@
         <section class="view" id="view-accounts">
           <div class="account-sticky-region">
             <section class="panel filter-bar account-filters">
-            <label class="search-field"
+            <label class="search-field" data-account-filter="search"
               ><i data-lucide="search"></i
               ><input
                 id="account-search"
                 type="search"
                 placeholder="搜索名称、备注或凭证尾号"
             /></label>
-            <div class="segmented" id="account-group-filter">
+            <div class="segmented" id="account-group-filter" data-account-filter="group">
               <button class="active" data-group="">全部</button
               ><button data-group="a">
                 <svg class="inline-claude-icon" aria-hidden="true">
@@ -284,10 +284,10 @@
                 ><span>B 组</span>
               </button>
             </div>
-            <select id="account-strategy-filter" aria-label="按调度策略筛选" title="全部策略">
+            <select id="account-strategy-filter" data-account-filter="strategy" aria-label="按调度策略筛选" title="全部策略">
               <option value="">全部策略</option>
             </select>
-            <label class="quota-utilization-filter"
+            <label class="quota-utilization-filter" data-account-filter="quota_5h"
               ><span>5h 使用率 =</span
               ><span class="percent-input"
                 ><input
@@ -300,7 +300,7 @@
                   placeholder="不限"
                   aria-label="精确 5h 使用率" /><b>%</b></span
             ></label>
-            <label class="threshold-status-filter"
+            <label class="threshold-status-filter" data-account-filter="cooling_5h"
               ><span>5h 提前冷却</span
               ><select id="account-quota-threshold-filter" aria-label="按 5h 提前冷却状态筛选">
                 <option value="">全部</option>
@@ -309,7 +309,7 @@
                 <option value="reached">已达到阈值</option>
               </select></label
             >
-            <label class="quota-utilization-filter"
+            <label class="quota-utilization-filter" data-account-filter="quota_7d"
               ><span>7d 使用率 =</span
               ><span class="percent-input"
                 ><input
@@ -322,7 +322,7 @@
                   placeholder="不限"
                   aria-label="精确 7d 使用率" /><b>%</b></span
             ></label>
-            <label class="threshold-status-filter"
+            <label class="threshold-status-filter" data-account-filter="cooling_7d"
               ><span>7d 提前冷却</span
               ><select id="account-7d-quota-threshold-filter" aria-label="按 7d 提前冷却状态筛选">
                 <option value="">全部</option>
@@ -331,9 +331,9 @@
                 <option value="reached">已达到阈值</option>
               </select></label
             >
-            <label class="date-filter"
+            <label class="date-filter" data-account-filter="from"
               ><span>开始</span><input type="datetime-local" step="60" id="account-from" /></label
-            ><label class="date-filter"
+            ><label class="date-filter" data-account-filter="to"
               ><span>结束</span><input type="datetime-local" step="60" id="account-to"
             /></label>
             </section>
@@ -342,13 +342,13 @@
               id="account-summary-metrics"
             ></div>
             <div class="status-tabs" id="account-status-tabs">
-              <button class="active" data-account-status="">全部 <b id="status-all-count">0</b></button>
-              <button data-account-status="normal">正常 <b id="status-normal-count">0</b></button>
-              <button data-account-status="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
-              <button data-account-status="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
-              <button data-account-status="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
-              <button data-account-status="cooling_429" title="普通瞬时 429 触发 60～120 秒短冷却">429 冷却 <b id="status-cooling-429-count">0</b></button>
-              <button data-account-status="error">错误 <b id="status-error-count">0</b></button>
+              <button class="active" data-account-status="" data-account-status-key="all">全部 <b id="status-all-count">0</b></button>
+              <button data-account-status="normal" data-account-status-key="normal">正常 <b id="status-normal-count">0</b></button>
+              <button data-account-status="unavailable" data-account-status-key="unavailable">暂不可调度 <b id="status-unavailable-count">0</b></button>
+              <button data-account-status="limited_5h" data-account-status-key="limited_5h" title="5 小时窗口配额耗尽，等待窗口重置">5h 限制 <b id="status-limited-5h-count">0</b></button>
+              <button data-account-status="limited_7d" data-account-status-key="limited_7d" title="7 天窗口配额耗尽，等待窗口重置">7d 限制 <b id="status-limited-7d-count">0</b></button>
+              <button data-account-status="cooling_429" data-account-status-key="cooling_429" title="普通瞬时 429 触发 60～120 秒短冷却">429 冷却 <b id="status-cooling-429-count">0</b></button>
+              <button data-account-status="error" data-account-status-key="error">错误 <b id="status-error-count">0</b></button>
             </div>
             <section class="panel account-sticky-inventory">
               <div class="section-heading">
@@ -2688,21 +2688,52 @@
             <label><input type="checkbox" name="user-page" value="pricing" /><span>模型价格</span></label>
             <label><input type="checkbox" name="user-page" value="billing" /><span>计费中心</span></label>
             <label><input type="checkbox" name="user-page" value="audit" /><span>操作日志</span></label>
-            <small>页面权限仅控制查看范围；普通用户不能修改系统配置，只读管理员不能执行任何写操作。</small>
+            <small>上号用户可编辑已展示的业务页面；隐藏页面的写接口同步禁用。用户列表始终仅超级管理员可见。</small>
           </fieldset>
           <fieldset class="page-picker account-view-picker" id="user-account-columns">
             <legend>账号池表头</legend>
+            <label><input type="checkbox" name="user-account-column" value="select" /><span>选择框</span></label>
+            <label><input type="checkbox" name="user-account-column" value="id" /><span>ID</span></label>
             <label><input type="checkbox" name="user-account-column" value="account" /><span>账号</span></label>
             <label><input type="checkbox" name="user-account-column" value="status" /><span>账号状态</span></label>
             <label><input type="checkbox" name="user-account-column" value="subscription" /><span>订阅类型</span></label>
+            <label><input type="checkbox" name="user-account-column" value="price" /><span>账号价格</span></label>
+            <label><input type="checkbox" name="user-account-column" value="billing" /><span>账号总计费</span></label>
             <label><input type="checkbox" name="user-account-column" value="quota" /><span>用量窗口</span></label>
             <label><input type="checkbox" name="user-account-column" value="requests" /><span>请求数</span></label>
             <label><input type="checkbox" name="user-account-column" value="tpm" /><span>TPM</span></label>
-            <small>仅作用于普通用户和只读管理员；用量窗口只显示 5h / 7d，不包含实际 RPM。</small>
+            <label><input type="checkbox" name="user-account-column" value="onboarded" /><span>上号时间</span></label>
+            <label><input type="checkbox" name="user-account-column" value="reauthorized" /><span>二次授权时间</span></label>
+            <label><input type="checkbox" name="user-account-column" value="reauth-count" /><span>二次授权次数</span></label>
+            <label><input type="checkbox" name="user-account-column" value="survival" /><span>存活时间</span></label>
+            <label><input type="checkbox" name="user-account-column" value="last-used" /><span>最近使用</span></label>
+            <label><input type="checkbox" name="user-account-column" value="actions" /><span>操作</span></label>
+            <small>控制账号池表头及对应数据列；上号用户默认全部显示。</small>
+          </fieldset>
+          <fieldset class="page-picker account-view-picker" id="user-account-filters">
+            <legend>账号池筛选项</legend>
+            <label><input type="checkbox" name="user-account-filter" value="search" /><span>搜索</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="group" /><span>分组</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="strategy" /><span>策略</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="quota_5h" /><span>5h 使用率</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="cooling_5h" /><span>5h 提前冷却</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="quota_7d" /><span>7d 使用率</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="cooling_7d" /><span>7d 提前冷却</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="from" /><span>开始时间</span></label>
+            <label><input type="checkbox" name="user-account-filter" value="to" /><span>结束时间</span></label>
+          </fieldset>
+          <fieldset class="page-picker account-view-picker" id="user-account-statuses">
+            <legend>账号池状态筛选</legend>
+            <label><input type="checkbox" name="user-account-status" value="all" /><span>全部</span></label>
+            <label><input type="checkbox" name="user-account-status" value="normal" /><span>正常</span></label>
+            <label><input type="checkbox" name="user-account-status" value="unavailable" /><span>暂不可调度</span></label>
+            <label><input type="checkbox" name="user-account-status" value="limited_5h" /><span>5h 限制</span></label>
+            <label><input type="checkbox" name="user-account-status" value="limited_7d" /><span>7d 限制</span></label>
+            <label><input type="checkbox" name="user-account-status" value="cooling_429" /><span>429 冷却</span></label>
+            <label><input type="checkbox" name="user-account-status" value="error" /><span>错误</span></label>
           </fieldset>
           <fieldset class="page-picker account-view-picker" id="user-account-blocks">
             <legend>账号池统计块</legend>
-            <label><input type="checkbox" name="user-account-block" value="filters" /><span>搜索与筛选</span></label>
             <label><input type="checkbox" name="user-account-block" value="filtered_accounts" /><span>账号汇总</span></label>
             <label><input type="checkbox" name="user-account-block" value="billed" /><span>计费汇总</span></label>
             <label><input type="checkbox" name="user-account-block" value="actual_cost" /><span>成本汇总</span></label>
@@ -2714,7 +2745,7 @@
             <label><input type="checkbox" name="user-account-block" value="throughput" /><span>总吞吐</span></label>
             <label><input type="checkbox" name="user-account-block" value="concurrency" /><span>并发容量</span></label>
             <label><input type="checkbox" name="user-account-block" value="queue" /><span>等待队列</span></label>
-            <small>未勾选的统计字段不会返回给该用户；系统管理员始终保留完整视图。</small>
+            <small>控制账号汇总卡与实时负载项；系统管理员始终保留完整视图。</small>
           </fieldset>
           <label
             ><span>可支配余额 USD</span

@@ -1927,7 +1927,7 @@ func (a *app) handleAccountStrategyOptions(w http.ResponseWriter, r *http.Reques
 	// The account page only needs stable IDs and labels. Scoped users receive
 	// strategies that are bound to one of their allowed groups or accounts.
 	strategies, err := a.listDispatchStrategies()
-	if err == nil {
+	if err == nil && !userCanManageAnyPage(currentUser(r), "accounts", "strategies") {
 		strategies, err = a.scopeDispatchStrategies(currentUser(r), strategies)
 	}
 	if err != nil {
@@ -1956,7 +1956,7 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := currentUser(r)
-	restrictedView := user.Role != "admin"
+	restrictedView := !userCanManageAnyPage(user, "accounts", "dead")
 	if isScopedUserRole(user.Role) {
 		condition, scopeArgs := scopedAccountCondition(user, "a")
 		where += ` AND ` + condition
@@ -2132,6 +2132,9 @@ func (a *app) handleAccounts(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	var input accountInput
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if !requireAccessibleGroupIDs(w, currentUser(r), input.GroupIDs) {
 		return
 	}
 	runtimeMaterial, err := prepareRuntimeOnboardingMaterial(&input)
@@ -2488,6 +2491,9 @@ func (a *app) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	var input accountInput
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if !requireAccessibleGroupIDs(w, currentUser(r), input.GroupIDs) {
 		return
 	}
 	credentialsJSON, extraJSON, err := normalizeAccountInput(&input, existingCredentials, existingExtra)
@@ -2975,6 +2981,9 @@ func (a *app) handleAccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
 		return
 	}
+	if !a.requireAccessibleAccountIDs(w, r, ids) {
+		return
+	}
 	deleted, err := a.deleteAccounts(r.Context(), ids)
 	if err != nil {
 		if writeRuntimeRoutingOwnerError(w, err) {
@@ -2998,6 +3007,9 @@ func (a *app) handleAccountBatchSchedule(w http.ResponseWriter, r *http.Request)
 	ids := uniquePositiveIDs(input.IDs, 501)
 	if len(ids) == 0 || len(ids) > 500 {
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
+		return
+	}
+	if !a.requireAccessibleAccountIDs(w, r, ids) {
 		return
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
@@ -3080,11 +3092,17 @@ func (a *app) handleAccountBatchUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
 		return
 	}
+	if !a.requireAccessibleAccountIDs(w, r, ids) {
+		return
+	}
 	if err := normalizeAccountBatchUpdate(&input); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if input.GroupIDs != nil {
+		if !requireAccessibleGroupIDs(w, currentUser(r), *input.GroupIDs) {
+			return
+		}
 		if err := a.validateAccountGroupIDs(*input.GroupIDs); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -3424,6 +3442,17 @@ func (a *app) handleUsageCreate(w http.ResponseWriter, r *http.Request) {
 	var input usageInput
 	if !decodeJSON(w, r, &input) {
 		return
+	}
+	if input.AccountID > 0 {
+		allowed, err := a.userCanAccessAccount(currentUser(r), input.AccountID)
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "account permission denied")
+			return
+		}
 	}
 	item, created, err := a.recordUsage(input)
 	if err != nil {

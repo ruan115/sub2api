@@ -52,6 +52,9 @@ func (a *app) handleAccountBatchArchive(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "select between 1 and 500 accounts")
 		return
 	}
+	if !a.requireAccessibleAccountIDs(w, r, ids) {
+		return
+	}
 	result, err := a.archiveAccounts(r.Context(), ids)
 	if err != nil {
 		if writeRuntimeRoutingOwnerError(w, err) {

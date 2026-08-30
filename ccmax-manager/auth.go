@@ -268,13 +268,13 @@ func userCanReadAPI(user panelUser, path string) bool {
 	case path == "/api/dashboard":
 		return userCanSeePage(user, "overview")
 	case strings.HasPrefix(path, "/api/groups") || strings.HasPrefix(path, "/api/purposes"):
-		return userCanSeeAnyPage(user, "overview", "accounts", "onboarding", "billing", "access")
+		return userCanSeeAnyPage(user, "overview", "accounts", "dead", "onboarding", "billing", "access")
 	case strings.HasPrefix(path, "/api/accounts"):
 		return userCanSeeAnyPage(user, "accounts", "dead")
 	case strings.HasPrefix(path, "/api/proxy-pools"):
-		return userCanSeeAnyPage(user, "proxies", "onboarding")
+		return userCanSeeAnyPage(user, "proxies", "accounts", "dead", "onboarding")
 	case strings.HasPrefix(path, "/api/proxies"):
-		return userCanSeePage(user, "proxies")
+		return userCanSeeAnyPage(user, "proxies", "accounts", "dead")
 	case strings.HasPrefix(path, "/api/prices"):
 		return userCanSeePage(user, "pricing")
 	case strings.HasPrefix(path, "/api/billing") || strings.HasPrefix(path, "/api/usage"):
@@ -333,6 +333,17 @@ func (a *app) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			if user.Role == roleOnboardingUser && onboardingUserCanWrite(user, path, r.Method) {
+				if accountID, ok := accountMutationID(path); ok {
+					allowed, err := a.userCanMutateAccount(user, accountID)
+					if err != nil {
+						writeDBError(w, err)
+						return
+					}
+					if !allowed {
+						writeError(w, http.StatusNotFound, "account not found")
+						return
+					}
+				}
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 				return
 			}
@@ -355,11 +366,66 @@ func onboardingUserCanWrite(user panelUser, path, method string) bool {
 	if method == http.MethodPost && path == "/api/accounts/batch-authorize" {
 		return userCanSeePage(user, "onboarding")
 	}
-	if method != http.MethodPut || !strings.HasPrefix(path, "/api/groups/") {
+	if method == http.MethodPut && strings.HasPrefix(path, "/api/groups/") {
+		id := strings.TrimPrefix(path, "/api/groups/")
+		return !strings.Contains(id, "/") && userCanSeePage(user, "overview") && groupIDPattern.MatchString(id)
+	}
+	switch {
+	case strings.HasPrefix(path, "/api/accounts/") || path == "/api/accounts":
+		if strings.Contains(path, "/archive") || strings.Contains(path, "/restore") || path == "/api/accounts/batch-archive" {
+			return userCanSeePage(user, "dead")
+		}
+		if path == "/api/accounts/batch-delete" {
+			return userCanSeeAnyPage(user, "accounts", "dead")
+		}
+		if accountID, ok := accountMutationID(path); ok && accountID > 0 {
+			return userCanSeeAnyPage(user, "accounts", "dead")
+		}
+		return userCanSeePage(user, "accounts")
+	case strings.HasPrefix(path, "/api/proxy-pools") || strings.HasPrefix(path, "/api/proxies"):
+		return userCanSeePage(user, "proxies")
+	case strings.HasPrefix(path, "/api/strategies"):
+		return userCanSeePage(user, "strategies")
+	case strings.HasPrefix(path, "/api/prices"):
+		return userCanSeePage(user, "pricing")
+	case path == "/api/usage":
+		return userCanSeePage(user, "billing")
+	default:
 		return false
 	}
-	id := strings.TrimPrefix(path, "/api/groups/")
-	return userCanSeePage(user, "overview") && groupIDPattern.MatchString(id)
+}
+
+func userCanManagePage(user panelUser, page string) bool {
+	return user.Role == roleAdmin || (user.Role == roleOnboardingUser && userCanSeePage(user, page))
+}
+
+func userCanManageAnyPage(user panelUser, pages ...string) bool {
+	for _, page := range pages {
+		if userCanManagePage(user, page) {
+			return true
+		}
+	}
+	return false
+}
+
+func accountMutationID(path string) (int64, bool) {
+	const prefix = "/api/accounts/"
+	if !strings.HasPrefix(path, prefix) {
+		return 0, false
+	}
+	segment := strings.SplitN(strings.TrimPrefix(path, prefix), "/", 2)[0]
+	id, err := strconv.ParseInt(segment, 10, 64)
+	return id, err == nil && id > 0
+}
+
+func (a *app) userCanMutateAccount(user panelUser, accountID int64) (bool, error) {
+	allowed, err := a.userCanAccessAccount(user, accountID)
+	if err != nil || !allowed || userCanSeePage(user, "accounts") || !userCanSeePage(user, "dead") {
+		return allowed, err
+	}
+	var count int
+	err = a.db.QueryRow(`SELECT COUNT(*) FROM accounts a WHERE a.id = ? AND a.deleted_at IS NULL AND (a.archived_at IS NOT NULL OR `+accountStatePredicate("a", "error")+`)`, accountID).Scan(&count)
+	return count > 0, err
 }
 
 func (a *app) handleAuthSession(w http.ResponseWriter, r *http.Request) {
@@ -430,6 +496,51 @@ func userCanAccessGroup(user panelUser, groupID string) bool {
 		}
 	}
 	return false
+}
+
+func (a *app) requireAccessibleAccountIDs(w http.ResponseWriter, r *http.Request, ids []int64) bool {
+	user := currentUser(r)
+	if !isScopedUserRole(user.Role) {
+		return true
+	}
+	unique := uniquePositiveIDs(ids, 501)
+	if len(unique) != len(ids) || len(unique) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid account selection")
+		return false
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	condition, scopeArgs := scopedAccountCondition(user, "a")
+	if !userCanSeePage(user, "accounts") && userCanSeePage(user, "dead") {
+		condition += ` AND (a.archived_at IS NOT NULL OR ` + accountStatePredicate("a", "error") + `)`
+	}
+	args := make([]any, 0, len(unique)+len(scopeArgs))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	args = append(args, scopeArgs...)
+	var count int
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM accounts a WHERE a.deleted_at IS NULL AND a.id IN (`+placeholders+`) AND `+condition, args...).Scan(&count); err != nil {
+		writeDBError(w, err)
+		return false
+	}
+	if count != len(unique) {
+		writeError(w, http.StatusForbidden, "one or more accounts are outside the assigned groups")
+		return false
+	}
+	return true
+}
+
+func requireAccessibleGroupIDs(w http.ResponseWriter, user panelUser, groupIDs []string) bool {
+	if !isScopedUserRole(user.Role) {
+		return true
+	}
+	for _, groupID := range uniqueGroups(groupIDs) {
+		if !userCanAccessGroup(user, groupID) {
+			writeError(w, http.StatusForbidden, "group permission denied")
+			return false
+		}
+	}
+	return true
 }
 
 func (a *app) userBySession(token string) (panelUser, error) {
@@ -693,7 +804,7 @@ func normalizeUserInput(input *userInput, requirePassword bool) error {
 	if len(input.VisiblePages) == 0 {
 		return errors.New("select at least one visible page")
 	}
-	if input.Role != roleAdmin && len(input.AccountView.Columns) == 0 {
+	if input.Role != roleAdmin && input.Role != roleOnboardingUser && len(input.AccountView.Columns) == 0 {
 		return errors.New("select at least one account pool column")
 	}
 	if input.Password != "" && len(input.Password) < 8 {

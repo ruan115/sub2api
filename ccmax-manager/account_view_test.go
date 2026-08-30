@@ -117,3 +117,37 @@ func TestAccountViewDefaultsMatchRestrictedUI(t *testing.T) {
 		t.Fatalf("restricted defaults expose hidden blocks: %v", view.Blocks)
 	}
 }
+
+func TestOnboardingAccountViewDefaultsToCompleteConfig(t *testing.T) {
+	view := normalizeAccountView(roleOnboardingUser, accountViewConfig{})
+	if !reflect.DeepEqual(view.Columns, accountViewColumnOrder) {
+		t.Fatalf("onboarding columns = %v", view.Columns)
+	}
+	if !reflect.DeepEqual(view.Filters, accountViewFilterOrder) {
+		t.Fatalf("onboarding filters = %v", view.Filters)
+	}
+	if !reflect.DeepEqual(view.Statuses, accountViewStatusOrder) {
+		t.Fatalf("onboarding statuses = %v", view.Statuses)
+	}
+	if !reflect.DeepEqual(view.Blocks, accountViewBlockOrder) {
+		t.Fatalf("onboarding blocks = %v", view.Blocks)
+	}
+
+	legacy := normalizeAccountView(roleOnboardingUser, accountViewConfig{
+		Columns: []string{"account", "status"},
+		Blocks:  []string{"tokens"},
+	})
+	if !reflect.DeepEqual(legacy, view) {
+		t.Fatalf("legacy onboarding view was not upgraded: %+v", legacy)
+	}
+
+	empty := normalizeAccountView(roleOnboardingUser, accountViewConfig{
+		Columns:  []string{},
+		Filters:  []string{},
+		Statuses: []string{},
+		Blocks:   []string{},
+	})
+	if len(empty.Columns)+len(empty.Filters)+len(empty.Statuses)+len(empty.Blocks) != 0 {
+		t.Fatalf("explicit hidden onboarding view was not preserved: %+v", empty)
+	}
+}

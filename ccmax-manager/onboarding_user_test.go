@@ -36,6 +36,9 @@ func TestOnboardingUserPermissionsAndRestrictedGroupSettings(t *testing.T) {
 	if want := visiblePages; !reflect.DeepEqual(created.VisiblePages, want) {
 		t.Fatalf("visible pages = %v, want %v", created.VisiblePages, want)
 	}
+	if !reflect.DeepEqual(created.AccountView, defaultAccountView(roleOnboardingUser)) {
+		t.Fatalf("onboarding account view should default to all enabled: %+v", created.AccountView)
+	}
 	var storedRole, userKind string
 	if err := a.db.QueryRow(`SELECT role, user_kind FROM users WHERE id = ?`, created.ID).Scan(&storedRole, &userKind); err != nil {
 		t.Fatal(err)
@@ -102,7 +105,7 @@ func TestOnboardingUserPermissionsAndRestrictedGroupSettings(t *testing.T) {
 		"account_price": 0,
 	}, userCookie, "", http.StatusBadRequest, nil)
 	requestJSON(t, handler, http.MethodPost, "/api/accounts/batch-delete", map[string]any{
-		"ids": []int64{1},
+		"ids": []int64{999999},
 	}, userCookie, "", http.StatusForbidden, nil)
 
 	requestJSON(t, handler, http.MethodPut, "/api/users/"+strconv.FormatInt(created.ID, 10), map[string]any{
@@ -238,8 +241,8 @@ func TestOnboardingUserCanReadEveryConfiguredPage(t *testing.T) {
 	}
 	var strategyOptions []accountStrategyOption
 	requestJSON(t, handler, http.MethodGet, "/api/accounts/strategy-options", nil, userCookie, "", http.StatusOK, &strategyOptions)
-	if len(strategyOptions) != 1 || strategyOptions[0].ID != strategyAID {
-		t.Fatalf("scoped strategy options = %+v", strategyOptions)
+	if len(strategyOptions) != 2 || strategyOptions[0].ID != strategyAID || strategyOptions[1].ID != strategyBID {
+		t.Fatalf("managed strategy options = %+v", strategyOptions)
 	}
 	var observations []strategyObservation
 	requestJSON(t, handler, http.MethodGet, "/api/strategies/observe", nil, userCookie, "", http.StatusOK, &observations)
@@ -256,5 +259,50 @@ func TestOnboardingUserCanReadEveryConfiguredPage(t *testing.T) {
 	if len(insights.Accounts) != 1 || insights.Accounts[0].AccountID != accountAID {
 		t.Fatalf("scoped error insights = %+v", insights)
 	}
+	requestJSON(t, handler, http.MethodPost, "/api/accounts/batch-schedule", map[string]any{
+		"ids":         []int64{accountAID},
+		"schedulable": false,
+	}, userCookie, "", http.StatusOK, nil)
+	requestJSON(t, handler, http.MethodPost, "/api/accounts/batch-schedule", map[string]any{
+		"ids":         []int64{accountAID, accountBID},
+		"schedulable": false,
+	}, userCookie, "", http.StatusForbidden, nil)
+	requestJSON(t, handler, http.MethodPost, "/api/accounts/"+strconv.FormatInt(accountBID, 10)+"/quota/refresh", map[string]any{}, userCookie, "", http.StatusNotFound, nil)
 	requestJSON(t, handler, http.MethodGet, "/api/users", nil, userCookie, "", http.StatusForbidden, nil)
+}
+
+func TestOnboardingVisiblePagesGrantMatchingWritePermissions(t *testing.T) {
+	user := panelUser{Role: roleOnboardingUser, VisiblePages: panelPages}
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/api/groups/a"},
+		{http.MethodPost, "/api/accounts"},
+		{http.MethodPost, "/api/accounts/batch-authorize"},
+		{http.MethodPost, "/api/accounts/batch-update"},
+		{http.MethodPost, "/api/accounts/1/quota/refresh"},
+		{http.MethodPost, "/api/proxy-pools"},
+		{http.MethodPost, "/api/proxies/batch"},
+		{http.MethodPost, "/api/strategies"},
+		{http.MethodPost, "/api/prices"},
+		{http.MethodPost, "/api/usage"},
+	}
+	for _, test := range tests {
+		if !onboardingUserCanWrite(user, test.path, test.method) {
+			t.Errorf("%s %s should be writable", test.method, test.path)
+		}
+	}
+	for _, test := range tests {
+		user.VisiblePages = []string{"access"}
+		if onboardingUserCanWrite(user, test.path, test.method) {
+			t.Errorf("%s %s should be denied when its page is hidden", test.method, test.path)
+		}
+	}
+	if onboardingUserCanWrite(panelUser{Role: roleOnboardingUser, VisiblePages: panelPages}, "/api/users", http.MethodPost) {
+		t.Fatal("onboarding user management must stay forbidden")
+	}
+	if onboardingUserCanWrite(panelUser{Role: roleOnboardingUser, VisiblePages: panelPages}, "/api/pool/resolve", http.MethodPost) {
+		t.Fatal("runtime account resolution must stay restricted to administrators")
+	}
 }

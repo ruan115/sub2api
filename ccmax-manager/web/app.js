@@ -113,17 +113,6 @@ const rolePageDefaults = {
   user: ["accounts", "access"],
   onboarding_user: ["overview", "onboarding", "access"],
 };
-const restrictedAccountViewDefault = {
-  columns: ["account", "status", "subscription", "quota", "requests", "tpm"],
-  blocks: [
-    "filtered_accounts",
-    "tokens",
-    "itpm",
-    "cache_read",
-    "otpm",
-    "throughput",
-  ],
-};
 const adminAccountColumns = [
   "select",
   "id",
@@ -134,12 +123,33 @@ const adminAccountColumns = [
   "billing",
   "quota",
   "requests",
+  "tpm",
   "onboarded",
   "reauthorized",
   "reauth-count",
   "survival",
   "last-used",
   "actions",
+];
+const accountFilterOptions = [
+  "search",
+  "group",
+  "strategy",
+  "quota_5h",
+  "cooling_5h",
+  "quota_7d",
+  "cooling_7d",
+  "from",
+  "to",
+];
+const accountStatusOptions = [
+  "all",
+  "normal",
+  "unavailable",
+  "limited_5h",
+  "limited_7d",
+  "cooling_429",
+  "error",
 ];
 const accountRealtimeBlocks = [
   "rpm",
@@ -150,6 +160,35 @@ const accountRealtimeBlocks = [
   "concurrency",
   "queue",
 ];
+const accountSummaryBlocks = [
+  "filtered_accounts",
+  "billed",
+  "actual_cost",
+  "tokens",
+];
+const restrictedAccountViewDefault = {
+  columns: ["account", "status", "subscription", "quota", "requests", "tpm"],
+  filters: [],
+  statuses: [],
+  blocks: [
+    "filtered_accounts",
+    "tokens",
+    "itpm",
+    "cache_read",
+    "otpm",
+    "throughput",
+  ],
+};
+const completeAccountViewDefault = {
+  columns: [...adminAccountColumns],
+  filters: [...accountFilterOptions],
+  statuses: [...accountStatusOptions],
+  blocks: [...accountSummaryBlocks, ...accountRealtimeBlocks],
+};
+const accountViewDefaultForRole = (role) =>
+  role === "admin" || role === "onboarding_user"
+    ? completeAccountViewDefault
+    : restrictedAccountViewDefault;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -175,6 +214,8 @@ const isManager = () =>
   state.me?.role === "admin" || state.me?.role === "readonly_admin";
 const canView = (page) =>
   state.me?.role === "admin" || state.me?.visible_pages?.includes(page);
+const canEdit = (page) =>
+  isAdmin() || (isOnboardingUser() && canView(page));
 const hasAccountViewValue = (kind, value) =>
   isAdmin() || (state.me?.account_view?.[kind] || []).includes(value);
 const visibleAccountColumns = () =>
@@ -780,7 +821,7 @@ function configureRole() {
   $("#app-shell").dataset.role = state.me.role;
   document.body.classList.toggle(
     "ordinary-user",
-    state.me.role === "user" || isOnboardingUser(),
+    state.me.role === "user",
   );
   document.body.classList.toggle("onboarding-user", isOnboardingUser());
   $("#identity-name").textContent = state.me.name || state.me.username;
@@ -790,8 +831,10 @@ function configureRole() {
     node.hidden = !canView(node.dataset.view);
   });
   $$(".write-action").forEach((node) => {
-    node.hidden =
-      !isAdmin() && !(isOnboardingUser() && node.id === "batch-auth-submit");
+    const view = node.closest(".view")?.id.replace("view-", "");
+    const restrictedOverviewAction =
+      isOnboardingUser() && view === "overview";
+    node.hidden = !view || !canEdit(view) || restrictedOverviewAction;
   });
   $$(".onboarding-hidden").forEach((node) => {
     node.hidden = isOnboardingUser();
@@ -803,10 +846,10 @@ function configureRole() {
     $("#batch-7d-quota-threshold-percent").value = "95";
   }
   configureAccountView();
-  const accountRefreshLabel = isAdmin()
+  const accountRefreshLabel = canEdit("accounts")
     ? "检测当前页账号存活状态并刷新列表"
     : "刷新账号列表";
-  $("#refresh-accounts-label").textContent = isAdmin()
+  $("#refresh-accounts-label").textContent = canEdit("accounts")
     ? "更新状态"
     : "刷新列表";
   $("#refresh-accounts").title = accountRefreshLabel;
@@ -820,15 +863,30 @@ function configureRole() {
 }
 
 function configureAccountView() {
-  const restricted = !isAdmin();
+  const restricted = !canEdit("accounts");
   const columns = new Set(visibleAccountColumns());
-  if (restricted) state.accountStatus = "normal";
   $$(".accounts-table th[data-column]").forEach((header) => {
     header.hidden = !columns.has(header.dataset.column);
   });
-  $(".account-filters").hidden =
-    restricted && !hasAccountViewValue("blocks", "filters");
-  $("#account-status-tabs").hidden = restricted;
+  const filters = new Set(
+    isAdmin() ? accountFilterOptions : state.me?.account_view?.filters || [],
+  );
+  $$('[data-account-filter]').forEach((node) => {
+    node.hidden = !filters.has(node.dataset.accountFilter);
+  });
+  $(".account-filters").hidden = filters.size === 0;
+  const statuses = new Set(
+    isAdmin() ? accountStatusOptions : state.me?.account_view?.statuses || [],
+  );
+  const currentStatusKey = state.accountStatus || "all";
+  if (!statuses.has(currentStatusKey)) {
+    const nextStatus = accountStatusOptions.find((value) => statuses.has(value));
+    state.accountStatus = nextStatus && nextStatus !== "all" ? nextStatus : "";
+  }
+  $$('[data-account-status-key]').forEach((node) => {
+    node.hidden = !statuses.has(node.dataset.accountStatusKey);
+  });
+  $("#account-status-tabs").hidden = statuses.size === 0;
   $$(".account-heading-actions > *").forEach((node) => {
     node.hidden = restricted && node.id !== "account-list-count";
   });
@@ -841,9 +899,9 @@ function configureAccountView() {
     concurrency: "#realtime-concurrency-item",
     queue: "#realtime-queue-item",
   };
-  let realtimeVisible = isAdmin();
+  let realtimeVisible = false;
   Object.entries(realtimeIDs).forEach(([block, selector]) => {
-    const visible = isAdmin() || hasAccountViewValue("blocks", block);
+    const visible = hasAccountViewValue("blocks", block);
     $(selector).hidden = !visible;
     realtimeVisible ||= visible;
   });
@@ -973,17 +1031,36 @@ async function loadAccountPage() {
       sort: state.accountSort.key,
       order: state.accountSort.order,
     });
-    if (state.accountGroup) params.set("group_id", state.accountGroup);
-    if (state.accountStrategy) params.set("strategy_id", state.accountStrategy);
-    if (state.accountStatus) params.set("status", state.accountStatus);
-    if (state.accountSearch) params.set("search", state.accountSearch);
-    if (state.account5HUtilization !== "")
+    if (hasAccountViewValue("filters", "group") && state.accountGroup)
+      params.set("group_id", state.accountGroup);
+    if (hasAccountViewValue("filters", "strategy") && state.accountStrategy)
+      params.set("strategy_id", state.accountStrategy);
+    if (
+      state.accountStatus &&
+      hasAccountViewValue("statuses", state.accountStatus)
+    )
+      params.set("status", state.accountStatus);
+    if (hasAccountViewValue("filters", "search") && state.accountSearch)
+      params.set("search", state.accountSearch);
+    if (
+      hasAccountViewValue("filters", "quota_5h") &&
+      state.account5HUtilization !== ""
+    )
       params.set("quota_5h_utilization", state.account5HUtilization);
-    if (state.accountQuotaThreshold)
+    if (
+      hasAccountViewValue("filters", "cooling_5h") &&
+      state.accountQuotaThreshold
+    )
       params.set("quota_5h_threshold", state.accountQuotaThreshold);
-    if (state.account7DUtilization !== "")
+    if (
+      hasAccountViewValue("filters", "quota_7d") &&
+      state.account7DUtilization !== ""
+    )
       params.set("quota_7d_utilization", state.account7DUtilization);
-    if (state.account7DQuotaThreshold)
+    if (
+      hasAccountViewValue("filters", "cooling_7d") &&
+      state.account7DQuotaThreshold
+    )
       params.set("quota_7d_threshold", state.account7DQuotaThreshold);
     const companionLoads = Promise.allSettled([
       loadAccountStrategyOptions(),
@@ -1323,20 +1400,41 @@ async function loadAccountSummary(expectedLoadSequence = null) {
   if (!canView("accounts")) return;
   const requestedGroup = state.accountGroup;
   const params = new URLSearchParams();
-  if (state.accountSearch) params.set("search", state.accountSearch);
-  if (state.accountGroup) params.set("group_id", state.accountGroup);
-  if (state.accountStrategy) params.set("strategy_id", state.accountStrategy);
-  if (state.accountStatus) params.set("status", state.accountStatus);
-  if (state.account5HUtilization !== "")
+  if (hasAccountViewValue("filters", "search") && state.accountSearch)
+    params.set("search", state.accountSearch);
+  if (hasAccountViewValue("filters", "group") && state.accountGroup)
+    params.set("group_id", state.accountGroup);
+  if (hasAccountViewValue("filters", "strategy") && state.accountStrategy)
+    params.set("strategy_id", state.accountStrategy);
+  if (
+    state.accountStatus &&
+    hasAccountViewValue("statuses", state.accountStatus)
+  )
+    params.set("status", state.accountStatus);
+  if (
+    hasAccountViewValue("filters", "quota_5h") &&
+    state.account5HUtilization !== ""
+  )
     params.set("quota_5h_utilization", state.account5HUtilization);
-  if (state.accountQuotaThreshold)
+  if (
+    hasAccountViewValue("filters", "cooling_5h") &&
+    state.accountQuotaThreshold
+  )
     params.set("quota_5h_threshold", state.accountQuotaThreshold);
-  if (state.account7DUtilization !== "")
+  if (
+    hasAccountViewValue("filters", "quota_7d") &&
+    state.account7DUtilization !== ""
+  )
     params.set("quota_7d_utilization", state.account7DUtilization);
-  if (state.account7DQuotaThreshold)
+  if (
+    hasAccountViewValue("filters", "cooling_7d") &&
+    state.account7DQuotaThreshold
+  )
     params.set("quota_7d_threshold", state.account7DQuotaThreshold);
-  if ($("#account-from").value) params.set("from", $("#account-from").value);
-  if ($("#account-to").value) params.set("to", $("#account-to").value);
+  if (hasAccountViewValue("filters", "from") && $("#account-from").value)
+    params.set("from", $("#account-from").value);
+  if (hasAccountViewValue("filters", "to") && $("#account-to").value)
+    params.set("to", $("#account-to").value);
   try {
     const summary = await api(`/api/accounts/summary?${params}`);
     if (
@@ -1715,7 +1813,7 @@ function renderStrategies() {
   $("#strategy-count").textContent = `${strategies.length} 个策略`;
   $("#strategy-cards").innerHTML = strategies
     .map((item) => {
-      const actions = isAdmin()
+      const actions = canEdit("strategies")
         ? `<span class="row-actions strategy-actions">
             <button data-bind-strategy="${item.id}" title="导入账号到策略池"><i data-lucide="user-plus"></i></button>
             <button data-unbind-strategy="${item.id}" title="从策略池移出账号"><i data-lucide="user-minus"></i></button>
@@ -2553,18 +2651,31 @@ function renderAccounts() {
   const pageItems = paginatedItems("accounts", filtered);
   $("#accounts-body").innerHTML = pageItems
     .map((item) => {
-      if (!isAdmin()) {
+      if (!canEdit("accounts")) {
         const subscription = accountSubscriptionName(item);
         const subscriptionTitle = item.rate_limit_tier
           ? `${subscription} · ${item.rate_limit_tier}`
           : subscription;
+        const onboardedAt = dateTime(item.onboarded_at);
+        const reauthorizedAt = dateTime(item.reauthorized_at);
+        const lastUsedAt = dateTime(item.last_used_at);
         const cells = {
+          select: `<td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name || `#${item.id}`)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} /></td>`,
+          id: `<td class="mono">#${item.id}</td>`,
           account: `<td><span class="row-title" title="${escapeHTML(item.name || "—")}">${escapeHTML(item.name || "—")}</span></td>`,
           status: '<td><span class="pill ok">正常</span></td>',
           subscription: `<td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td>`,
+          price: `<td class="num money-cell">${money(item.account_price)}</td>`,
+          billing: `<td class="num money-cell emphasis">${money(item.total_billed_cost)}</td>`,
           quota: `<td>${accountUsageCell(item, false)}</td>`,
           requests: `<td class="num mono request-count">${Number(item.request_count || 0).toLocaleString("zh-CN")}</td>`,
           tpm: `<td class="num">${accountTPMCell(item.id)}</td>`,
+          onboarded: `<td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td>`,
+          reauthorized: `<td class="mono time-cell" title="${escapeHTML(reauthorizedAt)}">${reauthorizedAt}</td>`,
+          "reauth-count": `<td class="num mono">${Number(item.reauthorization_count || 0)}</td>`,
+          survival: `<td>${survivalCell(item)}</td>`,
+          "last-used": `<td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td>`,
+          actions: `<td class="actions"><span class="row-actions"><button data-copy-account="${item.id}" title="复制账号信息" aria-label="复制账号信息"><i data-lucide="copy"></i></button></span></td>`,
         };
         return `<tr>${visibleAccountColumns()
           .map((column) => cells[column] || "")
@@ -2573,7 +2684,7 @@ function renderAccounts() {
       const [statusText, statusClass, statusTitle] = accountStatus(item);
       const [authText] = accountAuthStatus(item);
       const groups = item.group_ids.map((id) => groupMark(id, "pill")).join("");
-      const actions = `<span class="row-actions account-primary-actions"><button data-copy-account="${item.id}" title="复制账号信息" aria-label="复制账号信息"><i data-lucide="copy"></i></button>${isAdmin() ? `<button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权" aria-label="更新授权"><i data-lucide="key-round"></i></button><button data-refresh-quota="${item.id}" title="测试并刷新账号配额" aria-label="测试并刷新账号配额"><i data-lucide="activity"></i></button><button data-account-menu="${item.id}" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false"><i data-lucide="ellipsis"></i></button>` : ""}</span>`;
+      const actions = `<span class="row-actions account-primary-actions"><button data-copy-account="${item.id}" title="复制账号信息" aria-label="复制账号信息"><i data-lucide="copy"></i></button>${canEdit("accounts") ? `<button data-auth-account="${item.id}" class="${item.auth_status === "reauth_required" ? "attention" : ""}" title="更新授权" aria-label="更新授权"><i data-lucide="key-round"></i></button><button data-refresh-quota="${item.id}" title="测试并刷新账号配额" aria-label="测试并刷新账号配额"><i data-lucide="activity"></i></button><button data-account-menu="${item.id}" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false"><i data-lucide="ellipsis"></i></button>` : ""}</span>`;
       const authDetail = item.auth_error || authText;
       const checked = item.auth_checked_at
         ? ` · 检测 ${dateTime(item.auth_checked_at)}`
@@ -2592,7 +2703,27 @@ function renderAccounts() {
       const subscriptionTitle = item.rate_limit_tier
         ? `${subscription} · ${item.rate_limit_tier}`
         : subscription;
-      return `<tr><td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} /></td><td class="mono">#${item.id}</td><td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td><td><span class="pill ${statusClass}" title="${escapeHTML(statusTitle)}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td><td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td><td class="num money-cell">${money(item.account_price)}</td><td class="num money-cell emphasis">${money(item.total_billed_cost)}</td><td>${accountUsageCell(item)}</td><td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td><td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td><td class="mono time-cell" title="${escapeHTML(reauthorizedAt)}">${reauthorizedAt}</td><td class="num mono">${Number(item.reauthorization_count || 0)}</td><td>${survivalCell(item)}</td><td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td><td class="actions">${actions}</td></tr>`;
+      const cells = {
+        select: `<td class="select-column"><input type="checkbox" data-account-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedAccountIDs.has(item.id) ? "checked" : ""} /></td>`,
+        id: `<td class="mono">#${item.id}</td>`,
+        account: `<td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle account-meta">${groups}<span class="mono" title="${escapeHTML(proxyHint)}">${escapeHTML(proxyHint)}</span></span></td>`,
+        status: `<td><span class="pill ${statusClass}" title="${escapeHTML(statusTitle)}">${statusText}</span><span class="row-subtitle" title="${escapeHTML(statusDetail)}">${escapeHTML(statusDetail)}</span></td>`,
+        subscription: `<td><span class="subscription-badge" title="${escapeHTML(subscriptionTitle)}">${escapeHTML(subscription)}</span></td>`,
+        price: `<td class="num money-cell">${money(item.account_price)}</td>`,
+        billing: `<td class="num money-cell emphasis">${money(item.total_billed_cost)}</td>`,
+        quota: `<td>${accountUsageCell(item)}</td>`,
+        requests: `<td class="num mono request-count">${Number(item.request_count).toLocaleString("zh-CN")}</td>`,
+        tpm: `<td class="num">${accountTPMCell(item.id)}</td>`,
+        onboarded: `<td class="mono time-cell" title="${escapeHTML(onboardedAt)}">${onboardedAt}</td>`,
+        reauthorized: `<td class="mono time-cell" title="${escapeHTML(reauthorizedAt)}">${reauthorizedAt}</td>`,
+        "reauth-count": `<td class="num mono">${Number(item.reauthorization_count || 0)}</td>`,
+        survival: `<td>${survivalCell(item)}</td>`,
+        "last-used": `<td class="mono time-cell" title="${escapeHTML(lastUsedAt)}">${lastUsedAt}</td>`,
+        actions: `<td class="actions">${actions}</td>`,
+      };
+      return `<tr>${visibleAccountColumns()
+        .map((column) => cells[column] || "")
+        .join("")}</tr>`;
     })
     .join("");
   syncAccountSelection();
@@ -2614,13 +2745,13 @@ function syncAccountSelection() {
   $("#selected-account-count").textContent = state.selectedAccountIDs.size;
   $("#copy-selected-accounts").disabled = state.selectedAccountIDs.size === 0;
   $("#delete-selected-accounts").disabled =
-    !isAdmin() || state.selectedAccountIDs.size === 0;
+    !canEdit("accounts") || state.selectedAccountIDs.size === 0;
   $("#edit-selected-accounts").disabled =
-    !isAdmin() || state.selectedAccountIDs.size === 0;
+    !canEdit("accounts") || state.selectedAccountIDs.size === 0;
   $("#schedule-selected-accounts").disabled =
-    !isAdmin() || state.selectedAccountIDs.size === 0;
+    !canEdit("accounts") || state.selectedAccountIDs.size === 0;
   $("#pause-selected-accounts").disabled =
-    !isAdmin() || state.selectedAccountIDs.size === 0;
+    !canEdit("accounts") || state.selectedAccountIDs.size === 0;
 }
 
 function renderDeadAccounts() {
@@ -2664,7 +2795,7 @@ function renderDeadAccounts() {
   ].join("");
   $("#dead-accounts-body").innerHTML = paginatedItems("dead", dead)
     .map((item) => {
-      const actions = `<span class="row-actions"><button data-copy-account="${item.id}" title="复制账号信息"><i data-lucide="copy"></i></button>${isAdmin() ? state.deadStatus === "archived" ? `<button data-restore-account="${item.id}" title="移出归档"><i data-lucide="archive-restore"></i></button><button class="danger" data-delete-account="${item.id}" title="删除归档数据"><i data-lucide="trash-2"></i></button>` : `<button data-auth-account="${item.id}" class="attention" title="重新授权"><i data-lucide="key-round"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button data-archive-account="${item.id}" title="归档并释放 IP"><i data-lucide="archive"></i></button>` : ""}</span>`;
+      const actions = `<span class="row-actions"><button data-copy-account="${item.id}" title="复制账号信息"><i data-lucide="copy"></i></button>${canEdit("dead") ? state.deadStatus === "archived" ? `<button data-restore-account="${item.id}" title="移出归档"><i data-lucide="archive-restore"></i></button><button class="danger" data-delete-account="${item.id}" title="删除归档数据"><i data-lucide="trash-2"></i></button>` : `<button data-auth-account="${item.id}" class="attention" title="重新授权"><i data-lucide="key-round"></i></button><button data-edit-account="${item.id}" title="编辑账号"><i data-lucide="square-pen"></i></button><button data-archive-account="${item.id}" title="归档并释放 IP"><i data-lucide="archive"></i></button>` : ""}</span>`;
       const selectable = true;
       const proxyHint = item.proxy_hint || "—";
       const proxyDetail =
@@ -2757,10 +2888,10 @@ function syncDeadSelection() {
   $("#selected-dead-count").textContent = selected.length;
   const archiveButton = $("#archive-selected-accounts");
   archiveButton.hidden = state.deadStatus !== "pending";
-  archiveButton.disabled = !isAdmin() || state.deadStatus !== "pending" || selected.length === 0;
+  archiveButton.disabled = !canEdit("dead") || state.deadStatus !== "pending" || selected.length === 0;
   const deleteButton = $("#delete-archived-accounts");
   deleteButton.hidden = state.deadStatus !== "archived";
-  deleteButton.disabled = !isAdmin() || state.deadStatus !== "archived" || selected.length === 0;
+  deleteButton.disabled = !canEdit("dead") || state.deadStatus !== "archived" || selected.length === 0;
   $("#copy-selected-dead").disabled = selected.length === 0;
   const selectAll = $("#select-all-dead");
   selectAll.hidden = false;
@@ -3019,7 +3150,7 @@ function renderProxies() {
   $("#proxy-pool-list").innerHTML = state.proxyPools
     .map(
       (pool) =>
-        `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small title="${pool.single_use_enabled ? "一次性 IP，使用后禁止复用" : "允许代理地址重复分配"}">${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用 · ${pool.single_use_enabled ? "一次性 IP" : "允许复用"}</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${isAdmin() && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${isAdmin() ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button><button class="danger" data-delete-pool="${pool.id}" title="删除代理池">✕</button>` : ""}</div></article>`,
+        `<article class="pool-row ${String(pool.id) === String(state.proxyPoolFilter) ? "selected" : ""}" data-select-pool="${pool.id}"><div><strong>${escapeHTML(pool.name)}</strong><small title="${pool.single_use_enabled ? "一次性 IP，使用后禁止复用" : "允许代理地址重复分配"}">${pool.source_type === "api" ? "API 自动同步" : "手动维护"} · ${pool.available_count}/${pool.proxy_count} 可用 · ${pool.single_use_enabled ? "一次性 IP" : "允许复用"}</small></div><div class="pool-meter"><span style="width:${pool.proxy_count ? (pool.available_count / pool.proxy_count) * 100 : 0}%"></span></div><div class="pool-meta"><span>${pool.assigned_count} 个账号占用</span><span>${pool.last_sync_at ? dateTime(pool.last_sync_at) : "未同步"}</span></div><div class="row-actions">${canEdit("proxies") && pool.source_type === "api" ? `<button data-sync-pool="${pool.id}" title="同步 API">↻</button>` : ""}${canEdit("proxies") ? `<button data-edit-pool="${pool.id}" title="编辑代理池">✎</button><button class="danger" data-delete-pool="${pool.id}" title="删除代理池">✕</button>` : ""}</div></article>`,
     )
     .join("");
   const selected = filteredProxies();
@@ -3042,7 +3173,7 @@ function renderProxies() {
 					<td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
 					<td><span class="pill off" title="已从正常代理池归档，不再参与分配">已归档</span></td>
 					<td class="mono" title="${escapeHTML(dateTime(item.archived_at))}">${dateTime(item.archived_at)}</td>
-					<td class="actions">${isAdmin() ? `<span class="row-actions"><button data-restore-proxy="${item.id}" title="恢复并重新使用"><i data-lucide="archive-restore"></i></button></span>` : '<span class="muted">只读</span>'}</td>
+					<td class="actions">${canEdit("proxies") ? `<span class="row-actions"><button data-restore-proxy="${item.id}" title="恢复并重新使用"><i data-lucide="archive-restore"></i></button></span>` : '<span class="muted">只读</span>'}</td>
 				</tr>`;
 			}
 			const retired = Boolean(
@@ -3065,7 +3196,7 @@ function renderProxies() {
             ? "异常"
             : "停用";
       return `<tr>
-          <td class="select-column admin-only-column"><input type="checkbox" data-proxy-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedProxyIDs.has(item.id) ? "checked" : ""} ${isAdmin() ? "" : "disabled"} /></td>
+          <td class="select-column admin-only-column"><input type="checkbox" data-proxy-select="${item.id}" aria-label="选择 ${escapeHTML(item.name)}" ${state.selectedProxyIDs.has(item.id) ? "checked" : ""} ${canEdit("proxies") ? "" : "disabled"} /></td>
           <td><span class="row-title" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><span class="row-subtitle mono" title="${escapeHTML(item.host)}:${item.port}">${escapeHTML(item.host)}:${item.port}</span></td>
           <td><span class="pill">${item.protocol.toUpperCase()}</span></td>
           <td class="mono" title="${escapeHTML(item.exit_ip || "未检测")}">${escapeHTML(item.exit_ip || "未检测")}</td>
@@ -3074,7 +3205,7 @@ function renderProxies() {
           <td class="num mono" title="历史绑定过该 IP 的不同账号数">${Number(item.used_account_count || 0).toLocaleString("zh-CN")}</td>
           <td><span class="pill ${statusClass}" title="${retired ? "一次性 IP 已有绑定历史，不能再次分配" : statusText}">${statusText}</span></td>
           <td class="mono" title="${escapeHTML(dateTime(item.last_test_at))}">${dateTime(item.last_test_at)}</td>
-				  <td class="actions">${isAdmin() ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="归档代理"><i data-lucide="archive"></i></button></span>` : '<span class="muted">只读</span>'}</td>
+				  <td class="actions">${canEdit("proxies") ? `<span class="row-actions"><button data-test-proxy="${item.id}" title="检测代理"><i data-lucide="activity"></i></button><button class="danger" data-delete-proxy="${item.id}" title="归档代理"><i data-lucide="archive"></i></button></span>` : '<span class="muted">只读</span>'}</td>
 				</tr>`;
     })
     .join("");
@@ -3123,14 +3254,14 @@ function filteredProxies() {
 }
 
 function syncProxySelection(scope = filteredProxies()) {
-	const selectable = isAdmin() && state.proxyInventory === "active" ? scope : [];
+	const selectable = canEdit("proxies") && state.proxyInventory === "active" ? scope : [];
   const selected = selectable.filter((item) => state.selectedProxyIDs.has(item.id));
   const selectAll = $("#select-all-proxies");
-  selectAll.disabled = !isAdmin() || selectable.length === 0;
+  selectAll.disabled = !canEdit("proxies") || selectable.length === 0;
   selectAll.checked = selectable.length > 0 && selected.length === selectable.length;
   selectAll.indeterminate = selected.length > 0 && selected.length < selectable.length;
   $("#selected-proxy-count").textContent = selected.length;
-  $("#delete-proxies-batch").disabled = !isAdmin() || selected.length === 0;
+  $("#delete-proxies-batch").disabled = !canEdit("proxies") || selected.length === 0;
 }
 
 async function loadUserAccessDetails(userID, page = 1) {
@@ -3280,7 +3411,7 @@ function renderPriceTable() {
   $("#prices-body").innerHTML = paginatedItems("prices", state.prices)
     .map(
       (item) =>
-        `<tr><td><span class="row-title mono">${escapeHTML(item.model)}</span>${item.model === "*" ? '<span class="row-subtitle">默认回退价格</span>' : ""}</td><td><span class="pill ${item.source === "remote" ? "ok" : ""}">${item.source === "remote" ? "自动同步" : "手动覆盖"}</span></td><td class="num mono">${money(item.input_per_million)}</td><td class="num mono">${money(item.output_per_million)}</td><td class="num mono">${money(item.cache_creation_per_million)}</td><td class="num mono">${money(item.cache_read_per_million)}</td><td class="mono">${dateTime(item.updated_at)}</td><td class="actions">${isAdmin() ? `<span class="row-actions"><button data-edit-price="${item.id}" title="编辑价格"><i data-lucide="square-pen"></i></button>${item.model === "*" ? "" : `<button class="danger" data-delete-price="${item.id}" title="删除价格"><i data-lucide="trash-2"></i></button>`}</span>` : ""}</td></tr>`,
+        `<tr><td><span class="row-title mono">${escapeHTML(item.model)}</span>${item.model === "*" ? '<span class="row-subtitle">默认回退价格</span>' : ""}</td><td><span class="pill ${item.source === "remote" ? "ok" : ""}">${item.source === "remote" ? "自动同步" : "手动覆盖"}</span></td><td class="num mono">${money(item.input_per_million)}</td><td class="num mono">${money(item.output_per_million)}</td><td class="num mono">${money(item.cache_creation_per_million)}</td><td class="num mono">${money(item.cache_read_per_million)}</td><td class="mono">${dateTime(item.updated_at)}</td><td class="actions">${canEdit("pricing") ? `<span class="row-actions"><button data-edit-price="${item.id}" title="编辑价格"><i data-lucide="square-pen"></i></button>${item.model === "*" ? "" : `<button class="danger" data-delete-price="${item.id}" title="删除价格"><i data-lucide="trash-2"></i></button>`}</span>` : ""}</td></tr>`,
     )
     .join("");
   refreshIcons($("#prices-body"));
@@ -3678,9 +3809,10 @@ function setView(view, { load = true, force = false } = {}) {
   $("#primary-action-label").textContent = action;
   const canAct =
     Boolean(action) &&
-    (isAdmin() ||
+    (canEdit(view) ||
       ((state.me?.role === "user" || isOnboardingUser()) &&
-        view === "access"));
+        view === "access")) &&
+    !(isOnboardingUser() && view === "overview");
   $("#primary-action").hidden = !canAct;
   const activeView = $(`#view-${view}`);
   initializeChoices(activeView);
@@ -4244,9 +4376,16 @@ function openUser(item = null) {
   $$('input[name="user-page"]').forEach((node) => {
     node.checked = visiblePages.includes(node.value);
   });
-  const accountView = item?.account_view || restrictedAccountViewDefault;
+  const accountView =
+    item?.account_view || accountViewDefaultForRole($("#user-role").value);
   $$('input[name="user-account-column"]').forEach((node) => {
     node.checked = (accountView.columns || []).includes(node.value);
+  });
+  $$('input[name="user-account-filter"]').forEach((node) => {
+    node.checked = (accountView.filters || []).includes(node.value);
+  });
+  $$('input[name="user-account-status"]').forEach((node) => {
+    node.checked = (accountView.statuses || []).includes(node.value);
   });
   $$('input[name="user-account-block"]').forEach((node) => {
     node.checked = (accountView.blocks || []).includes(node.value);
@@ -4257,7 +4396,6 @@ function openUser(item = null) {
 function syncUserRole(resetPages = false) {
   const manager = ["admin", "readonly_admin"].includes($("#user-role").value);
   const admin = $("#user-role").value === "admin";
-  const onboarding = $("#user-role").value === "onboarding_user";
   $$('input[name="user-group"]').forEach((node) => {
     if (manager) node.checked = true;
     node.disabled = manager;
@@ -4267,18 +4405,27 @@ function syncUserRole(resetPages = false) {
     $$('input[name="user-page"]').forEach((node) => {
       node.checked = defaults.includes(node.value);
     });
+    const accountView = accountViewDefaultForRole($("#user-role").value);
     $$('input[name="user-account-column"]').forEach((node) => {
-      node.checked = restrictedAccountViewDefault.columns.includes(node.value);
+      node.checked = accountView.columns.includes(node.value);
+    });
+    $$('input[name="user-account-filter"]').forEach((node) => {
+      node.checked = accountView.filters.includes(node.value);
+    });
+    $$('input[name="user-account-status"]').forEach((node) => {
+      node.checked = accountView.statuses.includes(node.value);
     });
     $$('input[name="user-account-block"]').forEach((node) => {
-      node.checked = restrictedAccountViewDefault.blocks.includes(node.value);
+      node.checked = accountView.blocks.includes(node.value);
     });
   }
   $$('input[name="user-page"]').forEach((node) => {
     node.disabled = false;
   });
-  $("#user-account-columns").hidden = admin || onboarding;
-  $("#user-account-blocks").hidden = admin || onboarding;
+  $("#user-account-columns").hidden = admin;
+  $("#user-account-filters").hidden = admin;
+  $("#user-account-statuses").hidden = admin;
+  $("#user-account-blocks").hidden = admin;
 }
 function syncKeyGroups(selected = "") {
   const owner =
@@ -4908,7 +5055,7 @@ $("#refresh-accounts").addEventListener("click", async (event) => {
     const visibleAccountIDs = $$('[data-account-select]').map((node) =>
       Number(node.dataset.accountSelect),
     );
-    if (isAdmin() && visibleAccountIDs.length)
+    if (canEdit("accounts") && visibleAccountIDs.length)
       health = await api("/api/accounts/health/refresh", {
         method: "POST",
         body: JSON.stringify({ ids: visibleAccountIDs }),
@@ -6189,6 +6336,12 @@ $("#user-form").addEventListener("submit", async (event) => {
       ),
       account_view: {
         columns: $$('input[name="user-account-column"]:checked').map(
+          (node) => node.value,
+        ),
+        filters: $$('input[name="user-account-filter"]:checked').map(
+          (node) => node.value,
+        ),
+        statuses: $$('input[name="user-account-status"]:checked').map(
           (node) => node.value,
         ),
         blocks: $$('input[name="user-account-block"]:checked').map(

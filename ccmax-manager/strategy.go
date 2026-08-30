@@ -282,7 +282,7 @@ func (a *app) scopeDispatchStrategies(user panelUser, strategies []dispatchStrat
 
 func (a *app) handleStrategies(w http.ResponseWriter, r *http.Request) {
 	strategies, err := a.listDispatchStrategies()
-	if err == nil {
+	if err == nil && !userCanManagePage(currentUser(r), "strategies") {
 		strategies, err = a.scopeDispatchStrategies(currentUser(r), strategies)
 	}
 	if err != nil {

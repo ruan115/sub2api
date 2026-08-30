@@ -2781,7 +2781,7 @@ textarea:focus {
   bottom: 0;
   background: var(--panel);
 }
-.app-shell:not([data-role="admin"]) .admin-only-column {
+.app-shell:not([data-role="admin"]):not([data-role="onboarding_user"]) .admin-only-column {
   display: none;
 }
 .empty-state {

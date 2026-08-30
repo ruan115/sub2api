@@ -3,21 +3,54 @@ package main
 import "strings"
 
 type accountViewConfig struct {
-	Columns []string `json:"columns"`
-	Blocks  []string `json:"blocks"`
+	Columns  []string `json:"columns"`
+	Filters  []string `json:"filters"`
+	Statuses []string `json:"statuses"`
+	Blocks   []string `json:"blocks"`
 }
 
 var accountViewColumnOrder = []string{
+	"select",
+	"id",
 	"account",
 	"status",
 	"subscription",
+	"price",
+	"billing",
 	"quota",
 	"requests",
 	"tpm",
+	"onboarded",
+	"reauthorized",
+	"reauth-count",
+	"survival",
+	"last-used",
+	"actions",
+}
+
+var accountViewFilterOrder = []string{
+	"search",
+	"group",
+	"strategy",
+	"quota_5h",
+	"cooling_5h",
+	"quota_7d",
+	"cooling_7d",
+	"from",
+	"to",
+}
+
+var accountViewStatusOrder = []string{
+	"all",
+	"normal",
+	"unavailable",
+	"limited_5h",
+	"limited_7d",
+	"cooling_429",
+	"error",
 }
 
 var accountViewBlockOrder = []string{
-	"filters",
 	"filtered_accounts",
 	"billed",
 	"actual_cost",
@@ -32,28 +65,43 @@ var accountViewBlockOrder = []string{
 }
 
 func defaultAccountView(role string) accountViewConfig {
-	if role == "admin" {
+	if role == roleAdmin || role == roleOnboardingUser {
 		return accountViewConfig{
-			Columns: append([]string{}, accountViewColumnOrder...),
-			Blocks:  append([]string{}, accountViewBlockOrder...),
+			Columns:  append([]string{}, accountViewColumnOrder...),
+			Filters:  append([]string{}, accountViewFilterOrder...),
+			Statuses: append([]string{}, accountViewStatusOrder...),
+			Blocks:   append([]string{}, accountViewBlockOrder...),
 		}
 	}
 	return accountViewConfig{
-		Columns: []string{"account", "status", "subscription", "quota", "requests", "tpm"},
-		Blocks:  []string{"filtered_accounts", "tokens", "itpm", "cache_read", "otpm", "throughput"},
+		Columns:  []string{"account", "status", "subscription", "quota", "requests", "tpm"},
+		Filters:  []string{},
+		Statuses: []string{},
+		Blocks:   []string{"filtered_accounts", "tokens", "itpm", "cache_read", "otpm", "throughput"},
 	}
 }
 
 func normalizeAccountView(role string, input accountViewConfig) accountViewConfig {
-	if role == "admin" {
+	if role == roleAdmin {
 		return defaultAccountView(role)
 	}
-	if input.Columns == nil && input.Blocks == nil {
+	if input.Columns == nil && input.Filters == nil && input.Statuses == nil && input.Blocks == nil {
 		return defaultAccountView(role)
+	}
+	if role == roleOnboardingUser && input.Filters == nil && input.Statuses == nil {
+		// Upgrade the legacy onboarding-user default, which only stored the old
+		// columns/blocks pair, to the new complete configurable view.
+		return defaultAccountView(role)
+	}
+	filters := input.Filters
+	if filters == nil && accountViewHas(input.Blocks, "filters") {
+		filters = accountViewFilterOrder
 	}
 	return accountViewConfig{
-		Columns: normalizeAccountViewValues(input.Columns, accountViewColumnOrder),
-		Blocks:  normalizeAccountViewValues(input.Blocks, accountViewBlockOrder),
+		Columns:  normalizeAccountViewValues(input.Columns, accountViewColumnOrder),
+		Filters:  normalizeAccountViewValues(filters, accountViewFilterOrder),
+		Statuses: normalizeAccountViewValues(input.Statuses, accountViewStatusOrder),
+		Blocks:   normalizeAccountViewValues(input.Blocks, accountViewBlockOrder),
 	}
 }
 
@@ -109,6 +157,28 @@ func accountForRestrictedView(item account, view accountViewConfig) map[string]a
 	}
 	if accountViewHas(view.Columns, "requests") {
 		result["request_count"] = item.RequestCount
+	}
+	if accountViewHas(view.Columns, "price") {
+		result["account_price"] = item.AccountPrice
+	}
+	if accountViewHas(view.Columns, "billing") {
+		result["total_billed_cost"] = item.TotalBilledCost
+	}
+	if accountViewHas(view.Columns, "onboarded") || accountViewHas(view.Columns, "survival") {
+		result["onboarded_at"] = item.OnboardedAt
+	}
+	if accountViewHas(view.Columns, "reauthorized") {
+		result["reauthorized_at"] = item.ReauthorizedAt
+	}
+	if accountViewHas(view.Columns, "reauth-count") {
+		result["reauthorization_count"] = item.ReauthorizationCount
+	}
+	if accountViewHas(view.Columns, "survival") {
+		result["invalidated_at"] = item.InvalidatedAt
+		result["survival_seconds"] = item.SurvivalSeconds
+	}
+	if accountViewHas(view.Columns, "last-used") {
+		result["last_used_at"] = item.LastUsedAt
 	}
 	return result
 }
