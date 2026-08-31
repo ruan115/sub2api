@@ -165,7 +165,7 @@ func TestApplyOnboardingBatchRules(t *testing.T) {
 	if input.StrategyID != nil {
 		t.Fatalf("strategy was not cleared: %v", *input.StrategyID)
 	}
-	if !*input.Quota5HThresholdEnabled || *input.Quota5HThresholdPercent != 95 || !*input.Quota7DThresholdEnabled || *input.Quota7DThresholdPercent != 95 {
+	if *input.Quota5HThresholdEnabled || *input.Quota5HThresholdPercent != 95 || *input.Quota7DThresholdEnabled || *input.Quota7DThresholdPercent != 95 {
 		t.Fatalf("quota defaults = %+v", input)
 	}
 

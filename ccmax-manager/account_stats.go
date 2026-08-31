@@ -84,7 +84,7 @@ func applyOnboardingBatchRules(user panelUser, input *batchAuthorizationInput) e
 			return fmt.Errorf("group %s is not assigned to this onboarding user", groupID)
 		}
 	}
-	enabled := true
+	enabled := false
 	percent := 95
 	input.StrategyID = nil
 	input.Quota5HThresholdEnabled = &enabled

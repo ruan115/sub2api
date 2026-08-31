@@ -840,9 +840,9 @@ function configureRole() {
     node.hidden = isOnboardingUser();
   });
   if (isOnboardingUser()) {
-    $("#batch-quota-threshold-enabled").checked = true;
+    $("#batch-quota-threshold-enabled").checked = false;
     $("#batch-quota-threshold-percent").value = "95";
-    $("#batch-7d-quota-threshold-enabled").checked = true;
+    $("#batch-7d-quota-threshold-enabled").checked = false;
     $("#batch-7d-quota-threshold-percent").value = "95";
   }
   configureAccountView();
@@ -5698,13 +5698,13 @@ $("#batch-auth-form").addEventListener("submit", async (event) => {
           ? null
           : strategySelectPayload($("#batch-strategy")),
         quota_5h_threshold_enabled: isOnboardingUser()
-          ? true
+          ? false
           : $("#batch-quota-threshold-enabled").checked,
         quota_5h_threshold_percent: isOnboardingUser()
           ? 95
           : Number($("#batch-quota-threshold-percent").value || 80),
         quota_7d_threshold_enabled: isOnboardingUser()
-          ? true
+          ? false
           : $("#batch-7d-quota-threshold-enabled").checked,
         quota_7d_threshold_percent: isOnboardingUser()
           ? 95
