@@ -807,7 +807,7 @@ func (a *app) handleProxies(w http.ResponseWriter, r *http.Request) {
 	query := proxySelect + ` WHERE x.deleted_at IS NULL AND p.system_kind = ''`
 	args := []any{}
 	query += ` AND ` + proxyNotQuarantinedPredicate("x")
-	if user := currentUser(r); isScopedUserRole(user.Role) {
+	if user := currentUser(r); isScopedUserRole(user.Role) && !userCanManagePage(user, "proxies") {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		query += ` AND EXISTS (SELECT 1 FROM accounts scope_account WHERE scope_account.proxy_id = x.id AND scope_account.deleted_at IS NULL AND scope_account.archived_at IS NULL AND ` + condition + `)`
 		args = append(args, scopeArgs...)
@@ -839,7 +839,7 @@ func (a *app) handleArchivedProxies(w http.ResponseWriter, r *http.Request) {
 	query := proxySelect + ` WHERE ((x.deleted_at IS NOT NULL AND p.system_kind = '')
 		OR (p.system_kind = 'dead' AND x.deleted_at IS NULL))`
 	args := []any{}
-	if user := currentUser(r); isScopedUserRole(user.Role) {
+	if user := currentUser(r); isScopedUserRole(user.Role) && !userCanManagePage(user, "proxies") {
 		condition, scopeArgs := scopedAccountCondition(user, "scope_account")
 		query += ` AND EXISTS (SELECT 1 FROM proxy_account_history scope_history
 			JOIN accounts scope_account ON scope_account.id = scope_history.account_id

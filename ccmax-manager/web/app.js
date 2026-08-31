@@ -939,8 +939,10 @@ const viewLoaders = {
       } else {
         await loadProxyInventory();
       }
-      populateSelects();
     }
+    // The proxy page can warm state.proxyPools without populating controls
+    // outside that view. Always synchronize the onboarding selector on entry.
+    populateSelects();
     if (!isOnboardingUser()) {
       await ensureStrategiesLoaded();
       fillStrategySelect($("#batch-strategy"), $("#batch-strategy").value);

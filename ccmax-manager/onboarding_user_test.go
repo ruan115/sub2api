@@ -18,6 +18,16 @@ func TestOnboardingUserPermissionsAndRestrictedGroupSettings(t *testing.T) {
 
 	handler := a.routes()
 	adminCookie := loginCookie(t, handler, "admin", "admin-password")
+	requestJSON(t, handler, http.MethodPost, "/api/proxies/batch", map[string]any{
+		"pool_id": 1,
+		"text":    "http://127.0.0.1:14001\nhttp://127.0.0.1:14002",
+	}, adminCookie, "", http.StatusCreated, nil)
+	var adminProxies []proxyRecord
+	requestJSON(t, handler, http.MethodGet, "/api/proxies", nil, adminCookie, "", http.StatusOK, &adminProxies)
+	if len(adminProxies) != 2 {
+		t.Fatalf("admin proxy count = %d, want 2", len(adminProxies))
+	}
+	requestJSON(t, handler, http.MethodDelete, "/api/proxies/"+strconv.FormatInt(adminProxies[0].ID, 10), nil, adminCookie, "", http.StatusOK, nil)
 	visiblePages := []string{"overview", "accounts", "onboarding", "proxies", "access"}
 	var created panelUser
 	requestJSON(t, handler, http.MethodPost, "/api/users", map[string]any{
@@ -50,7 +60,16 @@ func TestOnboardingUserPermissionsAndRestrictedGroupSettings(t *testing.T) {
 	userCookie := loginCookie(t, handler, "onboarder", "onboard-password")
 	requestJSON(t, handler, http.MethodGet, "/api/users", nil, userCookie, "", http.StatusForbidden, nil)
 	requestJSON(t, handler, http.MethodGet, "/api/accounts", nil, userCookie, "", http.StatusOK, nil)
-	requestJSON(t, handler, http.MethodGet, "/api/proxies", nil, userCookie, "", http.StatusOK, nil)
+	var visibleProxies []proxyRecord
+	requestJSON(t, handler, http.MethodGet, "/api/proxies", nil, userCookie, "", http.StatusOK, &visibleProxies)
+	if len(visibleProxies) != 1 || visibleProxies[0].ID == adminProxies[0].ID {
+		t.Fatalf("onboarding active proxies = %+v, want the unassigned active proxy", visibleProxies)
+	}
+	var archivedProxies []proxyRecord
+	requestJSON(t, handler, http.MethodGet, "/api/proxies/archived", nil, userCookie, "", http.StatusOK, &archivedProxies)
+	if len(archivedProxies) != 1 || archivedProxies[0].ID != adminProxies[0].ID {
+		t.Fatalf("onboarding archived proxies = %+v, want archived proxy %d", archivedProxies, adminProxies[0].ID)
+	}
 	requestJSON(t, handler, http.MethodGet, "/api/proxy-pools", nil, userCookie, "", http.StatusOK, nil)
 
 	var groups []group
