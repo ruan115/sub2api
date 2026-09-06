@@ -2,6 +2,9 @@ const state = {
   me: null,
   view: "overview",
   dashboard: null,
+  overviewRange: { preset: "all", from: "", to: "" },
+  overviewRequestID: 0,
+  overviewAbortController: null,
   groups: [],
   strategies: [],
   strategiesLoaded: false,
@@ -911,12 +914,79 @@ function configureAccountView() {
 
 async function loadOverview() {
   if (!canView("overview")) return;
-  state.dashboard = await api("/api/dashboard");
-  state.purposes = state.dashboard.purposes;
-  state.groups = state.dashboard.groups;
-  if (state.groups.length) hydrateGroupControls();
-  populateSelects();
-  renderDashboard();
+  const requestID = ++state.overviewRequestID;
+  state.overviewAbortController?.abort();
+  const controller = new AbortController();
+  state.overviewAbortController = controller;
+  $("#overview-metrics").setAttribute("aria-busy", "true");
+  $("#overview-error").hidden = true;
+  try {
+    const data = await api(`/api/dashboard?${overviewFilterParams(state.overviewRange)}`, { signal: controller.signal });
+    if (requestID !== state.overviewRequestID) return;
+    state.dashboard = data;
+    state.purposes = data.purposes;
+    state.groups = data.groups;
+    if (state.groups.length) hydrateGroupControls();
+    populateSelects();
+    renderDashboard();
+  } catch (error) {
+    if (requestID !== state.overviewRequestID) return;
+    $("#overview-error").textContent = `统计加载失败，${state.dashboard ? "当前保留上次查询结果" : "暂无统计结果"}：${error.message}`;
+    $("#overview-error").hidden = false;
+    throw error;
+  } finally {
+    if (requestID === state.overviewRequestID) {
+      state.overviewAbortController = null;
+      $("#overview-metrics").setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+function overviewFilterParams(range, now = new Date()) {
+  const params = new URLSearchParams();
+  if (range.preset === "all") return params;
+  if (range.preset === "custom") {
+    if (range.from) params.set("from", range.from);
+    if (range.to) params.set("to", range.to);
+    return params;
+  }
+  // Use the dashboard's explicit UTC+8 calendar, independent of browser timezone.
+  const calendar = new Date(now.getTime() + 8 * 3600000);
+  if (range.preset === "week") calendar.setUTCDate(calendar.getUTCDate() - 6);
+  if (range.preset === "month") calendar.setUTCDate(1);
+  params.set("from", `${calendar.toISOString().slice(0, 10)}T00:00`);
+  return params;
+}
+
+function overviewDate(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+}
+
+async function applyOverviewRange() {
+  const range = {
+    preset: $("#overview-range").value,
+    from: $("#overview-from").value,
+    to: $("#overview-to").value,
+  };
+  if (range.preset === "custom" && !range.from && !range.to) {
+    toast("请选择开始或结束时间", "error");
+    return;
+  }
+  if (range.preset === "custom" && range.from && range.to && range.from > range.to) {
+    toast("开始时间不能晚于结束时间", "error");
+    return;
+  }
+  state.overviewRange = range;
+  invalidateView("overview");
+  try {
+    await loadOverview();
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 const viewLoaders = {
@@ -2207,25 +2277,35 @@ function metric(label, value, note, tone = "") {
 function renderDashboard() {
   const data = state.dashboard;
   if (!data) return;
+  const period = data.period;
+  const totals = period.totals;
+  $("#overview-view-billing").hidden = !canView("billing");
+  const allTime = !period.from && !period.to;
+  const periodName = allTime ? "累计" : "区间";
+  const from = period.from || period.first_usage_at;
+  // Date/minute end filters are inclusive in the UI and exclusive in the API.
+  const to = period.to ? new Date(new Date(period.to).getTime() - 1).toISOString() : "";
+  $("#overview-period-label").textContent = `${allTime ? "全部时间" : "已选范围"} · ${from ? overviewDate(from) : "首笔记录"} 至 ${to ? overviewDate(to) : "现在"}${totals.requests ? "" : " · 暂无消费记录"}`;
   $("#nav-account-count").textContent = data.accounts_total;
   $("#nav-dead-count").textContent = data.accounts_dead;
   $("#overview-metrics").innerHTML = [
     metric(
-      "ACTIVE ACCOUNTS",
+      "当前可用账号",
       `${data.accounts_active} / ${data.accounts_total}`,
       `可参与调度 · 暂不可调度 ${data.accounts_unavailable} · 错误 ${data.accounts_dead}`,
       "a",
     ),
     metric(
-      "TODAY BILLED",
-      money(data.today.billed_cost),
-      `${data.today.requests} 次请求`,
+      `${periodName}消费`,
+      money(totals.billed_cost),
+      `${totals.requests.toLocaleString("zh-CN")} 次请求 · ${compact(totals.input_tokens + totals.output_tokens + totals.cache_tokens)} Token`,
     ),
-    metric("MONTH ACTUAL", money(data.month.actual_cost), "账号成本", "b"),
+    metric(`${periodName}成本`, money(totals.actual_cost), "请求成本", "b internal-cost-column"),
     metric(
-      "MONTH MARGIN",
-      money(data.month.margin),
-      `收入 ${money(data.month.billed_cost)}`,
+      `${periodName}利润`,
+      money(totals.margin),
+      `计费收入 ${money(totals.billed_cost)}`,
+      "internal-cost-column",
     ),
   ].join("");
   $("#purpose-list").innerHTML = data.purposes
@@ -2253,7 +2333,7 @@ function renderDashboard() {
       if (isOnboardingUser()) {
         return `<article class="group-card onboarding-summary ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}<button class="icon-button group-settings" data-edit-group="${item.id}" title="编辑兼容设置">···</button></div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line emphasis"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>蒸馏兼容模式</span><strong>${item.normal_request_mode ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>Claude CLI 版本</span><strong>${escapeHTML(item.claude_cli_version || "2.1.220")}</strong></div><div class="group-stat-line"><span>静默模型降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏探测</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div></article>`;
       }
-      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() || isOnboardingUser() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>本月计费</span><strong>${money(item.month_billed_cost)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>CLI 版本</span><strong>${escapeHTML(item.claude_cli_version || "2.1.220")}</strong></div><div class="group-stat-line"><span>日期规范化</span><strong>${item.dateline_normalization_enabled ?? true ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>格式过滤</span><strong>${item.request_format_filter_enabled ? "拦截" : "关闭"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>短冷却阶梯</span><strong>${item.rate_limit_stepped_cooldown_enabled ? `+${Number(item.rate_limit_cooldown_step_seconds || 30)}s` : "关闭"}</strong></div><div class="group-stat-line"><span>降峰时长</span><strong>${item.rate_limit_downweight_stepped_cooldown_enabled ? `${Number(item.rate_limit_downweight_base_minutes || 60)}m + ${Number(item.rate_limit_downweight_step_minutes || 60)}m` : "跟随 5h"}</strong></div><div class="group-stat-line"><span>5h 刷新错峰</span><strong>${item.five_hour_release_stagger_enabled ?? true ? `${Number(item.five_hour_release_stagger_min_minutes ?? 15)}–${Number(item.five_hour_release_stagger_max_minutes ?? 30)}m` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
+      return `<article class="group-card ${item.id === "a" || item.id === "b" ? item.id : "dynamic"}"><div class="group-card-head">${groupMark(item.id, "large")}${isAdmin() || isOnboardingUser() ? `<button class="icon-button group-settings" data-edit-group="${item.id}">···</button>` : ""}</div><h3 title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</h3><p title="${escapeHTML(item.description || "—")}">${escapeHTML(item.description || "—")}</p><div class="group-stat-line"><span>${item.reserve_pool_enabled ? "储备账号" : "可用账号"}</span><strong>${item.active_accounts} / ${item.total_accounts}</strong></div><div class="capacity-bar"><span style="width:${ratio}%"></span></div><div class="group-stat-line"><span>分组角色</span><strong>${item.reserve_pool_enabled ? "按需储备" : "请求调度"}</strong></div><div class="group-stat-line"><span>${periodName}计费</span><strong>${money(period.by_group[item.id]?.billed_cost || 0)}</strong></div><div class="group-stat-line"><span>计费倍率</span><strong>× ${Number(item.rate_multiplier).toFixed(2)}</strong></div><div class="group-stat-line"><span>请求模式</span><strong>${item.reserve_pool_enabled ? "不接收请求" : item.normal_request_mode ? "蒸馏兼容" : "Sub2 原版"}</strong></div><div class="group-stat-line"><span>CLI 版本</span><strong>${escapeHTML(item.claude_cli_version || "2.1.220")}</strong></div><div class="group-stat-line"><span>日期规范化</span><strong>${item.dateline_normalization_enabled ?? true ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>身份句</span><strong>${item.claude_code_identity_enabled ? "开启" : "关闭"}</strong></div><div class="group-stat-line"><span>静默降级</span><strong>${item.reject_anthropic_downgrade_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>用户蒸馏</span><strong>${item.reject_distillation_enabled ? "拒绝" : "允许"}</strong></div><div class="group-stat-line"><span>格式过滤</span><strong>${item.request_format_filter_enabled ? "拦截" : "关闭"}</strong></div><div class="group-stat-line"><span>字段透传</span><strong>${passthroughCount ? `${passthroughCount} 项` : "关闭"}</strong></div><div class="group-stat-line"><span>工具名</span><strong>${item.mcp_tool_names_enabled ? "MCP 化" : "默认"}</strong></div><div class="group-stat-line"><span>账号调度</span><strong>${item.reserve_pool_enabled ? "缺口单向补号" : item.rpm_dispatch_enabled ? "RPM 集中" : "兼容轮询"}</strong></div><div class="group-stat-line"><span>429 短冷却</span><strong>${item.rate_limit_downweight_enabled ?? true ? `${Number(item.rate_limit_wait_seconds || 120)}s / ${Number(item.rate_limit_cooling_threshold || 3)} 次` : "关闭"}</strong></div><div class="group-stat-line"><span>短冷却阶梯</span><strong>${item.rate_limit_stepped_cooldown_enabled ? `+${Number(item.rate_limit_cooldown_step_seconds || 30)}s` : "关闭"}</strong></div><div class="group-stat-line"><span>降峰时长</span><strong>${item.rate_limit_downweight_stepped_cooldown_enabled ? `${Number(item.rate_limit_downweight_base_minutes || 60)}m + ${Number(item.rate_limit_downweight_step_minutes || 60)}m` : "跟随 5h"}</strong></div><div class="group-stat-line"><span>5h 刷新错峰</span><strong>${item.five_hour_release_stagger_enabled ?? true ? `${Number(item.five_hour_release_stagger_min_minutes ?? 15)}–${Number(item.five_hour_release_stagger_max_minutes ?? 30)}m` : "关闭"}</strong></div><div class="group-stat-line"><span>529 熔断</span><strong>${Number(item.overload_cooldown_seconds || 10)}s</strong></div><div class="group-stat-line"><span>流式调度</span><strong>${streamDispatch}</strong></div></article>`;
     })
     .join("");
   $("#recent-usage-body").innerHTML = usageRows(data.recent_usage, true);
@@ -4986,6 +5066,36 @@ document.addEventListener("keydown", async (event) => {
   if (!input || event.key !== "Enter") return;
   event.preventDefault();
   await goToPaginationPage(input.dataset.paginationJump, input.value);
+});
+
+$("#overview-view-billing").addEventListener("click", () => {
+  if (!canView("billing") || !state.dashboard) return;
+  const period = state.dashboard.period;
+  const localInput = (value) => new Date(new Date(value).getTime() + 8 * 3600000).toISOString().slice(0, 16);
+  $("#billing-from").value = localInput(period.from || period.first_usage_at || "1970-01-01T00:00:00Z");
+  $("#billing-to").value = period.to ? localInput(new Date(new Date(period.to).getTime() - 1)) : "";
+  for (const selector of ["#billing-search", "#billing-group", "#billing-purpose", "#billing-api-key"]) $(selector).value = "";
+  resetPagination("billingBreakdown");
+  resetPagination("usage");
+  setView("billing", { force: true });
+});
+
+$("#overview-filter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void applyOverviewRange();
+});
+$("#overview-range").addEventListener("change", () => {
+  const preset = $("#overview-range").value;
+  const custom = preset === "custom";
+  $("#overview-from").disabled = !custom;
+  $("#overview-to").disabled = !custom;
+  if (custom) {
+    $("#overview-from").focus();
+    return;
+  }
+  $("#overview-from").value = overviewFilterParams({ preset }).get("from") || "";
+  $("#overview-to").value = "";
+  void applyOverviewRange();
 });
 
 $("#login-form").addEventListener("submit", async (event) => {

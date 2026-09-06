@@ -468,15 +468,16 @@ type billingSummary struct {
 }
 
 type dashboard struct {
-	AccountsTotal       int64         `json:"accounts_total"`
-	AccountsActive      int64         `json:"accounts_active"`
-	AccountsUnavailable int64         `json:"accounts_unavailable"`
-	AccountsDead        int64         `json:"accounts_dead"`
-	Purposes            []purpose     `json:"purposes"`
-	Groups              []group       `json:"groups"`
-	Today               billingTotals `json:"today"`
-	Month               billingTotals `json:"month"`
-	RecentUsage         []usageLog    `json:"recent_usage"`
+	AccountsTotal       int64           `json:"accounts_total"`
+	AccountsActive      int64           `json:"accounts_active"`
+	AccountsUnavailable int64           `json:"accounts_unavailable"`
+	AccountsDead        int64           `json:"accounts_dead"`
+	Purposes            []purpose       `json:"purposes"`
+	Groups              []group         `json:"groups"`
+	Today               billingTotals   `json:"today"`
+	Month               billingTotals   `json:"month"`
+	Period              dashboardPeriod `json:"period"`
+	RecentUsage         []usageLog      `json:"recent_usage"`
 }
 
 func runServer() {
@@ -1017,13 +1018,20 @@ func (a *app) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
+	periodScope, err := dashboardFilters(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if isScopedUserRole(user.Role) {
+		periodScope.UserID = user.ID
+	}
 	var result dashboard
 	accountScope, accountArgs := scopedAccountCondition(user, "accounts")
 	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "normal")+` THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "unavailable")+` THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN `+accountStatePredicate("accounts", "error")+` THEN 1 ELSE 0 END), 0) FROM accounts WHERE deleted_at IS NULL AND archived_at IS NULL AND `+accountScope, accountArgs...).Scan(&result.AccountsTotal, &result.AccountsActive, &result.AccountsUnavailable, &result.AccountsDead); err != nil {
 		writeDBError(w, err)
 		return
 	}
-	var err error
 	result.Purposes, err = a.listPurposes()
 	result.Purposes = scopePurposes(user, result.Purposes)
 	if err == nil {
@@ -1045,9 +1053,11 @@ func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		result.Month, err = a.queryTotalsFiltered(usageScope)
 	}
 	if err == nil {
-		usageScope.From = ""
-		usageScope.Limit = 8
-		result.RecentUsage, err = a.listUsage(usageScope)
+		result.Period, err = a.queryDashboardPeriod(r.Context(), periodScope)
+	}
+	if err == nil {
+		periodScope.Limit = 8
+		result.RecentUsage, err = a.listUsage(periodScope)
 	}
 	if err != nil {
 		writeDBError(w, err)
@@ -1056,6 +1066,11 @@ func (a *app) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if isScopedUserRole(user.Role) {
 		redactBillingTotals(&result.Today)
 		redactBillingTotals(&result.Month)
+		redactBillingTotals(&result.Period.Totals)
+		for id, totals := range result.Period.ByGroup {
+			redactBillingTotals(&totals)
+			result.Period.ByGroup[id] = totals
+		}
 		redactUsageCosts(result.RecentUsage)
 	}
 	writeJSON(w, http.StatusOK, result)

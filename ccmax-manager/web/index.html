@@ -205,7 +205,30 @@
             <strong>只读模式</strong
             ><span>可以查看账号池与计费信息，无法修改配置。</span>
           </div>
-          <div class="metrics" id="overview-metrics"></div>
+          <form id="overview-filter" class="overview-filter">
+            <label>统计范围
+              <select id="overview-range">
+                <option value="all">全部时间</option>
+                <option value="today">今日</option>
+                <option value="week">最近 7 天</option>
+                <option value="month">本月</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <label>开始时间
+              <input id="overview-from" type="datetime-local" step="60" disabled />
+            </label>
+            <label>结束时间
+              <input id="overview-to" type="datetime-local" step="60" disabled />
+            </label>
+            <button type="submit" class="button secondary" id="overview-query">
+              <i data-lucide="search"></i><span>查询</span>
+            </button>
+            <span class="overview-timezone">北京时间 UTC+8</span>
+          </form>
+          <p id="overview-period-label" class="overview-period-label" aria-live="polite">全部时间</p>
+          <p id="overview-error" class="overview-error" role="alert" hidden></p>
+          <div class="metrics" id="overview-metrics" aria-busy="false"></div>
           <div class="overview-grid">
             <section class="panel purpose-panel">
               <div class="section-heading">
@@ -236,10 +259,10 @@
             <div class="section-heading">
               <div>
                 <p class="kicker">LIVE LEDGER</p>
-                <h2>最近计费</h2>
+                <h2>范围内最近计费</h2>
               </div>
-              <button class="text-button" data-view-jump="billing">
-                查看全部
+              <button class="text-button" id="overview-view-billing">
+                查看范围内明细
               </button>
             </div>
             <div class="table-wrap">

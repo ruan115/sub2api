@@ -1991,6 +1991,12 @@ func TestOrdinaryUserReadsOnlyAllowedGroupsAndOwnedUsage(t *testing.T) {
 	if dashboard.AccountsTotal != 1 || len(dashboard.Groups) != 1 || dashboard.Groups[0].ID != "a" || dashboard.Today.Requests != 1 {
 		t.Fatalf("scoped dashboard=%+v", dashboard)
 	}
+	if dashboard.Period.Totals.Requests != 1 || dashboard.Period.Totals.BilledCost <= 0 || dashboard.Period.Totals.ActualCost != 0 || dashboard.Period.Totals.Margin != 0 || dashboard.Period.Totals.BaseCost != 0 {
+		t.Fatalf("dashboard period not scoped/redacted: %+v", dashboard.Period)
+	}
+	if len(dashboard.Period.ByGroup) != 1 || dashboard.Period.ByGroup["a"].Requests != 1 || dashboard.Period.ByGroup["a"].ActualCost != 0 || len(dashboard.RecentUsage) != 1 {
+		t.Fatalf("dashboard groups/usage not scoped/redacted: %+v", dashboard)
+	}
 	var proxies []proxyRecord
 	requestJSON(t, handler, http.MethodGet, "/api/proxies", nil, userCookie, "", http.StatusOK, &proxies)
 	if len(proxies) != 1 || accountA.ProxyID == nil || proxies[0].ID != *accountA.ProxyID {
