@@ -1895,6 +1895,19 @@
           </div>
           <div class="group-mode-setting">
             <div>
+              <strong>统一 5 分钟缓存</strong>
+            </div>
+            <label class="compact-toggle" title="默认开启，已有缓存断点统一为 5m；关闭后按原链路处理客户端 TTL，不新增断点">
+              <input
+                id="group-force-cache-ttl-5m"
+                type="checkbox"
+                checked
+                aria-label="统一 5 分钟缓存" />
+              <i></i>
+            </label>
+          </div>
+          <div class="group-mode-setting">
+            <div>
               <strong>extra usage 400 换号</strong>
               <small title="默认关闭。开启后，上游返回 Third-party apps now draw from your extra usage 时不把 400 透传给客户端，改为冷却该账号并换号重试；普通 400 仍原样返回。关闭时保持现状">开启后把第三方 extra usage 400 当账号软失败，冷却并换号；关闭时原样透传</small>
             </div>

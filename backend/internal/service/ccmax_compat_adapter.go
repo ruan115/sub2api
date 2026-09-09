@@ -73,6 +73,10 @@ type CCMaxCompatibilityInput struct {
 	// token-parity compatibility check) should enable it, accepting that the
 	// watermark then reaches Anthropic.
 	PreserveClientDateline bool
+	// ForceCacheTTL5M overrides existing ephemeral breakpoints before wire
+	// finalization. The manager owns the group default; false preserves this
+	// adapter's existing behavior for other callers.
+	ForceCacheTTL5M bool
 	// OpenCodeScrub deletes OpenCode fingerprint lines (especially
 	// "You are powered by the model named ...") without injecting any
 	// replacement system prompt. Default false leaves the client text as-is.
@@ -347,6 +351,9 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		body = FilterThinkingBlocks(body, model)
 	}
 	body = applyCCMaxFieldPassthrough(body, input)
+	if input.ForceCacheTTL5M {
+		body = ForceCCMaxCacheTTL5M(body)
+	}
 
 	logicalBody := append([]byte(nil), body...)
 	body, headers, err := finalizeCCMaxCompatibilityWire(input, logicalBody, model, mimic)
@@ -360,6 +367,12 @@ func PrepareCCMaxCompatibilityRequest(input CCMaxCompatibilityInput) (*CCMaxComp
 		Mimic: mimic, ClaudeCode: claudeCode, Distilled: input.NormalRequestMode,
 		ToolRewrite: toolRewrite, input: input,
 	}, nil
+}
+
+// ForceCCMaxCacheTTL5M only edits existing cache directives at protocol
+// locations, never tool inputs/schemas, metadata, or prompt text.
+func ForceCCMaxCacheTTL5M(body []byte) []byte {
+	return forceEphemeralCacheControlTTL(body, cacheTTLTarget5m)
 }
 
 func applyCCMaxFieldPassthrough(body []byte, input CCMaxCompatibilityInput) []byte {

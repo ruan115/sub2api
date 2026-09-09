@@ -52,6 +52,9 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 	oauth := gatewayAccountUsesOAuth(account)
 	stream, _ := payload["stream"].(bool)
 	if accountRequestPassthrough(account) {
+		if gatewayForceCacheTTL5M(r.Context()) {
+			body = sub2service.ForceCCMaxCacheTTL5M(body)
+		}
 		return claudePreparedRequest{
 			Body: append([]byte(nil), body...), Model: model, AuthType: account.AuthType, OAuth: oauth,
 			Passthrough: true, Stream: stream, CountTokens: countTokens,
@@ -90,6 +93,7 @@ func prepareClaudeRequest(r *http.Request, body []byte, account gatewayAccount, 
 		SpeedPassthrough:          fieldPassthrough.Speed,
 		AnthropicBetaPassthrough:  fieldPassthrough.AnthropicBeta,
 		PreserveClientDateline:    !gatewayDatelineNormalization(r.Context()),
+		ForceCacheTTL5M:           gatewayForceCacheTTL5M(r.Context()),
 		OpenCodeScrub:             gatewayOpenCodeScrub(r.Context()),
 	})
 	if err != nil {
