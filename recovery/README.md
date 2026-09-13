@@ -2,6 +2,7 @@
 
 本模块是 Portunex + isthmus 恢复工程的开发工具和证据入口，不是第四个生产服务。
 
+- [最新进度、review 与阶段提交（2026-09-13）](docs/status-and-review-2026-09-13.md)
 - [目录与模块边界](docs/architecture.md)
 - [恢复工具命令与安全边界](tooling/README.md)
 - [合同清单维护规则](docs/catalog.md)

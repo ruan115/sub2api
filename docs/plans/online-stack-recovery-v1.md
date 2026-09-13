@@ -148,3 +148,5 @@ PRD：`docs/prd/online-stack-recovery-v1.md`。
 第三切片还修复独立审查发现的catalog祖先软链接/检查后换链和无界读取问题。最终`check-demo`通过：85项Python、111项Bun、33项React、Go演示race/vet和正常回环smoke；旧execution-plane四包回归通过。新的私有WIP快照已独立校验，原5.5c字节未变；未提交、推送或部署。独立Bun异常停机门槛仍失败，不能与这些通过项合并成“全部完成”。
 
 随后同日更新：用户提供`BindInterface=en0`后，使用同一密钥的只读SSH检查成功；本机默认路由为`utun3`，先前未绑定连接的失败不能再表述为服务器SSH不可用。此轮未采集新的生产资产，旧wire未知项仍待补齐。用户另明确批准仅隔离下载/运行Bun、不替换、不部署；仓库外1.4.2候选完整check-demo及正常/1011关闭各5次均通过，系统1.3.9对照仍失败。系统/项目/CI版本未动，Linux和生产未验证，不自动关闭当前运行版本的D4门槛。完整证据及隔离路径见runtime的`docs/bun-stop-fix-validation.md`。
+
+阶段提交更新：按用户要求完成三路独立 review，修复归档批次饥饿、会话登录/登出并发、Git 输出收集无界三个 P2，并修复 route 测试替身的数据竞争。最新回归为 Python 97 项、Bun 111 项、React 42 项及 Go race/vet/正常回环冒烟通过；真实 DB/Redis、Bun 1.3.9 异常停机与生产验收仍不算通过。新增私有 WIP 快照校验后，已将旧 5.5c、恢复底座和 Go/React 演示分成三个本地提交，再用文档提交记录交付。详细哈希、review、未完成项和下一阶段顺序见 [进度台账](../../recovery/docs/status-and-review-2026-09-13.md)。未推送、未部署，未替换 Bun，尚未完成异机灾备。
