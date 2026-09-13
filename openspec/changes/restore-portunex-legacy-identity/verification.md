@@ -1,6 +1,6 @@
 # 分阶段验证记录
 
-日期：2026-09-13。本 change 未完成旧认证闭环，不可上线。
+初始日期：2026-09-13；2026-09-14 更新 I1。本 change 未完成旧认证闭环，不可上线。
 
 ## I0.1：定义与静态二进制证据
 
@@ -37,9 +37,9 @@ I0.2 未完成：密码调用路径/实际参数、ID epoch/worker 布局、toke
 有效期/续期/撤销/并发、完整 User DTO 与错误状态/权限合同仍需独立证据。
 SQL 中 `LIMIT 10` 不能单独证明所有登录的有效会话上限。
 
-I1 未完成：本机未找到 PostgreSQL，两个已核验的本地 Docker socket daemon 不可用。
-未启动 Docker Desktop、未安装新依赖、未借用线上 DB。隔离运行时下载构建另待用户答复。
-sqlmock/静态检查都不算 PostgreSQL 语义或数据迁移验证。
+I1 的原运行时阻塞已解除：2026-09-14 用户授权后，项目外独立构建 PostgreSQL 18.6/citext 1.8，
+真实合成库迁移和 repository 测试已完成。见 `postgres-verification.md`。
+未启动 Docker Desktop、未替换系统软件、未借用线上 DB；不把本地 C locale 测试当生产 locale 或完整旧数据迁移证明。
 
 I2.2–I5 未完成：会话与旧 HTTP transport、权限/重启回归及隔离原实现对照尚未接入。
 现有 Go/React 合成演示、主系统认证、Bun 1.3.9 和线上服务不变，不推送、不部署。

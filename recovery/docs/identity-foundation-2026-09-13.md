@@ -1,6 +1,7 @@
 # 认证基础切片：进度、review 与交付
 
 日期：2026-09-13；分支 `codex/claude-execution-plane-v1`。
+2026-09-14 后续进展见 [隔离 PostgreSQL 与存储基础](postgres-foundation-2026-09-14.md)；下文保留本切片当时状态。
 用户已确认旧 Bearer 认证规划。本轮完成定义证据和独立密码能力，
 **还没有完成旧 login → me → logout，不是可上线认证替代品。**
 

@@ -3,10 +3,10 @@
 - [x] I0.0 用户确认上一认证规划；先记录模块目录与安全边界。
 - [x] I0.1 补认证表定义和二进制静态证据，保留未知项。
 - [ ] I0.2 冻结旧算法、ID、token 生命周期、错误和完整 DTO 合同。
-- [ ] I1 独立 PostgreSQL 恢复库迁移/repository 与真实合成库验证。
+- [x] I1 独立 PostgreSQL 恢复库迁移/repository 与真实合成库验证（本地基础，不等于旧业务全值域兼容）。
   - [x] I1.1 用户授权的项目外官方 PostgreSQL 18.6 构建、私有 socket 测试 helper。
   - [x] I1.2 三表恢复迁移与真实 catalog/NULL/唯一性/FK/numeric/time/回滚验证。
-  - [ ] I1.3 用户和会话存储原语与合成 repository 验证（非旧认证策略）。
+  - [x] I1.3 用户和会话存储原语与合成 repository 验证（非旧认证策略）。
 - [x] I2.1 独立、有界 PHC 验证模块及公开向量/取消/并发验证。
 - [ ] I2.2 已证实的会话生成、存储、过期、撤销和 last-used。
 - [ ] I3 旧 login → me → logout transport 闭环。

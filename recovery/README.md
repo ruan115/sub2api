@@ -2,7 +2,8 @@
 
 本模块是 Portunex + isthmus 恢复工程的开发工具和证据入口，不是第四个生产服务。
 
-- [最新：认证基础切片、review 与未完成门槛](docs/identity-foundation-2026-09-13.md)
+- [最新：隔离 PostgreSQL 与认证存储基础](docs/postgres-foundation-2026-09-14.md)
+- [此前认证证据/密码模块切片](docs/identity-foundation-2026-09-13.md)
 - [此前演示与执行面阶段进度（2026-09-13）](docs/status-and-review-2026-09-13.md)
 - [首批旧 HTTP 调用证据](contracts-wire/portunex/README.md)
 - [已确认、实施中：旧 Bearer 认证兼容规划](docs/portunex-identity-next-slice.md)
@@ -30,3 +31,6 @@
 第二切片新增独立 Go/React 演示和 isthmus fake HTTP/WS。先在`portunex-web/`执行`npm ci --ignore-scripts`，再从仓库根目录运行`make -C recovery check-demo`，会额外执行Go race/vet、React类型/组件测试和构建，以及临时loopback端口的fake HTTP/WS冒烟并自动关闭。需要backend指定的Go工具链和Node/npm；不启动线上程序。默认`check`仍不监听端口。演示不使用旧`/portunex/*`合同，不连接DB/Redis或真实模型，不等于整套恢复完成。
 
 另有独立`make -C recovery runtime-shutdown-gate`：检查服务端主动WS关闭后的原生停机。本机Bun 1.3.9未通过，脚本保持非0退出；正常路径`check-demo`通过不能替代此门槛。生产与完整transport验收保持关闭。
+
+认证数据库另有显式 `postgres-integration` 门槛：按 [隔离运行时说明](runtime/postgres/README.md) 提供 `PORTUNEX_TEST_PG_BIN`，
+只启动自己的私有 socket 合成 PostgreSQL。普通 `check`/`check-demo` 不启动数据库；缺失运行时不算跳过成功。

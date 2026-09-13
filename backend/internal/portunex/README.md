@@ -4,11 +4,14 @@
 
 - `identity/`：固定合成身份、随机opaque session、TTL/撤销/容量限制。只保存token摘要；公开的演示密码比较逻辑不得用于真实密码存储。
 - [`identity/password/`](identity/password/README.md)：独立本地 Argon2id PHC 验证能力，显式参数/资源预算和并发取消边界。未接入演示或旧路由，不等于已确认旧生产密码算法。
+- [`identity/repository/postgres/`](identity/repository/postgres/README.md)、[`users/repository/postgres/`](users/repository/postgres/README.md)：固定恢复 schema 的会话存储原语和用户读取；非旧认证/HTTP DTO。
+- [`migrations/`](migrations/README.md)、[`platform/postgres/testcluster/`](platform/postgres/testcluster/README.md)：三表合成恢复库迁移与显式 tag 的私有 PostgreSQL 测试集群，普通入口不启动数据库。
 - `users/`、`apikeys/`、`providers/`：各自拥有列表模型/查询，Key仅脱敏提示，Provider没有凭据字段。
 - `platform/listing/`：搜索与有界分页；`platform/namespace/`：ID/cache/pubsub/lock隔离命名。
 - `app/`：有限装配、专用演示HTTP协议与Host/Origin/peer边界、跨模块集成测试。
 
-数据库、Redis客户端、真实认证/账务/Provider调用尚未实现。命名空间单测不等于真实缓存、后台锁、数据库事务均已隔离。
+数据库迁移和上述 repository 已通过独立 PostgreSQL 18.6 合成测试，但未接到演示/生产入口。
+Redis客户端、真实认证/账务/Provider调用尚未实现；数据库验证也不等于真实缓存、后台锁或完整旧业务已隔离/兼容。
 
 ## 启动和测试
 
