@@ -1,0 +1,83 @@
+name: Recovery local demo
+
+on:
+  pull_request:
+    paths:
+      - 'backend/internal/portunex/**'
+      - 'backend/cmd/portunex-demo/**'
+      - 'backend/go.mod'
+      - 'backend/go.sum'
+      - 'portunex-web/**'
+      - 'execution-plane/isthmus-runtime/**'
+      - 'openspec/changes/restore-online-stack-demo/**'
+      - '.github/workflows/recovery-demo-ci.yml'
+  push:
+    paths:
+      - 'backend/internal/portunex/**'
+      - 'backend/cmd/portunex-demo/**'
+      - 'backend/go.mod'
+      - 'backend/go.sum'
+      - 'portunex-web/**'
+      - 'execution-plane/isthmus-runtime/**'
+      - 'openspec/changes/restore-online-stack-demo/**'
+      - '.github/workflows/recovery-demo-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Synthetic domain and HTTP tests
+        working-directory: backend
+        run: go test -race -count=1 ./internal/portunex/... ./cmd/portunex-demo
+      - name: Vet demo packages
+        working-directory: backend
+        run: go vet ./internal/portunex/... ./cmd/portunex-demo
+  react-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20.20.2'
+          cache: npm
+          cache-dependency-path: portunex-web/package-lock.json
+      - name: Locked development dependencies
+        working-directory: portunex-web
+        run: npm ci --ignore-scripts
+      - name: Typecheck, test and build synthetic UI
+        working-directory: portunex-web
+        run: |
+          npm run typecheck
+          npm test
+          npm run build
+  runtime-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.9'
+      - name: Synthetic runtime and protocol tests
+        working-directory: execution-plane/isthmus-runtime
+        run: bun test
+      - name: Ephemeral loopback HTTP and WebSocket smoke
+        working-directory: execution-plane/isthmus-runtime
+        run: bun run test/loopback.smoke.ts
