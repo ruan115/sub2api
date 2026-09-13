@@ -93,6 +93,28 @@ type accountModeHealth struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+type runtimeOutboxConsumerUpgradeColumn struct {
+	name   string
+	mysql  string
+	sqlite string
+}
+
+// runtimeOutboxConsumerUpgradeColumns is the additive migration contract for
+// fencing stale claims and persisting retry/blocked failure state. Keep these
+// definitions in sync with both CREATE TABLE statements below.
+var runtimeOutboxConsumerUpgradeColumns = []runtimeOutboxConsumerUpgradeColumn{
+	{name: "claim_version", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (claim_version >= 0)"},
+	{name: "failure_state", mysql: "VARCHAR(16) NOT NULL DEFAULT 'ready' CHECK (failure_state IN ('ready', 'retry_wait', 'blocked'))", sqlite: "TEXT NOT NULL DEFAULT 'ready' CHECK (failure_state IN ('ready', 'retry_wait', 'blocked'))"},
+	{name: "failure_sequence", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (failure_sequence >= 0)"},
+	{name: "failure_class", mysql: "VARCHAR(64) NOT NULL DEFAULT ''", sqlite: "TEXT NOT NULL DEFAULT ''"},
+	{name: "failure_code", mysql: "VARCHAR(128) NOT NULL DEFAULT ''", sqlite: "TEXT NOT NULL DEFAULT ''"},
+	{name: "failure_count", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0)"},
+	{name: "first_failed_at", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (first_failed_at >= 0)"},
+	{name: "last_failed_at", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (last_failed_at >= 0)"},
+	{name: "next_attempt_at", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at >= 0)"},
+	{name: "blocked_claim_version", mysql: "BIGINT UNSIGNED NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0 CHECK (blocked_claim_version >= 0)"},
+}
+
 func (a *app) migrateExecutionFeatures() error {
 	if a.db.dialect == dialectMySQL {
 		for _, column := range []struct{ table, name, definition string }{
@@ -119,6 +141,11 @@ func (a *app) migrateExecutionFeatures() error {
 		for _, statement := range mysqlExecutionSchema() {
 			if _, err := a.db.DB.Exec(statement); err != nil {
 				return fmt.Errorf("migrate MySQL execution feature: %w", err)
+			}
+		}
+		for _, column := range runtimeOutboxConsumerUpgradeColumns {
+			if err := ensureMySQLColumn(a.db.DB, "runtime_outbox_consumers", column.name, column.mysql); err != nil {
+				return err
 			}
 		}
 		for _, column := range []struct{ name, definition string }{
@@ -166,6 +193,11 @@ func (a *app) migrateExecutionFeatures() error {
 	for _, statement := range sqliteExecutionSchema() {
 		if _, err := a.db.Exec(statement); err != nil {
 			return fmt.Errorf("migrate SQLite execution feature: %w", err)
+		}
+	}
+	for _, column := range runtimeOutboxConsumerUpgradeColumns {
+		if err := addColumnIfMissing(a.db, "runtime_outbox_consumers", column.name, column.sqlite); err != nil {
+			return fmt.Errorf("add runtime outbox consumer column %s: %w", column.name, err)
 		}
 	}
 	if err := a.migrateSQLiteRuntimeProxyReservationAccountFK(); err != nil {
@@ -228,6 +260,11 @@ func sqliteExecutionSchema() []string {
 			updated_at TEXT NOT NULL DEFAULT (` + nowSQL + `),
 			PRIMARY KEY (account_id, mode)
 		)`,
+		`CREATE TABLE IF NOT EXISTS runtime_outbox_commit_lock (
+			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+			lock_epoch INTEGER NOT NULL DEFAULT 0 CHECK (lock_epoch >= 0)
+		)`,
+		`INSERT OR IGNORE INTO runtime_outbox_commit_lock (singleton, lock_epoch) VALUES (1, 0)`,
 		`CREATE TABLE IF NOT EXISTS runtime_outbox (
 			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL UNIQUE,
@@ -262,6 +299,16 @@ func sqliteExecutionSchema() []string {
 			claimed_sequence INTEGER NOT NULL DEFAULT 0,
 			locked_by TEXT NOT NULL DEFAULT '',
 			lease_expires_at INTEGER NOT NULL DEFAULT 0,
+			claim_version INTEGER NOT NULL DEFAULT 0 CHECK (claim_version >= 0),
+			failure_state TEXT NOT NULL DEFAULT 'ready' CHECK (failure_state IN ('ready', 'retry_wait', 'blocked')),
+			failure_sequence INTEGER NOT NULL DEFAULT 0 CHECK (failure_sequence >= 0),
+			failure_class TEXT NOT NULL DEFAULT '',
+			failure_code TEXT NOT NULL DEFAULT '',
+			failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+			first_failed_at INTEGER NOT NULL DEFAULT 0 CHECK (first_failed_at >= 0),
+			last_failed_at INTEGER NOT NULL DEFAULT 0 CHECK (last_failed_at >= 0),
+			next_attempt_at INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at >= 0),
+			blocked_claim_version INTEGER NOT NULL DEFAULT 0 CHECK (blocked_claim_version >= 0),
 			last_error TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL DEFAULT (` + nowSQL + `)
 		)`,
@@ -319,6 +366,12 @@ func mysqlExecutionSchema() []string {
 			PRIMARY KEY (account_id, mode),
 			CONSTRAINT fk_account_mode_health_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS runtime_outbox_commit_lock (
+			singleton TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+			lock_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			CONSTRAINT chk_runtime_outbox_commit_lock_singleton CHECK (singleton = 1)
+		) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin`,
+		`INSERT IGNORE INTO runtime_outbox_commit_lock (singleton, lock_epoch) VALUES (1, 0)`,
 		`CREATE TABLE IF NOT EXISTS runtime_outbox (
 			sequence BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			event_id CHAR(36) NOT NULL,
@@ -356,8 +409,20 @@ func mysqlExecutionSchema() []string {
 			claimed_sequence BIGINT NOT NULL DEFAULT 0,
 			locked_by VARCHAR(128) NOT NULL DEFAULT '',
 			lease_expires_at BIGINT NOT NULL DEFAULT 0,
+			claim_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			failure_state VARCHAR(16) NOT NULL DEFAULT 'ready',
+			failure_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			failure_class VARCHAR(64) NOT NULL DEFAULT '',
+			failure_code VARCHAR(128) NOT NULL DEFAULT '',
+			failure_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			first_failed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			last_failed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			next_attempt_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			blocked_claim_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
 			last_error VARCHAR(512) NOT NULL DEFAULT '',
-			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+			updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			CONSTRAINT chk_runtime_outbox_consumer_failure_state
+				CHECK (failure_state IN ('ready', 'retry_wait', 'blocked'))
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS runtime_onboarding_result_cursors (
 			cursor_name VARCHAR(128) NOT NULL PRIMARY KEY,
@@ -793,6 +858,16 @@ func enqueueRuntimeEventTx(ctx context.Context, tx *databaseTx, event runtimeOut
 	} else if err := validateRuntimeProxyAuthorityEventTx(ctx, tx, event, currentGeneration); err != nil {
 		return runtimeOutboxEvent{}, err
 	}
+	// Every production outbox writer reaches this point while its business
+	// mutation is still uncommitted. Updating the singleton row takes an
+	// exclusive write lock that is held until this transaction commits or
+	// rolls back. Therefore another producer cannot allocate an AUTO_INCREMENT
+	// sequence until the transaction that allocated the preceding sequence is
+	// terminal. This establishes allocation order == commit order without
+	// depending on InnoDB AUTO_INCREMENT lock-mode details.
+	if err := acquireRuntimeOutboxCommitOrderTx(ctx, tx); err != nil {
+		return runtimeOutboxEvent{}, err
+	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO runtime_outbox
 		(event_id, account_id, event_type, desired_generation, payload_json)
 		VALUES (?, ?, ?, ?, ?)`, event.EventID, event.AccountID, event.EventType, event.DesiredGeneration, event.PayloadJSON)
@@ -804,6 +879,25 @@ func enqueueRuntimeEventTx(ctx context.Context, tx *databaseTx, event runtimeOut
 		return runtimeOutboxEvent{}, fmt.Errorf("read runtime outbox sequence: %w", err)
 	}
 	return event, nil
+}
+
+func acquireRuntimeOutboxCommitOrderTx(ctx context.Context, tx *databaseTx) error {
+	if ctx == nil || ctx.Err() != nil || tx == nil {
+		return errors.New("invalid runtime outbox commit-order lock")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_outbox_commit_lock
+		SET lock_epoch = lock_epoch + 1 WHERE singleton = 1`)
+	if err != nil {
+		return fmt.Errorf("acquire runtime outbox commit-order lock: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect runtime outbox commit-order lock: %w", err)
+	}
+	if affected != 1 {
+		return errors.New("runtime outbox commit-order lock is missing or corrupt")
+	}
+	return nil
 }
 
 func (a *app) claimRuntimeOutboxEvent(ctx context.Context, consumerName, owner string, now time.Time, leaseTTL time.Duration) (runtimeOutboxEvent, bool, error) {
@@ -973,7 +1067,7 @@ func safeRuntimePayloadJSON(payload string) (string, error) {
 		return "", errors.New("runtime outbox payload size is invalid")
 	}
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil || decoded == nil {
 		return "", errors.New("runtime outbox payload must be a JSON object")
 	}
 	if runtimePayloadContainsSecret(decoded) {

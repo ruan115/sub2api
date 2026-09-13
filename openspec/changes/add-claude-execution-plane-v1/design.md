@@ -175,8 +175,27 @@ execution lease 与 trusted reservation，并同时插入 proxy lease 和 workfl
 以 `intent_id` 唯一键保证一个 intent 至多一个 workflow；schema gate 校验索引确实唯一且精确
 覆盖 `intent_id`。exact replay 先返回原 workflow/proxy binding，再考虑当前 health。旧 durable
 `CreateProvisioning` 不再由 production repository 暴露。activation 在 claim/decrypt 前后均重验
-current proxy lease authority，竞态失效时擦除已打开输入且不 dispatch。生产 outbox routing、
-intent/slot 选择和 duplicate drain/archive 仍未组装。
+current proxy lease authority，竞态失效时擦除已打开输入且不 dispatch。
+
+生产 outbox 使用唯一 consumer checkpoint 串行路由 proxy authority、onboarding 与 lifecycle
+事件，禁止拆成可能互相超车的多个 checkpoint。CCMAX 的所有生产 outbox writer 在业务事务内
+先更新 `runtime_outbox_commit_lock` 单例行，再分配 `AUTO_INCREMENT sequence`；该行锁持有至
+commit/rollback，保证 sequence 分配顺序与事务完成顺序一致。升级时必须先停掉不遵守该锁的旧
+producer，再迁移并启动新 producer。orchestrator 启动前只读校验表、精确索引、单例锁行和
+checkpoint 历史；非空历史不得静默从零 bootstrap。
+
+onboarding handler 先把 CCMAX event 投影为 secret-free durable trigger 与 desired slot，独立
+coordinator 再以短租约、有界批次调用 atomic starter；无健康 assignment 时只重排 trigger，
+不得阻塞全局 outbox。lifecycle projection 以 event ID/sequence/payload digest receipt 固化 exact
+replay。不可重试的 poison event 永久阻塞 checkpoint 且不越过，短暂错误保持 `retry_wait`；达到
+重试预算时 supervisor 退出但仍保留同一事件供重启重放。blocked-event resolver 只接受真实 active
+admin 和已配置 consumer，对当前最早事件、blocked claim version 与完整失败指纹做事务内 CAS；同一
+事务重验 actor、清除失败状态并写入无秘密审计，不推进 checkpoint，审计失败则整体回滚。恢复只提供
+exact retry，不提供 skip/force ack。重复身份账号由独立批处理先 enqueue `drain_requested`、
+再在保留 proxy reservation 的前提下 archive 并 enqueue `destroy_requested`，不得改写冲突账号。
+orchestrator 按健康 assignment + live lease + Hello `dataplane_endpoint` 向 Redis
+`execution:route:v1:<slot_id>` 发布私网/回环路由，TTL ≤ 1m，并以 epoch/generation fencing
+撤回已下线槽位。
 
 账号创建 submission 保存版本化的非秘密 canonical fingerprint，不包含凭证、代理文本
 或自由文本。外部 key 丢失时，服务端提供按 account ID 的非秘密 status/resume API，

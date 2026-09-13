@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,51 @@ func (componentRotationAuthorizer) CommitAuthorizedRotation(
 
 type componentDurableProvisioningRepository struct {
 	*onboarding.MemoryProvisioningRepository
+}
+
+type componentStartTriggerRepository struct {
+	claimed chan struct{}
+	once    sync.Once
+}
+
+func (r *componentStartTriggerRepository) ProjectOnboardingStartTrigger(
+	context.Context,
+	onboarding.StartTriggerProjection,
+) (onboarding.OnboardingStartTrigger, bool, error) {
+	return onboarding.OnboardingStartTrigger{}, false, onboarding.ErrStartTriggerRejected
+}
+
+func (r *componentStartTriggerRepository) LookupOnboardingStartTrigger(
+	context.Context,
+	string,
+) (onboarding.OnboardingStartTrigger, bool, error) {
+	return onboarding.OnboardingStartTrigger{}, false, nil
+}
+
+func (r *componentStartTriggerRepository) ClaimDueOnboardingStartTriggers(
+	context.Context,
+	onboarding.StartTriggerClaimQuery,
+) ([]onboarding.OnboardingStartTrigger, error) {
+	if r.claimed != nil {
+		r.once.Do(func() { close(r.claimed) })
+	}
+	return nil, nil
+}
+
+func (r *componentStartTriggerRepository) RetryOnboardingStartTrigger(
+	context.Context,
+	onboarding.StartTriggerRetry,
+) error {
+	return onboarding.ErrStartTriggerRejected
+}
+
+type componentHealthyStartRepository struct{}
+
+func (componentHealthyStartRepository) StartHealthySlotOnboarding(
+	context.Context,
+	onboarding.HealthySlotStartSpec,
+) (onboarding.Provisioning, bool, error) {
+	return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
 }
 
 func (r *componentDurableProvisioningRepository) BeginCredentialRotation(
@@ -74,6 +120,9 @@ func TestOrchestratorComponentsComposeAndRegisterCredentialBoundary(t *testing.T
 		components.CredentialVault == nil || components.IntentVault == nil {
 		t.Fatal("orchestrator composition left a credential-path dependency nil")
 	}
+	if components.HealthyStarter != nil || components.StartCoordinator != nil {
+		t.Fatal("disabled triggered-start composition unexpectedly created background components")
+	}
 	server := grpc.NewServer()
 	if err := components.Register(server); err != nil {
 		t.Fatal(err)
@@ -114,6 +163,47 @@ func TestOrchestratorComponentsBuildsDurableAuthorizerFromProductionRepository(t
 	}
 }
 
+func TestOrchestratorComponentsOptionallyBuildsTriggeredStarter(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0).UTC()
+	config := validComponentConfig(t, now)
+	config.StartTriggerRepository = &componentStartTriggerRepository{}
+	config.HealthyStartRepository = componentHealthyStartRepository{}
+	config.HealthyStarterConfig = HealthySlotOnboardingStarterConfig{
+		ObservationMaxAge: time.Minute,
+		CommandTTL:        5 * time.Minute,
+	}
+	config.StartCoordinatorConfig = OnboardingStartCoordinatorConfig{Owner: "orchestrator-a"}
+	components, err := NewOrchestratorComponents(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer components.Close()
+	if components.HealthyStarter == nil || components.StartCoordinator == nil {
+		t.Fatal("enabled triggered-start composition left a dependency nil")
+	}
+}
+
+func TestOrchestratorComponentsRejectsPartiallyEnabledTriggeredStarter(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0).UTC()
+	for _, configure := range []func(*OrchestratorComponentsConfig){
+		func(config *OrchestratorComponentsConfig) {
+			config.StartTriggerRepository = &componentStartTriggerRepository{}
+		},
+		func(config *OrchestratorComponentsConfig) {
+			config.HealthyStartRepository = componentHealthyStartRepository{}
+		},
+	} {
+		config := validComponentConfig(t, now)
+		configure(&config)
+		if _, err := NewOrchestratorComponents(config); !errors.Is(err, ErrOrchestratorComponents) {
+			t.Fatalf("partial triggered-start composition error = %v", err)
+		}
+		if _, _, err := config.RotationRecipient.PublicKey(); err == nil {
+			t.Fatal("failed partial composition retained a live rotation recipient")
+		}
+	}
+}
+
 func TestOrchestratorComponentsFailClosedAndDestroyRecipient(t *testing.T) {
 	if _, err := NewOrchestratorComponents(OrchestratorComponentsConfig{}); !errors.Is(err, ErrOrchestratorComponents) {
 		t.Fatalf("empty composition error = %v", err)
@@ -143,5 +233,28 @@ func TestOrchestratorComponentsFailClosedAndDestroyRecipient(t *testing.T) {
 	}
 	if err := components.Register(grpc.NewServer()); !errors.Is(err, ErrOrchestratorComponents) {
 		t.Fatalf("register after close error = %v", err)
+	}
+}
+
+func validComponentConfig(t *testing.T, now time.Time) OrchestratorComponentsConfig {
+	t.Helper()
+	authority, _, err := pki.NewEphemeralAuthority(func() time.Time { return now }, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kms, err := credential.NewFakeKMS(bytes.Repeat([]byte{0x64}, 32), "kms-components", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRepository := store.NewMemoryRepository()
+	rotationRecipient, err := credential.NewRecipient(bytes.NewReader(bytes.Repeat([]byte{0x55}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return OrchestratorComponentsConfig{
+		NodeRepository: runtimeRepository, CredentialRepository: runtimeRepository,
+		IntentRepository: onboarding.NewMemoryRepository(), ProvisioningRepository: &componentDurableProvisioningRepository{MemoryProvisioningRepository: onboarding.NewMemoryProvisioningRepository()},
+		Authority: authority, KMS: kms, RotationAuthorizer: componentRotationAuthorizer{}, RotationRecipient: rotationRecipient,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x46}, 4096)), Now: func() time.Time { return now },
 	}
 }

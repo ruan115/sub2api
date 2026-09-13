@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -32,11 +33,15 @@ func TestRunOrchestratorRPCServesEnrollmentAndProtectsIntake(t *testing.T) {
 	}
 	kms, _ := credential.NewFakeKMS(bytes.Repeat([]byte{0x71}, 32), "kms-rpc", "v1")
 	runtimeRepository := store.NewMemoryRepository()
+	startTriggers := &componentStartTriggerRepository{claimed: make(chan struct{})}
 	rotationRecipient, _ := credential.NewRecipient(bytes.NewReader(bytes.Repeat([]byte{0x53}, 32)))
 	components, err := NewOrchestratorComponents(OrchestratorComponentsConfig{
 		NodeRepository: runtimeRepository, CredentialRepository: runtimeRepository,
 		IntentRepository: onboarding.NewMemoryRepository(), ProvisioningRepository: &componentDurableProvisioningRepository{MemoryProvisioningRepository: onboarding.NewMemoryProvisioningRepository()},
+		StartTriggerRepository: startTriggers, HealthyStartRepository: componentHealthyStartRepository{},
 		Authority: authority, KMS: kms, RotationAuthorizer: componentRotationAuthorizer{}, RotationRecipient: rotationRecipient, Now: time.Now,
+		HealthyStarterConfig:   HealthySlotOnboardingStarterConfig{ObservationMaxAge: time.Minute, CommandTTL: 5 * time.Minute},
+		StartCoordinatorConfig: OnboardingStartCoordinatorConfig{Owner: "orchestrator-a", PollInterval: time.Millisecond},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +81,12 @@ func TestRunOrchestratorRPCServesEnrollmentAndProtectsIntake(t *testing.T) {
 		cancel()
 		t.Fatalf("certificate-free intake error = %v", err)
 	}
+	select {
+	case <-startTriggers.claimed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("RunOrchestratorRPC did not run the enabled start coordinator")
+	}
 	cancel()
 	select {
 	case err := <-result:
@@ -84,6 +95,61 @@ func TestRunOrchestratorRPCServesEnrollmentAndProtectsIntake(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunOrchestratorRPC did not stop after cancellation")
+	}
+}
+
+type orchestratorTestRunner struct {
+	run func(context.Context) error
+}
+
+func (r orchestratorTestRunner) Run(ctx context.Context) error {
+	return r.run(ctx)
+}
+
+func TestSuperviseOrchestratorRPCFailsClosedAndCancelsPeerRunner(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	expected := errors.New("start coordinator failed")
+	peerCanceled := make(chan struct{})
+	err = superviseOrchestratorRPC(context.Background(), listener, server, []orchestratorBackgroundRunner{
+		{
+			runner:         orchestratorTestRunner{run: func(context.Context) error { return expected }},
+			unexpectedExit: ErrOnboardingStartCoordinate,
+		},
+		{
+			runner: orchestratorTestRunner{run: func(ctx context.Context) error {
+				<-ctx.Done()
+				close(peerCanceled)
+				return nil
+			}},
+			unexpectedExit: ErrProvisioningRun,
+		},
+	})
+	if !errors.Is(err, expected) {
+		t.Fatalf("supervisor error = %v", err)
+	}
+	select {
+	case <-peerCanceled:
+	default:
+		t.Fatal("peer runner was not canceled before supervisor returned")
+	}
+}
+
+func TestSuperviseOrchestratorRPCRejectsUnexpectedCleanRunnerExit(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	err = superviseOrchestratorRPC(context.Background(), listener, server, []orchestratorBackgroundRunner{{
+		runner:         orchestratorTestRunner{run: func(context.Context) error { return nil }},
+		unexpectedExit: ErrOnboardingStartCoordinate,
+	}})
+	if !errors.Is(err, ErrOnboardingStartCoordinate) {
+		t.Fatalf("unexpected clean exit error = %v", err)
 	}
 }
 

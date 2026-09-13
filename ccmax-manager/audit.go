@@ -50,7 +50,8 @@ func (w *auditResponseWriter) Write(body []byte) (int, error) {
 
 func (a *app) auditMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/auth/login" || !strings.HasPrefix(r.URL.Path, "/api/") || r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if r.URL.Path == "/api/auth/login" || r.URL.Path == runtimeOutboxBlockedRetryPath ||
+			!strings.HasPrefix(r.URL.Path, "/api/") || r.Method == http.MethodGet || r.Method == http.MethodHead {
 			next.ServeHTTP(w, r)
 			return
 		}

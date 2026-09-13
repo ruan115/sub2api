@@ -3,6 +3,7 @@ module github.com/Wei-Shaw/sub2api/ccmax-manager
 go 1.26.6
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/Wei-Shaw/sub2api v0.0.0
 	github.com/imroc/req/v3 v3.59.0
 	github.com/mattn/go-sqlite3 v1.14.32

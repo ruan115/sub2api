@@ -184,13 +184,25 @@ func TestMySQLProxyLeaseStoresOnlyOpaqueTrustedRuntimeBinding(t *testing.T) {
 		t.Fatalf("replay mysql proxy lease with nanoseconds: %v", err)
 	}
 
-	mock.ExpectQuery(`(?s)SELECT pl.account_id.*FROM proxy_leases pl.*proxy_reservation_grants.*pl.created_at <= \?.*sa.desired_generation = s.desired_generation.*el.created_at <= \?.*prg.created_at <= \?`).
-		WithArgs(lease.ID, lease.SlotID, lease.ExecutionEpoch, durableNow, durableNow, durableNow, durableNow).
+	mock.ExpectQuery(`(?s)SELECT pl.account_id.*FROM proxy_leases pl.*proxy_reservation_grants.*pl.created_at <= UTC_TIMESTAMP\(6\).*sa.desired_generation = s.desired_generation.*el.expires_at > UTC_TIMESTAMP\(6\).*el.created_at <= UTC_TIMESTAMP\(6\).*prg.created_at <= UTC_TIMESTAMP\(6\)`).
+		WithArgs(lease.ID, lease.SlotID, lease.ExecutionEpoch).
 		WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(lease.AccountID))
 	if err := repository.ValidateCurrentProxyLease(
 		context.Background(), provider.RuntimeAccountID(lease.AccountID), lease.SlotID, lease.ExecutionEpoch, lease.ID, now,
 	); err != nil {
 		t.Fatalf("validate mysql proxy lease: %v", err)
+	}
+
+	// The caller clock is deliberately behind. The database's current-time
+	// predicate decides expiry, represented here by no matching current row.
+	mock.ExpectQuery(`(?s)el.expires_at > UTC_TIMESTAMP\(6\)`).
+		WithArgs(lease.ID, lease.SlotID, lease.ExecutionEpoch).
+		WillReturnRows(sqlmock.NewRows([]string{"account_id"}))
+	if err := repository.ValidateCurrentProxyLease(
+		context.Background(), provider.RuntimeAccountID(lease.AccountID), lease.SlotID, lease.ExecutionEpoch,
+		lease.ID, now.Add(-time.Hour),
+	); !errors.Is(err, ErrProxyLeaseNotFound) {
+		t.Fatalf("DB-expired lease accepted with lagging caller clock: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

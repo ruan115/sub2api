@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,15 +18,21 @@ import (
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/config"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/pki"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
 	"google.golang.org/grpc/test/bufconn"
 )
 
 func TestRunProductionOrchestratorBuildsEverythingBeforeServing(t *testing.T) {
-	database, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	database, runtimeMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectPing()
+	runtimeMock.ExpectPing()
+	ccmaxDatabase, ccmaxMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ccmaxMock.ExpectPing()
 	now := time.Now().UTC()
 	authority, _, err := pki.NewEphemeralAuthority(func() time.Time { return now }, 24*time.Hour)
 	if err != nil {
@@ -48,11 +55,32 @@ func TestRunProductionOrchestratorBuildsEverythingBeforeServing(t *testing.T) {
 		t.Fatal(err)
 	}
 	listener := bufconn.Listen(1 << 20)
-	started := make(chan string, 2)
+	started := make(chan string, 4)
 	factories := orchestratorRuntimeFactories{
-		openDatabase: func(string) (*sql.DB, error) { return database, nil },
-		verifySchema: func(context.Context, *sql.DB) error { return nil },
-		newKMS:       func(credential.TencentKMSConfig) (credential.KMS, error) { return kms, nil },
+		openDatabase: func(dsn string) (*sql.DB, error) {
+			if dsn == validProductionOrchestratorConfig().CCMAXMySQLDSN {
+				return ccmaxDatabase, nil
+			}
+			return database, nil
+		},
+		verifySchema:          func(context.Context, *sql.DB) error { return nil },
+		verifyCCMAXSchema:     func(context.Context, *sql.DB) error { return nil },
+		ensureCCMAXCheckpoint: func(context.Context, *sql.DB, string) error { return nil },
+		newRuntimeOutbox: func(_ *sql.DB, _ *store.Repository, _ RuntimeOutboxConfig) (orchestratorRunner, error) {
+			return orchestratorTestRunner{run: func(ctx context.Context) error {
+				started <- "outbox"
+				<-ctx.Done()
+				return nil
+			}}, nil
+		},
+		newRoutePublisher: func(_ *store.Repository, _ config.OrchestratorRuntimeConfig) (orchestratorRunner, error) {
+			return orchestratorTestRunner{run: func(ctx context.Context) error {
+				started <- "routes"
+				<-ctx.Done()
+				return nil
+			}}, nil
+		},
+		newKMS: func(credential.TencentKMSConfig) (credential.KMS, error) { return kms, nil },
 		loadPKI: func(OrchestratorPKIConfig) (*pki.Authority, *tls.Config, error) {
 			return authority, tlsConfig, nil
 		},
@@ -66,7 +94,7 @@ func TestRunProductionOrchestratorBuildsEverythingBeforeServing(t *testing.T) {
 			return listener, nil
 		},
 		runRPC: func(ctx context.Context, _ net.Listener, _ *tls.Config, components *OrchestratorComponents) error {
-			if components == nil || components.CredentialSink == nil {
+			if components == nil || components.CredentialSink == nil || components.StartCoordinator == nil || components.HealthyStarter == nil {
 				t.Error("RPC started without complete components")
 			}
 			started <- "rpc"
@@ -89,12 +117,12 @@ func TestRunProductionOrchestratorBuildsEverythingBeforeServing(t *testing.T) {
 		)
 	}()
 	seen := map[string]bool{}
-	for len(seen) < 2 {
+	for len(seen) < 4 {
 		select {
 		case component := <-started:
 			seen[component] = true
 		case <-time.After(5 * time.Second):
-			t.Fatal("production runtime did not start both services")
+			t.Fatal("production runtime did not start all services")
 		}
 	}
 	cancel()
@@ -109,7 +137,10 @@ func TestRunProductionOrchestratorBuildsEverythingBeforeServing(t *testing.T) {
 	if _, _, err := recipient.PublicKey(); err == nil {
 		t.Fatal("production runtime did not destroy rotation recipient")
 	}
-	if err := mock.ExpectationsWereMet(); err != nil {
+	if err := runtimeMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ccmaxMock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -141,16 +172,86 @@ func TestRunProductionOrchestratorFailsBeforeCloudAndListenersOnSchemaError(t *t
 	}
 }
 
+func TestRunProductionOrchestratorFailsBeforeCloudOnCCMAXBoundaryError(t *testing.T) {
+	for _, stage := range []string{"schema", "checkpoint", "outbox"} {
+		t.Run(stage, func(t *testing.T) {
+			runtimeDatabase, runtimeMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeMock.ExpectPing()
+			ccmaxDatabase, ccmaxMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ccmaxMock.ExpectPing()
+			var cloudCalls atomic.Int32
+			factories := defaultOrchestratorRuntimeFactories()
+			factories.openDatabase = func(dsn string) (*sql.DB, error) {
+				if dsn == validProductionOrchestratorConfig().CCMAXMySQLDSN {
+					return ccmaxDatabase, nil
+				}
+				return runtimeDatabase, nil
+			}
+			factories.verifySchema = func(context.Context, *sql.DB) error { return nil }
+			factories.verifyCCMAXSchema = func(context.Context, *sql.DB) error {
+				if stage == "schema" {
+					return errors.New("ccmax schema missing")
+				}
+				return nil
+			}
+			factories.ensureCCMAXCheckpoint = func(context.Context, *sql.DB, string) error {
+				if stage == "checkpoint" {
+					return errors.New("checkpoint needs bootstrap")
+				}
+				return nil
+			}
+			factories.newRuntimeOutbox = func(*sql.DB, *store.Repository, RuntimeOutboxConfig) (orchestratorRunner, error) {
+				return nil, errors.New("outbox composition failed")
+			}
+			factories.newKMS = func(credential.TencentKMSConfig) (credential.KMS, error) {
+				cloudCalls.Add(1)
+				return nil, errors.New("must not be called")
+			}
+			if err := runProductionOrchestrator(
+				context.Background(), config.Default(config.RoleOrchestrator), validProductionOrchestratorConfig(), nil, factories,
+			); !errors.Is(err, ErrProductionOrchestrator) {
+				t.Fatalf("CCMAX %s failure = %v", stage, err)
+			}
+			if cloudCalls.Load() != 0 {
+				t.Fatalf("CCMAX %s failure contacted cloud %d times", stage, cloudCalls.Load())
+			}
+			if err := runtimeMock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			if err := ccmaxMock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func validProductionOrchestratorConfig() config.OrchestratorRuntimeConfig {
 	return config.OrchestratorRuntimeConfig{
 		Enabled: true, RPCListenAddress: "127.0.0.1:8094",
-		MySQLDSN:          "runtime:secret@tcp(mysql.internal:3306)/worker_runtime?parseTime=true&loc=UTC&tls=true",
+		MySQLDSN:                  "runtime:secret@tcp(mysql.internal:3306)/worker_runtime?parseTime=true&loc=UTC&tls=true",
+		CCMAXMySQLDSN:             "ccmax:secret@tcp(mysql.internal:3306)/ccmax?parseTime=true&loc=UTC&tls=true",
+		CoordinatorInstanceID:     "orchestrator-srv74-1",
+		RuntimeOutboxConsumerName: "sub2api-execution-runtime-v1",
+		RuntimeOutboxLeaseTTL:     30 * time.Second, RuntimeOutboxPollInterval: time.Second,
+		RuntimeOutboxBatchSize: 200, RuntimeOutboxMaxRetryFailures: 5,
+		WorkerImageDigest: "sha256:" + strings.Repeat("a", 64), WorkerRequiredLabels: map[string]string{},
+		WorkerCPURequestMillis: 500, WorkerMemoryRequestBytes: 128 << 20,
 		CACertificateFile: "/runtime/ca.crt", CAPrivateKeyFile: "/runtime/ca.key",
 		ServerCertificateFile: "/runtime/server.crt", ServerPrivateKeyFile: "/runtime/server.key",
 		ServerName: "orchestrator.test", RotationRecipientEnvelopeFile: "/runtime/rotation.json",
 		IntakeServiceID: "ccmax", CertificateTTL: 24 * time.Hour,
 		IntentTTL: 30 * time.Minute, IntentClaimTTL: 5 * time.Minute,
 		ProvisioningPollInterval: time.Second, ProvisioningBatchSize: 100,
+		OnboardingStartObservationMaxAge: 45 * time.Second, OnboardingStartCommandTTL: 2 * time.Minute,
+		OnboardingStartPollInterval: time.Second, OnboardingStartBatchSize: 200,
+		OnboardingStartClaimTTL: 30 * time.Second, OnboardingStartRetryDelay: 2 * time.Second,
+		RouteRedisAddr: "127.0.0.1:6379", RoutePublishTTL: 45 * time.Second, RoutePublishInterval: 5 * time.Second,
 		KMS: credential.TencentKMSConfig{
 			Region: "ap-guangzhou", KeyID: "kms-key", KeyVersion: "v1", CVMRoleName: "orchestrator-role",
 		},

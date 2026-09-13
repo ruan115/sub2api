@@ -43,6 +43,7 @@ type ControlClientConfig struct {
 	ActivationExecutor    ActivationCommandExecutor
 	NodeID                string
 	Labels                map[string]string
+	DataplaneEndpoint     string
 	Capabilities          []string
 	Capacity              *executionv1.Capacity
 	HeartbeatInterval     time.Duration
@@ -96,12 +97,14 @@ func NewControlClient(config ControlClientConfig) (*ControlClient, error) {
 	if len(config.Labels) > 32 || len(config.Capabilities) > 64 {
 		return nil, errors.New("host-agent control metadata exceeds limits")
 	}
-	labels := make(map[string]string, len(config.Labels))
-	for key, value := range config.Labels {
+	labels, err := mergeDataplaneEndpoint(config.Labels, config.DataplaneEndpoint)
+	if err != nil {
+		return nil, errors.New("host-agent dataplane endpoint is invalid")
+	}
+	for key, value := range labels {
 		if !hostLabelKeyPattern.MatchString(key) || len(value) > 128 || hostContainsSensitiveWord(key) || hostContainsSensitiveWord(value) {
 			return nil, errors.New("host-agent control labels are invalid")
 		}
-		labels[key] = value
 	}
 	capabilities := append([]string(nil), config.Capabilities...)
 	sort.Strings(capabilities)

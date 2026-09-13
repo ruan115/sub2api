@@ -10,7 +10,7 @@ func TestRuntimeCoreMigrationContainsRequiredBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 10 {
+	if len(migrations) != 12 {
 		t.Fatalf("unexpected migrations: %+v", migrations)
 	}
 	for _, migration := range migrations {
@@ -31,8 +31,10 @@ func TestRuntimeCoreMigrationContainsRequiredBoundaries(t *testing.T) {
 		"node_command_results", "reconciliation_runs",
 		"credential_security_events",
 		"onboarding_intents",
+		"onboarding_start_triggers",
 		"onboarding_workflows",
 		"onboarding_results",
+		"lifecycle_event_apply_receipts",
 		"credential_version_operations",
 		"credential_rotation_commits",
 		"proxy_reservation_grants",
@@ -79,6 +81,22 @@ func TestRuntimeCoreMigrationContainsRequiredBoundaries(t *testing.T) {
 		"ADD COLUMN binding_revision BIGINT UNSIGNED NULL AFTER desired_generation",
 		"fk_proxy_leases_reservation_binding",
 		"uq_proxy_leases_slot_epoch",
+		"uq_onboarding_start_triggers_event",
+		"uq_onboarding_start_triggers_sequence",
+		"uq_onboarding_start_triggers_intent",
+		"uq_onboarding_start_triggers_account_generation",
+		"idx_onboarding_start_triggers_due",
+		"status IN ('pending', 'claimed', 'started', 'expired')",
+		"claim_version BIGINT UNSIGNED",
+		"intent_expires_at DATETIME(6)",
+		"started_workflow_id VARCHAR(128)",
+		"uq_lifecycle_event_apply_receipts_event",
+		"uq_lifecycle_event_apply_receipts_sequence",
+		"event_payload_sha256 BINARY(32)",
+		"account.proxy.change_requested",
+		"fk_lifecycle_event_apply_receipts_slot",
+		"chk_lifecycle_event_apply_receipts_route",
+		"chk_lifecycle_event_apply_receipts_timestamps",
 	} {
 		if !strings.Contains(schema, boundary) {
 			t.Errorf("migration is missing runtime fencing/capacity boundary %q", boundary)
@@ -90,4 +108,36 @@ func TestMigrationsRejectUnknownDirection(t *testing.T) {
 	if _, err := Migrations("sideways"); err == nil {
 		t.Fatal("expected migration direction validation")
 	}
+}
+
+func TestOnboardingStartTriggerMigrationHasReversibleQueueBoundary(t *testing.T) {
+	down, err := Migrations("down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range down {
+		if migration.Name == "011_onboarding_start_triggers.down.sql" {
+			if strings.TrimSpace(migration.SQL) != "DROP TABLE onboarding_start_triggers;" {
+				t.Fatalf("unexpected start trigger rollback: %q", migration.SQL)
+			}
+			return
+		}
+	}
+	t.Fatal("missing onboarding start trigger down migration")
+}
+
+func TestLifecycleEventReceiptMigrationHasReversibleBoundary(t *testing.T) {
+	down, err := Migrations("down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range down {
+		if migration.Name == "012_lifecycle_event_apply_receipts.down.sql" {
+			if strings.TrimSpace(migration.SQL) != "DROP TABLE lifecycle_event_apply_receipts;" {
+				t.Fatalf("unexpected lifecycle receipt rollback: %q", migration.SQL)
+			}
+			return
+		}
+	}
+	t.Fatal("missing lifecycle event receipt down migration")
 }

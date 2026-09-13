@@ -279,6 +279,20 @@ func TestRuntimeOnboardingResultReconcilerBlocksDuplicateIdentity(t *testing.T) 
 	if runtimeStatus != "failed" || errorCode != "duplicate_identity" || migrationStatus != "migrating" || credentialsJSON != "{}" || schedulable != 0 {
 		t.Fatalf("duplicate account=%s/%s/%s/%s/%d", runtimeStatus, errorCode, migrationStatus, credentialsJSON, schedulable)
 	}
+	var drainEvents int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM runtime_outbox WHERE account_id = ? AND event_type = 'account.runtime.drain_requested'`, accountID).Scan(&drainEvents); err != nil {
+		t.Fatal(err)
+	}
+	if drainEvents != 1 {
+		t.Fatalf("duplicate drain events=%d", drainEvents)
+	}
+	var existingStatus string
+	if err := a.db.QueryRow(`SELECT execution_migration_status FROM accounts WHERE id = ?`, existingID).Scan(&existingStatus); err != nil {
+		t.Fatal(err)
+	}
+	if existingStatus == "failed" {
+		t.Fatalf("conflicting account was mutated: %s", existingStatus)
+	}
 	var conflictID int64
 	var detail string
 	if err := a.db.QueryRow(`SELECT detail_json FROM runtime_operation_audit WHERE account_id = ? AND status = 'blocked'`, accountID).Scan(&detail); err != nil {

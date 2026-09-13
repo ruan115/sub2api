@@ -18,6 +18,15 @@ type recordingProvisioningAdvancer struct {
 	failIDs map[string]bool
 }
 
+type failingActiveProvisioningRepository struct {
+	onboarding.ActiveProvisioningRepository
+	err error
+}
+
+func (r failingActiveProvisioningRepository) ListActiveProvisioningIDs(context.Context, int) ([]string, error) {
+	return nil, r.err
+}
+
 func (a *recordingProvisioningAdvancer) Advance(_ context.Context, workflowID string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -96,5 +105,26 @@ func TestProvisioningRunnerStopsCleanly(t *testing.T) {
 	}
 	if _, err := NewProvisioningRunner(nil, advancer, ProvisioningRunnerConfig{}); !errors.Is(err, ErrProvisioningRun) {
 		t.Fatalf("nil repository error = %v", err)
+	}
+}
+
+func TestProvisioningRunnerRunStopsAfterConsecutiveScanFailures(t *testing.T) {
+	repository := failingActiveProvisioningRepository{err: errors.New("database unavailable")}
+	advancer := &recordingProvisioningAdvancer{failIDs: make(map[string]bool)}
+	runner, err := NewProvisioningRunner(repository, advancer, ProvisioningRunnerConfig{
+		PollInterval: time.Millisecond, MaxConsecutiveFailures: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProvisioningRun) {
+			t.Fatalf("provisioning run error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provisioning runner kept serving after persistent scan failure")
 	}
 }

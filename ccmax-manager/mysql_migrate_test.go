@@ -43,6 +43,7 @@ func TestExecutionTablesParticipateInMigrationWithoutInvalidSequenceWatermark(t 
 	for _, table := range []string{
 		"account_mode_health",
 		"runtime_outbox",
+		"runtime_outbox_consumers",
 		"runtime_proxy_reservations",
 		"runtime_onboarding_result_cursors",
 		"runtime_onboarding_submissions",
@@ -54,6 +55,9 @@ func TestExecutionTablesParticipateInMigrationWithoutInvalidSequenceWatermark(t 
 	}
 	if mysqlAppendOnlyMigrationTables["runtime_outbox"] {
 		t.Fatal("runtime_outbox cannot use the id-only append watermark because its primary key is sequence")
+	}
+	if mysqlAppendOnlyMigrationTables["runtime_outbox_consumers"] {
+		t.Fatal("runtime_outbox_consumers is mutable and cannot use an append-only watermark")
 	}
 	if mysqlAppendOnlyMigrationTables["runtime_proxy_reservations"] {
 		t.Fatal("runtime_proxy_reservations is mutable and cannot use an append-only watermark")

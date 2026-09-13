@@ -26,27 +26,31 @@ var ErrOrchestratorComponents = errors.New("orchestrator components are invalid"
 
 // OrchestratorComponentsConfig is the composition boundary for the
 // orchestrator-only credential path. Production may use one MySQL Repository
-// for all four repository interfaces, while tests can keep the stores
+// for all execution-plane repository interfaces, while tests can keep them
 // independent. No worker or host-agent process receives KMS or CA authority.
 type OrchestratorComponentsConfig struct {
 	NodeRepository         store.NodeRepository
 	CredentialRepository   credential.IdempotentVaultRepository
 	IntentRepository       onboarding.Repository
 	ProvisioningRepository onboarding.ActiveProvisioningRepository
+	StartTriggerRepository onboarding.OnboardingStartTriggerRepository
+	HealthyStartRepository onboarding.HealthySlotStartRepository
 	Authority              *pki.Authority
 	KMS                    credential.KMS
 	RotationAuthorizer     RotationCommitAuthorizer
 	RotationRecipient      *credential.Recipient
 
-	ControlConfig         control.Config
-	ControllerConfig      SecureOnboardingControllerConfig
-	RunnerConfig          ProvisioningRunnerConfig
-	CredentialVaultConfig credential.VaultConfig
-	IntentTTL             time.Duration
-	IntentClaimTTL        time.Duration
-	IntakeServiceID       string
-	Random                io.Reader
-	Now                   func() time.Time
+	ControlConfig          control.Config
+	ControllerConfig       SecureOnboardingControllerConfig
+	RunnerConfig           ProvisioningRunnerConfig
+	HealthyStarterConfig   HealthySlotOnboardingStarterConfig
+	StartCoordinatorConfig OnboardingStartCoordinatorConfig
+	CredentialVaultConfig  credential.VaultConfig
+	IntentTTL              time.Duration
+	IntentClaimTTL         time.Duration
+	IntakeServiceID        string
+	Random                 io.Reader
+	Now                    func() time.Time
 }
 
 // OrchestratorComponents owns every object that must share the same credential
@@ -58,6 +62,8 @@ type OrchestratorComponents struct {
 	Intake               *OnboardingIntakeServer
 	Provisioning         *SecureOnboardingController
 	ProvisioningRunner   *ProvisioningRunner
+	HealthyStarter       *HealthySlotOnboardingStarter
+	StartCoordinator     *OnboardingStartCoordinator
 	ProvisioningObserver *ProvisioningCommandObserver
 	CredentialSink       *CredentialRotationSink
 	CredentialVault      *credential.Vault
@@ -84,6 +90,10 @@ func NewOrchestratorComponents(config OrchestratorComponentsConfig) (*Orchestrat
 	fail := func() (*OrchestratorComponents, error) {
 		rotationRecipient.Destroy()
 		return nil, ErrOrchestratorComponents
+	}
+	startEnabled := config.StartTriggerRepository != nil || config.HealthyStartRepository != nil
+	if (config.StartTriggerRepository == nil) != (config.HealthyStartRepository == nil) {
+		return fail()
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -190,9 +200,28 @@ func NewOrchestratorComponents(config OrchestratorComponentsConfig) (*Orchestrat
 	if err != nil {
 		return fail()
 	}
+	var healthyStarter *HealthySlotOnboardingStarter
+	var startCoordinator *OnboardingStartCoordinator
+	if startEnabled {
+		config.HealthyStarterConfig.Now = config.Now
+		healthyStarter, err = NewHealthySlotOnboardingStarter(config.HealthyStartRepository, config.HealthyStarterConfig)
+		if err != nil {
+			return fail()
+		}
+		config.StartCoordinatorConfig.Now = config.Now
+		startCoordinator, err = NewOnboardingStartCoordinator(
+			config.StartTriggerRepository,
+			healthyStarter,
+			config.StartCoordinatorConfig,
+		)
+		if err != nil {
+			return fail()
+		}
+	}
 
 	return &OrchestratorComponents{
 		Control: controlServer, Intake: intake, Provisioning: controller, ProvisioningRunner: runner, ProvisioningObserver: observer,
+		HealthyStarter: healthyStarter, StartCoordinator: startCoordinator,
 		CredentialSink: sink, CredentialVault: credentialVault, IntentVault: intentVault,
 		rotationRecipient: rotationRecipient,
 	}, nil
@@ -206,7 +235,7 @@ func (c *OrchestratorComponents) Register(registrar grpc.ServiceRegistrar) error
 	defer c.lifecycleMu.Unlock()
 	if c.closed || c.registered || c.Control == nil || c.Intake == nil || c.Provisioning == nil || c.ProvisioningRunner == nil ||
 		c.ProvisioningObserver == nil || c.CredentialSink == nil || c.CredentialVault == nil || c.IntentVault == nil ||
-		c.rotationRecipient == nil {
+		c.rotationRecipient == nil || (c.HealthyStarter == nil) != (c.StartCoordinator == nil) {
 		return ErrOrchestratorComponents
 	}
 	if _, _, err := c.rotationRecipient.PublicKey(); err != nil {

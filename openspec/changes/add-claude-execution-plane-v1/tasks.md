@@ -63,7 +63,9 @@
 - [x] 5.5c1 实现 CCMAX trusted proxy reservation grant/revoke、execution-plane 无秘密投影与 assignment-generation fenced proxy lease
 - [x] 5.5c2 固化 runtime proxy 的不可变/占用权威、换代 revoke→grant 顺序，并令旧 lifecycle 写入口 fail closed
 - [x] 5.5c3 实现 healthy slot + live execution/proxy authority → workflow/proxy lease 的单事务幂等启动边界
-- [ ] 5.5c 实现 healthy slot → workflow/proxy lease 启动协调器与重复身份 drain/归档批处理
+- [x] 5.5c4 接通 commit-ordered CCMAX outbox、严格单 checkpoint router、durable onboarding trigger/coordinator 与 lifecycle apply receipt
+- [x] 5.5c5 实现真实管理员鉴权、事务内审计与 exact sequence/claim-version CAS 的 blocked event retry
+- [x] 5.5c 完成重复身份 drain/归档批处理与 data-plane route publication
 - [ ] 5.6 实现 Token 刷新和原子 credential version 切换
 - [ ] 5.7 实现 canary/批量单向明文凭证迁移与校验报告
 

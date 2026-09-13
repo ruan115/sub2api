@@ -66,6 +66,7 @@ type app struct {
 	redis                 *redisRuntime
 	executionClient       *executionDataPlaneClient
 	onboardingIntake      *runtimeOnboardingIntakeClient
+	runtimeOutboxConsumer string
 	localITPMReservations localITPMReservationStore
 	batchAuthMu           sync.Mutex
 	reserveMu             sync.Mutex
@@ -491,6 +492,8 @@ func runServer() {
 	defer stopRateLimitSweep()
 	stopOnboardingResults := a.startRuntimeOnboardingResultScheduler()
 	defer stopOnboardingResults()
+	stopDuplicateIdentity := a.startDuplicateIdentityLifecycleScheduler()
+	defer stopDuplicateIdentity()
 
 	server := &http.Server{
 		Addr:              addr,
@@ -571,6 +574,15 @@ func newApp(dataPath string) (*app, error) {
 		priceSync:      newPriceSyncController(),
 		accountHealth:  newAccountHealthController(),
 		streamHedges:   newGatewayHedgeController(),
+		runtimeOutboxConsumer: envOr(
+			"EXECUTION_RUNTIME_OUTBOX_CONSUMER_NAME",
+			"sub2api-execution-runtime-v1",
+		),
+	}
+	if !runtimeOutboxConsumerNamePattern.MatchString(a.runtimeOutboxConsumer) ||
+		runtimeSecretString(a.runtimeOutboxConsumer) {
+		db.Close()
+		return nil, errors.New("invalid execution runtime outbox consumer name")
 	}
 	a.redis, err = newRedisRuntime()
 	if err != nil {
@@ -900,6 +912,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{id}/auth-url", a.handleAccountAuthURL)
 	mux.HandleFunc("POST /api/accounts/{id}/oauth-exchange", a.handleAccountOAuthExchange)
 	mux.HandleFunc("POST /api/accounts/{id}/session-auth", a.handleAccountSessionAuth)
+	mux.HandleFunc("POST "+runtimeOutboxBlockedRetryPath, a.handleRuntimeOutboxBlockedRetry)
 	mux.HandleFunc("POST /api/pool/resolve", a.handlePoolResolve)
 	mux.HandleFunc("GET /api/prices", a.handlePrices)
 	mux.HandleFunc("POST /api/prices", a.handlePriceSave)

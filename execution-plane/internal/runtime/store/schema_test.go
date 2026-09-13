@@ -15,17 +15,15 @@ func TestVerifyRuntimeSchemaRequiresEveryCredentialPathTable(t *testing.T) {
 		name         string
 		tableCount   int
 		columnCount  int
-		indexPresent bool
-		indexUnique  bool
-		indexColumns string
+		indexFailure string
 		wantReady    bool
 	}{
-		{name: "complete", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), indexPresent: true, indexUnique: true, indexColumns: "intent_id", wantReady: true},
+		{name: "complete", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), wantReady: true},
 		{name: "missing table", tableCount: len(requiredRuntimeTables) - 1},
 		{name: "partial migration missing column", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns) - 1},
-		{name: "partial migration missing unique index", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns)},
-		{name: "named index is not unique", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), indexPresent: true, indexColumns: "intent_id"},
-		{name: "named index has wrong columns", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), indexPresent: true, indexUnique: true, indexColumns: "intent_id,workflow_id"},
+		{name: "partial migration missing unique index", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), indexFailure: "missing"},
+		{name: "named index is not unique", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), indexFailure: "non-unique"},
+		{name: "named index has wrong columns", tableCount: len(requiredRuntimeTables), columnCount: len(requiredRuntimeColumns), indexFailure: "wrong-columns"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -49,16 +47,23 @@ func TestVerifyRuntimeSchemaRequiresEveryCredentialPathTable(t *testing.T) {
 					WithArgs(columnArguments...).
 					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(test.columnCount))
 				if test.columnCount == len(requiredRuntimeColumns) {
-					for _, index := range requiredRuntimeUniqueIndexes {
+					for indexPosition, index := range requiredRuntimeUniqueIndexes {
+						if indexPosition > 0 && test.indexFailure != "" {
+							break
+						}
 						rows := sqlmock.NewRows([]string{"non_unique", "columns"})
-						if test.indexPresent {
-							nonUnique := int64(1)
-							if test.indexUnique {
-								nonUnique = 0
-							}
-							rows.AddRow(nonUnique, test.indexColumns)
-						} else {
+						if indexPosition == 0 && test.indexFailure == "missing" {
 							rows.AddRow(nil, nil)
+						} else {
+							nonUnique := int64(0)
+							columns := index.expectedColumns
+							if indexPosition == 0 && test.indexFailure == "non-unique" {
+								nonUnique = 1
+							}
+							if indexPosition == 0 && test.indexFailure == "wrong-columns" {
+								columns += ",unexpected"
+							}
+							rows.AddRow(nonUnique, columns)
 						}
 						mock.ExpectQuery(regexp.QuoteMeta("SELECT MIN(non_unique), GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',')")).
 							WithArgs(index.table, index.name).

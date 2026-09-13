@@ -402,8 +402,23 @@ assignment、未撤销未过期的 execution lease 和 trusted reservation，再
 workflow；exact replay 必须先于可变 health 检查并返回原绑定。旧的直接 workflow create
 入口不得由 production repository 暴露。intent claim/decrypt 前后还必须重新验证当前
 proxy lease authority；在第二次校验前发生的 revoke 必须擦除已打开材料并禁止 worker dispatch。
-该 starter 当前是 repository/service library，生产 CCMAX outbox router、候选 intent/slot 扫描
-和批量 duplicate drain/archive 仍属于后续协调器工作，不能将库函数完成描述为端到端接通。
+生产 CCMAX outbox 已通过唯一有序 checkpoint 接入严格 router；proxy grant/revoke、onboarding
+和 lifecycle 事件不能拆分到不同 checkpoint。CCMAX producer 必须在业务事务内先锁定
+`runtime_outbox_commit_lock` 单例行，再写 `runtime_outbox`，使自增 sequence 与 commit/rollback
+完成顺序一致；部署该约束时必须停掉不持锁的旧 producer。orchestrator 启动必须验证表/列/精确
+索引、单例锁行、checkpoint watermark 与 failure 状态，非空历史不得自动从 sequence 0 开始。
+
+onboarding event 先被幂等投影为不含秘密的 durable trigger 与 desired slot，再由独立 coordinator
+短租约 claim 并调用 atomic starter；健康 assignment 尚未形成时只延迟该 trigger，不拖住全局
+outbox。lifecycle apply 使用 event/sequence/payload digest receipt 防止 replay 随 CCMAX mutable
+状态漂移。不可重试事件必须将 checkpoint 标记 blocked 且禁止自动跳过，暂时错误持久化为
+retry_wait；达到预算时进程退出并保留原事件以便修复后重放。blocked resolver 已由 CCMAX 提供：
+只允许真实 active admin，事务内重验 actor，并对已配置 consumer 的当前最早 sequence、blocked
+claim version 与完整失败指纹做 CAS；解封与无秘密审计同事务，绝不推进 checkpoint，也不提供
+skip/force ack。重复身份账号由独立 drain/归档批处理推进，并保留 proxy reservation；
+orchestrator 按健康 assignment 与 Hello `dataplane_endpoint` 向 Redis 发布带 fencing 的
+data-plane 路由。task 5.5c 已闭合，但 Token 刷新、明文迁移、数据面接线与统一生命周期
+仍未完成，不能将本阶段描述为端到端上线完成。
 
 worker credential commit 成功后，orchestrator 允许从同一份已认证规范化 credential
 中提取邮箱、organization/account ID、scope、订阅类型、rate-limit tier 和过期时间；

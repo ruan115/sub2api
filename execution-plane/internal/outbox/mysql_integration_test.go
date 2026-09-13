@@ -51,14 +51,17 @@ func TestMySQLSourceIntegration(t *testing.T) {
 	if err != nil || !ok || claimed.Sequence != sequence || claimed.EventID != eventID {
 		t.Fatalf("MySQL source claim: event=%+v ok=%v err=%v", claimed, ok, err)
 	}
-	if err := source.Nack(ctx, consumerName, "replica-a", sequence, "integration_retry", now.Add(time.Second)); err != nil {
+	if err := source.Fail(ctx, claimed, Failure{
+		Class: FailureRetryable, Code: "integration_retry", FailedAt: now.Add(time.Second).UTC().Truncate(time.Millisecond),
+		RetryAfter: now.Add(2 * time.Second).UTC().Truncate(time.Millisecond), RetryLimit: DefaultMaxRetryFailures,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	claimed, ok, err = source.Claim(ctx, consumerName, "replica-b", now.Add(2*time.Second), time.Minute)
 	if err != nil || !ok || claimed.EventID != eventID {
 		t.Fatalf("MySQL source replay: event=%+v ok=%v err=%v", claimed, ok, err)
 	}
-	if err := source.Ack(ctx, consumerName, "replica-b", sequence, now.Add(3*time.Second)); err != nil {
+	if err := source.Ack(ctx, claimed, now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := source.Claim(ctx, consumerName, "replica-c", now.Add(4*time.Second), time.Minute); err != nil || ok {

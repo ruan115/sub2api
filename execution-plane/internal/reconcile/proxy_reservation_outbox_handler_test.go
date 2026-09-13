@@ -13,7 +13,7 @@ import (
 func TestProxyReservationOutboxHandlerGrantRevokeAndExactReplay(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
 	repository := store.NewMemoryRepository()
-	handler, err := NewProxyReservationOutboxHandler(repository)
+	handler, err := NewProxyReservationOutboxHandler(repository, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestProxyReservationOutboxHandlerGrantRevokeAndExactReplay(t *testing.T) {
 
 func TestProxyReservationOutboxHandlerRejectsUnknownDuplicateAndSecretPayload(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	handler, _ := NewProxyReservationOutboxHandler(store.NewMemoryRepository())
+	handler, _ := NewProxyReservationOutboxHandler(store.NewMemoryRepository(), func() time.Time { return now })
 	for name, payload := range map[string]string{
 		"unknown":      `{"reservation_id":"reservation-7","proxy_binding_id":"7","binding_revision":3,"endpoint":"proxy.example"}`,
 		"duplicate":    `{"reservation_id":"reservation-7","reservation_id":"reservation-8","proxy_binding_id":"7","binding_revision":3}`,
@@ -79,7 +79,7 @@ func TestProxyReservationOutboxHandlerRejectsUnknownDuplicateAndSecretPayload(t 
 func TestProxyReservationOutboxHandlerRejectsWrongRevocationFence(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
 	repository := store.NewMemoryRepository()
-	handler, _ := NewProxyReservationOutboxHandler(repository)
+	handler, _ := NewProxyReservationOutboxHandler(repository, func() time.Time { return now })
 	grant := proxyReservationEvent(now, ProxyReservationGrantedEvent, "event-grant-7")
 	if err := handler.ApplyRuntimeEvent(context.Background(), grant); err != nil {
 		t.Fatal(err)

@@ -20,11 +20,12 @@ func TestLoadOrchestratorRuntimeValidatesProductionBoundaryAndRedactsDSN(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !config.Enabled || config.ProvisioningBatchSize != 200 || config.KMS.CVMRoleName != "sub2api-execution-role" {
+	if !config.Enabled || config.ProvisioningBatchSize != 200 || config.RuntimeOutboxMaxRetryFailures != 5 ||
+		config.KMS.CVMRoleName != "sub2api-execution-role" {
 		t.Fatalf("loaded config = %+v", config)
 	}
 	for _, serialized := range []string{config.String(), fmt.Sprintf("%+v", config), string(mustRuntimeConfigJSON(t, config))} {
-		if strings.Contains(serialized, "mysql-secret") {
+		if strings.Contains(serialized, "mysql-secret") || strings.Contains(serialized, "ccmax-secret") {
 			t.Fatalf("runtime config leaked MySQL DSN: %s", serialized)
 		}
 	}
@@ -42,15 +43,26 @@ func TestLoadOrchestratorRuntimeRejectsUnsafeProductionValues(t *testing.T) {
 		{"mysql skip verify", func(env map[string]string) {
 			env["EXECUTION_MYSQL_DSN"] = "user:mysql-secret@tcp(127.0.0.1:3306)/worker_runtime?parseTime=true&loc=UTC&tls=skip-verify"
 		}},
+		{"missing ccmax mysql", func(env map[string]string) { env["EXECUTION_CCMAX_MYSQL_DSN"] = "" }},
+		{"same database boundary", func(env map[string]string) {
+			env["EXECUTION_CCMAX_MYSQL_DSN"] = "ccmax:ccmax-secret@tcp(127.0.0.1:3306)/worker_runtime?parseTime=true&loc=UTC&tls=true"
+		}},
+		{"missing coordinator identity", func(env map[string]string) { env["EXECUTION_COORDINATOR_INSTANCE_ID"] = "" }},
+		{"mutable worker image", func(env map[string]string) { env["EXECUTION_WORKER_IMAGE_DIGEST"] = "latest" }},
+		{"invalid worker labels", func(env map[string]string) { env["EXECUTION_WORKER_REQUIRED_LABELS_JSON"] = `{"region":7}` }},
+		{"zero worker cpu", func(env map[string]string) { env["EXECUTION_WORKER_CPU_REQUEST_MILLIS"] = "0" }},
 		{"relative key", func(env map[string]string) { env["EXECUTION_CA_KEY_FILE"] = "ca.key" }},
 		{"claim over intent", func(env map[string]string) { env["EXECUTION_ONBOARDING_CLAIM_TTL"] = "31m" }},
 		{"intent below CCMAX commit window", func(env map[string]string) {
 			env["EXECUTION_ONBOARDING_INTENT_TTL"] = "4m59s"
 		}},
 		{"batch unbounded", func(env map[string]string) { env["EXECUTION_ONBOARDING_BATCH_SIZE"] = "1001" }},
+		{"zero outbox retry budget", func(env map[string]string) { env["EXECUTION_RUNTIME_OUTBOX_MAX_RETRY_FAILURES"] = "0" }},
 		{"invalid service id", func(env map[string]string) { env["EXECUTION_ONBOARDING_INTAKE_SERVICE_ID"] = "CCMAX/admin" }},
 		{"invalid server name", func(env map[string]string) { env["EXECUTION_SERVER_NAME"] = "https://orchestrator.test" }},
 		{"missing role", func(env map[string]string) { env["EXECUTION_KMS_CVM_ROLE_NAME"] = "" }},
+		{"missing route redis", func(env map[string]string) { env["EXECUTION_ROUTE_REDIS_ADDR"] = "" }},
+		{"route ttl over 1m", func(env map[string]string) { env["EXECUTION_ROUTE_PUBLISH_TTL"] = "61s" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -67,6 +79,9 @@ func validOrchestratorRuntimeEnv() map[string]string {
 	return map[string]string{
 		"EXECUTION_ORCHESTRATOR_RUNTIME_ENABLED":     "true",
 		"EXECUTION_MYSQL_DSN":                        "execution:mysql-secret@tcp(127.0.0.1:3306)/worker_runtime?parseTime=true&loc=UTC&tls=true",
+		"EXECUTION_CCMAX_MYSQL_DSN":                  "ccmax:ccmax-secret@tcp(127.0.0.1:3306)/ccmax?parseTime=true&loc=UTC&tls=true",
+		"EXECUTION_COORDINATOR_INSTANCE_ID":          "orchestrator-srv74-1",
+		"EXECUTION_WORKER_IMAGE_DIGEST":              "sha256:" + strings.Repeat("a", 64),
 		"EXECUTION_CA_CERT_FILE":                     "/etc/sub2api/execution/ca.crt",
 		"EXECUTION_CA_KEY_FILE":                      "/etc/sub2api/execution/ca.key",
 		"EXECUTION_SERVER_CERT_FILE":                 "/etc/sub2api/execution/server.crt",
@@ -78,6 +93,7 @@ func validOrchestratorRuntimeEnv() map[string]string {
 		"EXECUTION_KMS_KEY_VERSION":                  "current",
 		"EXECUTION_KMS_CVM_ROLE_NAME":                "sub2api-execution-role",
 		"EXECUTION_ONBOARDING_BATCH_SIZE":            "200",
+		"EXECUTION_ROUTE_REDIS_ADDR":                 "127.0.0.1:6379",
 	}
 }
 

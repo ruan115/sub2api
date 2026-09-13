@@ -609,3 +609,69 @@ resolution runbook. Concurrency has been proven with sqlmock, in-memory race
 tests and repository invariants, not a real multi-connection MySQL integration
 test. No schema was applied and no Docker daemon, cloud KMS, real credential,
 external upstream, project database or remote host was touched.
+
+### Slice 31 — commit-ordered runtime outbox, durable coordinator and exact blocked recovery (2026-08-31)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Commit-ordered producer | PASS (local/model) | every CCMAX writer acquires the transaction-held `runtime_outbox_commit_lock` singleton before allocating an outbox sequence; sqlmock proves lock-before-insert and fail-closed behavior, while rollback gaps remain legal |
+| Strict startup preflight | PASS | orchestrator validates required CCMAX tables/columns/exact indexes, the singleton lock row and one canonical checkpoint; missing, malformed, ahead-of-history, implicitly zero-bootstrapped or blocked state refuses startup |
+| One ordered consumer | PASS | proxy authority, onboarding and lifecycle events share one router/checkpoint; ack is restricted to the current claimed sequence and terminal poison never auto-skips |
+| Durable onboarding coordination | PASS | onboarding events transactionally project a secret-free trigger and desired slot; the bounded coordinator claims/retries independently and invokes the atomic starter only after a fresh healthy live binding exists |
+| Coordinator supervision | PASS | expected binding unavailability requeues without poisoning the global outbox; persistent DB/transaction/internal starter failures survive empty polls and trip the supervised consecutive-failure budget |
+| Lifecycle replay | PASS | migration 012 persists event ID, source sequence, account/generation, type and payload digest; concurrent exact anchors replay, while any immutable-anchor mismatch blocks the checkpoint |
+| Exact blocked recovery | PASS | production CCMAX route requires a real active admin, revalidates the actor in a Serializable transaction, fixes the configured consumer and CASes the next existing sequence plus blocked claim/failure fingerprint; retry and secret-free audit commit together, audit failure rolls back, and neither `last_sequence` nor event acknowledgement advances |
+| Payload shape and secrecy | PASS | both producer and consumer reject JSON `null` as a payload object; strict size/object checks and recursive sensitive-field/value checks remain enforced |
+| Independent review | PASS | final findings-first review found no remaining P0/P1 after the coordinator empty-poll supervision fix; blocked resolver auth/CAS/audit/replay and commit-order/lifecycle fences were rechecked read-only |
+| Local regression gates | PASS | CCMAX full unit, SQLite migration-tag, vet and full race (`412.456s`) passed; execution-plane full unit, vet and full race passed; Buf `v1.72.0` lint/generated drift and repository `git diff --check` passed |
+| Real MySQL concurrency | NOT RUN | `CCMAX_EXECUTION_MYSQL_TEST_DSN` was not set, so the destructive two-connection commit/rollback integration cases remained explicitly skipped; they are a release-environment gate, not local PASS evidence |
+
+Task 5.5c remains open for duplicate-identity drain/archive batches and fenced
+data-plane route publication. Deployment is not rolling-compatible with an old
+CCMAX writer: operators must quiesce every old writer before applying/seeding the
+commit-lock schema and starting the new binary. Startup gates do not yet prove
+the storage engine or every FK/CHECK/type definition, so production must also
+verify InnoDB and schema parity. Historical duplicate intents still require the
+preflight/report and operator resolution runbook from Slice 30. No real account,
+credential, upstream, MySQL project database, Docker daemon, KMS, cloud service
+or remote server was accessed by this slice.
+
+### Slice 32 — duplicate-identity drain/archive and fenced route publication (2026-09-05)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Duplicate identity drain | PASS (local/model) | onboarding result conflict increments `runtime_generation`, marks `failed/duplicate_identity`, and enqueues `account.runtime.drain_requested` in the same transaction; the conflicting account is not mutated |
+| Duplicate identity archive batch | PASS (local/model) | the follow-up batch archives only after a drain event exists, keeps `proxy_id` / `archived_proxy_id`, enqueues `account.runtime.destroy_requested`, and is a no-op on replay |
+| Missing drain recovery | PASS (local/model) | accounts already marked `duplicate_identity` without an outbox event are drained first, then archived on the next batch |
+| Route fencing | PASS (local/model) | Redis hash `execution:route:v1:<slot_id>` accepts only private/loopback `host:port`, TTL ≤ 1m, and Lua rejects stale epoch/generation plus same-epoch node/endpoint conflicts |
+| Publishable route query | PASS (sqlmock) | only healthy unreleased assignments with matching desired generation, `desired_state=ready`, live unrevoked execution lease and a `dataplane_endpoint` label are listed |
+| Host-agent advertisement | PASS | Hello label merge validates `dataplane_endpoint` and rejects public addresses |
+| Orchestrator wiring | PASS (local/model) | production runtime requires `EXECUTION_ROUTE_REDIS_ADDR` and supervises a route publisher beside RPC/health/outbox; tests inject a fake runner so bootstrap does not contact Redis |
+
+Task 5.5c is closed. Tasks 5.6–5.7 and phases 6–11 remain open. Enabling
+`execution_onboarding` or marking accounts `migrated` is still a production dead
+end until the gateway data-plane path exists. No real account, credential,
+upstream, MySQL project database, Docker daemon, KMS, cloud Redis or remote
+server was accessed by this slice.
+
+### 5.5c pre-commit review addendum (2026-09-13)
+
+A new independent review found batch starvation: archived duplicate-identity
+rows retained the error marker and consumed the first ordered page forever.
+The candidate query now excludes `archived_at IS NOT NULL`; a regression with
+more historical archived rows than the page size proves later accounts still
+drain and archive, and an all-archived batch emits no extra events or audits.
+The regression failed before the fix and passes afterwards; targeted CCMAX
+duplicate/onboarding/outbox tests also pass with the race detector.
+
+The full execution-plane race run then exposed an unsynchronized map in the
+route tests' `memoryRouteStore`, not in the production Redis implementation.
+The substitute now locks reads and complete publish/unpublish operations;
+`go test -race -count=20 ./internal/route` and the subsequent full
+`go test -race -count=1 ./...` both pass. CCMAX full unit tests and both modules'
+`go vet ./...` also pass in this pre-commit run.
+
+This is a local/model review, not new production evidence. Real MySQL
+integration is skipped without an explicit disposable test DSN. Route tests
+use an in-memory Eval substitute, not a real Redis Lua/TTL execution; that
+integration evidence remains missing. No production enable flags are changed.

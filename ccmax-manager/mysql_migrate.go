@@ -36,6 +36,7 @@ var mysqlMigrationTables = []string{
 	"account_mode_health",
 	"runtime_proxy_reservations",
 	"runtime_outbox",
+	"runtime_outbox_consumers",
 	"runtime_onboarding_result_cursors",
 	"runtime_onboarding_submissions",
 	"runtime_operation_audit",

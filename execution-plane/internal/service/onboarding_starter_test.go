@@ -57,8 +57,7 @@ func TestHealthySlotOnboardingStarterDerivesStableSecretFreeIdentity(t *testing.
 		t.Fatal(err)
 	}
 	request := HealthySlotOnboardingStartRequest{
-		IntentID: "11111111-2222-4333-8444-555555555555", SlotID: "slot-10380",
-		ReservationID: "reservation-10380", BindingRevision: 7,
+		Trigger: testHealthySlotOnboardingStartTrigger(clock, onboarding.StartTriggerClaimed),
 	}
 	first, created, err := starter.Start(context.Background(), request)
 	if err != nil || !created {
@@ -73,10 +72,21 @@ func TestHealthySlotOnboardingStarterDerivesStableSecretFreeIdentity(t *testing.
 		t.Fatalf("creates/specs = %d/%d", repository.creates.Load(), len(repository.specs))
 	}
 	firstSpec, replaySpec := repository.specs[0], repository.specs[1]
-	if firstSpec.WorkflowID != replaySpec.WorkflowID || firstSpec.ProxyLeaseID != replaySpec.ProxyLeaseID ||
-		firstSpec.KeyCommandID != replaySpec.KeyCommandID || firstSpec.Owner != firstSpec.WorkflowID ||
+	if firstSpec.TriggerEventID != request.Trigger.EventID || firstSpec.TriggerClaimOwner != request.Trigger.ClaimOwner ||
+		firstSpec.TriggerClaimVersion != request.Trigger.ClaimVersion || firstSpec.IntentID != request.Trigger.IntentID ||
+		firstSpec.SlotID != request.Trigger.SlotID || firstSpec.ReservationID != request.Trigger.ReservationID ||
+		firstSpec.BindingRevision != request.Trigger.BindingRevision {
+		t.Fatalf("trigger fields were not preserved: trigger=%+v spec=%+v", request.Trigger, firstSpec)
+	}
+	if firstSpec.WorkflowID != replaySpec.WorkflowID || firstSpec.IdempotencyKey != replaySpec.IdempotencyKey ||
+		firstSpec.CredentialLeaseID != replaySpec.CredentialLeaseID || firstSpec.ProxyLeaseID != replaySpec.ProxyLeaseID ||
+		firstSpec.KeyCommandID != replaySpec.KeyCommandID || firstSpec.ActivationCommandID != replaySpec.ActivationCommandID ||
+		firstSpec.Owner != firstSpec.WorkflowID ||
 		!firstSpec.ObservationFreshAfter.Equal(firstSpec.StartedAt.Add(-30*time.Second)) {
 		t.Fatalf("unstable starter identity/bounds: first=%+v replay=%+v", firstSpec, replaySpec)
+	}
+	if err := firstSpec.Validate(); err != nil {
+		t.Fatalf("derived start spec is invalid: %v", err)
 	}
 	if firstSpec.StartedAt.Nanosecond()%1000 != 0 {
 		t.Fatalf("starter time was not canonicalized to DATETIME(6): %s", firstSpec.StartedAt)
@@ -90,8 +100,7 @@ func TestHealthySlotOnboardingStarterConcurrentCallsHaveOneLogicalCreate(t *test
 		Now: func() time.Time { return now }, ObservationMaxAge: time.Minute, CommandTTL: 5 * time.Minute,
 	})
 	request := HealthySlotOnboardingStartRequest{
-		IntentID: "11111111-2222-4333-8444-555555555555", SlotID: "slot-10380",
-		ReservationID: "reservation-10380", BindingRevision: 7,
+		Trigger: testHealthySlotOnboardingStartTrigger(now, onboarding.StartTriggerClaimed),
 	}
 	var wait sync.WaitGroup
 	var created atomic.Int32
@@ -119,23 +128,67 @@ func TestHealthySlotOnboardingStarterRejectsInvalidInputAndPreservesRepositoryFa
 	if _, err := NewHealthySlotOnboardingStarter(nil, HealthySlotOnboardingStarterConfig{}); !errors.Is(err, ErrHealthySlotOnboardingStart) {
 		t.Fatalf("invalid config error = %v", err)
 	}
-	repository := &recordingHealthySlotStartRepository{
-		workflows: make(map[string]onboarding.Provisioning), err: onboarding.ErrHealthySlotStartRejected,
-	}
+	now := time.Unix(2_000_000_000, 0).UTC()
+	repository := &recordingHealthySlotStartRepository{workflows: make(map[string]onboarding.Provisioning)}
 	starter, _ := NewHealthySlotOnboardingStarter(repository, HealthySlotOnboardingStarterConfig{
-		Now:               func() time.Time { return time.Unix(2_000_000_000, 0).UTC() },
+		Now:               func() time.Time { return now },
 		ObservationMaxAge: time.Minute, CommandTTL: time.Minute,
 	})
 	if _, _, err := starter.Start(context.Background(), HealthySlotOnboardingStartRequest{}); !errors.Is(err, ErrHealthySlotOnboardingStart) {
 		t.Fatalf("invalid request error = %v", err)
 	}
-	_, _, err := starter.Start(context.Background(), HealthySlotOnboardingStartRequest{
-		IntentID: "11111111-2222-4333-8444-555555555555", SlotID: "slot-10380",
-		ReservationID: "reservation-10380", BindingRevision: 7,
-	})
-	if !errors.Is(err, ErrHealthySlotOnboardingStart) || !errors.Is(err, onboarding.ErrHealthySlotStartRejected) {
-		t.Fatalf("repository failure = %v", err)
+	pendingTrigger := testHealthySlotOnboardingStartTrigger(now, onboarding.StartTriggerPending)
+	if err := pendingTrigger.Validate(); err != nil {
+		t.Fatalf("pending trigger fixture is invalid: %v", err)
 	}
+	if _, _, err := starter.Start(context.Background(), HealthySlotOnboardingStartRequest{Trigger: pendingTrigger}); !errors.Is(err, ErrHealthySlotOnboardingStart) {
+		t.Fatalf("pending trigger error = %v", err)
+	}
+	if len(repository.specs) != 0 {
+		t.Fatalf("repository received %d invalid requests", len(repository.specs))
+	}
+
+	repositoryFailure := errors.New("repository start failed")
+	repository.err = repositoryFailure
+	for _, status := range []string{onboarding.StartTriggerClaimed, onboarding.StartTriggerStarted} {
+		t.Run(status, func(t *testing.T) {
+			trigger := testHealthySlotOnboardingStartTrigger(now, status)
+			if err := trigger.Validate(); err != nil {
+				t.Fatalf("%s trigger fixture is invalid: %v", status, err)
+			}
+			_, _, err := starter.Start(context.Background(), HealthySlotOnboardingStartRequest{Trigger: trigger})
+			if !errors.Is(err, ErrHealthySlotOnboardingStart) || !errors.Is(err, repositoryFailure) {
+				t.Fatalf("%s repository failure = %v", status, err)
+			}
+		})
+	}
+}
+
+func testHealthySlotOnboardingStartTrigger(now time.Time, status string) onboarding.OnboardingStartTrigger {
+	now = now.UTC().Truncate(time.Microsecond)
+	trigger := onboarding.OnboardingStartTrigger{
+		StartTriggerProjection: onboarding.StartTriggerProjection{
+			SourceSequence: 10380, EventID: "event-10380", EventType: "account.runtime.provision_requested",
+			EventCreatedAt: now.Add(-time.Second), IntentID: "11111111-2222-4333-8444-555555555555",
+			AccountID: "account-10380", DesiredGeneration: 7, SlotID: "slot-10380", Provider: "docker",
+			ImageDigest: "sha256:" + strings.Repeat("a", 64), CPURequestMillis: 500,
+			MemoryRequestBytes: 256 << 20, ProjectedAt: now,
+		},
+		IntentExpiresAt: now.Add(10 * time.Minute), ReservationID: "reservation-10380",
+		BindingRevision: 7, Status: status, NextAttemptAt: now,
+	}
+	if status == onboarding.StartTriggerClaimed || status == onboarding.StartTriggerStarted {
+		claimExpiresAt := now.Add(5 * time.Minute)
+		trigger.ClaimOwner = "starter-1"
+		trigger.ClaimVersion = 3
+		trigger.ClaimExpiresAt = &claimExpiresAt
+	}
+	if status == onboarding.StartTriggerStarted {
+		startedAt := now
+		trigger.StartedWorkflowID = healthySlotStarterID("workflow", trigger.IntentID)
+		trigger.StartedAt = &startedAt
+	}
+	return trigger
 }
 
 var _ onboarding.HealthySlotStartRepository = (*recordingHealthySlotStartRepository)(nil)

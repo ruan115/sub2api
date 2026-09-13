@@ -33,6 +33,8 @@ type MemoryRepository struct {
 	proxyReservationByRevoke map[string]string
 	proxyLeases              map[string]ProxyLease
 	proxyLeaseIDsByEpoch     map[string]string
+	lifecycleEventReceipts   map[string]LifecycleEventApplyReceipt
+	lifecycleEventSequences  map[int64]string
 }
 
 type memoryEnrollment struct {
@@ -69,6 +71,8 @@ func NewMemoryRepository() *MemoryRepository {
 		proxyReservationByRevoke: make(map[string]string),
 		proxyLeases:              make(map[string]ProxyLease),
 		proxyLeaseIDsByEpoch:     make(map[string]string),
+		lifecycleEventReceipts:   make(map[string]LifecycleEventApplyReceipt),
+		lifecycleEventSequences:  make(map[int64]string),
 	}
 }
 

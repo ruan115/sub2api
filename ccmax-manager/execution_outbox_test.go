@@ -71,6 +71,167 @@ func TestRuntimeOnboardingResultCursorSchemaStaysInSyncAcrossDialects(t *testing
 	}
 }
 
+func TestSafeRuntimePayloadJSONRejectsNull(t *testing.T) {
+	if _, err := safeRuntimePayloadJSON(`null`); err == nil {
+		t.Fatal("JSON null payload was accepted as an object")
+	}
+}
+
+func TestRuntimeOutboxConsumerFencingSchemaStaysInSyncAcrossDialects(t *testing.T) {
+	expectedColumns := []string{
+		"claim_version",
+		"failure_state",
+		"failure_sequence",
+		"failure_class",
+		"failure_code",
+		"failure_count",
+		"first_failed_at",
+		"last_failed_at",
+		"next_attempt_at",
+		"blocked_claim_version",
+	}
+	if len(runtimeOutboxConsumerUpgradeColumns) != len(expectedColumns) {
+		t.Fatalf("runtime outbox consumer upgrade column count = %d, want %d",
+			len(runtimeOutboxConsumerUpgradeColumns), len(expectedColumns))
+	}
+	for index, expected := range expectedColumns {
+		if runtimeOutboxConsumerUpgradeColumns[index].name != expected {
+			t.Fatalf("runtime outbox consumer upgrade column %d = %q, want %q",
+				index, runtimeOutboxConsumerUpgradeColumns[index].name, expected)
+		}
+	}
+
+	for dialect, statements := range map[string][]string{
+		"sqlite": sqliteExecutionSchema(),
+		"mysql":  mysqlExecutionSchema(),
+	} {
+		schema := strings.Join(statements, "\n")
+		for _, column := range runtimeOutboxConsumerUpgradeColumns {
+			if !strings.Contains(schema, column.name) {
+				t.Fatalf("%s runtime outbox consumer schema is missing %q", dialect, column.name)
+			}
+		}
+		for _, state := range []string{"ready", "retry_wait", "blocked"} {
+			if !strings.Contains(schema, "'"+state+"'") {
+				t.Fatalf("%s runtime outbox consumer schema is missing failure state %q", dialect, state)
+			}
+		}
+	}
+
+	sqliteSchema := strings.Join(sqliteExecutionSchema(), "\n")
+	for _, fragment := range []string{
+		"claim_version INTEGER NOT NULL DEFAULT 0 CHECK (claim_version >= 0)",
+		"failure_state TEXT NOT NULL DEFAULT 'ready' CHECK (failure_state IN ('ready', 'retry_wait', 'blocked'))",
+		"blocked_claim_version INTEGER NOT NULL DEFAULT 0 CHECK (blocked_claim_version >= 0)",
+	} {
+		if !strings.Contains(sqliteSchema, fragment) {
+			t.Fatalf("SQLite runtime outbox consumer schema is missing %q", fragment)
+		}
+	}
+	mysqlSchema := strings.Join(mysqlExecutionSchema(), "\n")
+	for _, fragment := range []string{
+		"claim_version BIGINT UNSIGNED NOT NULL DEFAULT 0",
+		"failure_state VARCHAR(16) NOT NULL DEFAULT 'ready'",
+		"blocked_claim_version BIGINT UNSIGNED NOT NULL DEFAULT 0",
+		"CHECK (failure_state IN ('ready', 'retry_wait', 'blocked'))",
+	} {
+		if !strings.Contains(mysqlSchema, fragment) {
+			t.Fatalf("MySQL runtime outbox consumer schema is missing %q", fragment)
+		}
+	}
+}
+
+func TestMigrateExecutionFeaturesAddsRuntimeOutboxConsumerFencingColumns(t *testing.T) {
+	a, err := newApp(filepath.Join(t.TempDir(), "runtime-outbox-consumer-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.Close()
+
+	if _, err := a.db.Exec(`DROP TABLE runtime_outbox_consumers`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`CREATE TABLE runtime_outbox_consumers (
+		consumer_name TEXT PRIMARY KEY,
+		last_sequence INTEGER NOT NULL DEFAULT 0,
+		claimed_sequence INTEGER NOT NULL DEFAULT 0,
+		locked_by TEXT NOT NULL DEFAULT '',
+		lease_expires_at INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT (` + nowSQL + `)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO runtime_outbox_consumers
+		(consumer_name, last_sequence, claimed_sequence, locked_by, lease_expires_at, last_error)
+		VALUES ('legacy-consumer', 7, 8, 'legacy-owner', 2000000000000, 'legacy_error')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.migrateExecutionFeatures(); err != nil {
+		t.Fatal(err)
+	}
+
+	columns := map[string]bool{}
+	rows, err := a.db.Query(`PRAGMA table_info(runtime_outbox_consumers)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range runtimeOutboxConsumerUpgradeColumns {
+		if !columns[column.name] {
+			t.Fatalf("upgraded runtime outbox consumer is missing %q", column.name)
+		}
+	}
+
+	var consumerName, owner, lastError, failureState, failureClass, failureCode string
+	var lastSequence, claimedSequence, leaseExpiresAt, claimVersion, failureSequence int64
+	var failureCount, firstFailedAt, lastFailedAt, nextAttemptAt, blockedClaimVersion int64
+	if err := a.db.QueryRow(`SELECT consumer_name, last_sequence, claimed_sequence, locked_by,
+		lease_expires_at, last_error, claim_version, failure_state, failure_sequence,
+		failure_class, failure_code, failure_count, first_failed_at, last_failed_at,
+		next_attempt_at, blocked_claim_version
+		FROM runtime_outbox_consumers WHERE consumer_name = 'legacy-consumer'`).Scan(
+		&consumerName, &lastSequence, &claimedSequence, &owner, &leaseExpiresAt, &lastError,
+		&claimVersion, &failureState, &failureSequence, &failureClass, &failureCode,
+		&failureCount, &firstFailedAt, &lastFailedAt, &nextAttemptAt, &blockedClaimVersion,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if consumerName != "legacy-consumer" || lastSequence != 7 || claimedSequence != 8 ||
+		owner != "legacy-owner" || leaseExpiresAt != 2_000_000_000_000 || lastError != "legacy_error" {
+		t.Fatalf("legacy checkpoint changed during upgrade: %q/%d/%d/%q/%d/%q",
+			consumerName, lastSequence, claimedSequence, owner, leaseExpiresAt, lastError)
+	}
+	if claimVersion != 0 || failureState != "ready" || failureSequence != 0 ||
+		failureClass != "" || failureCode != "" || failureCount != 0 || firstFailedAt != 0 ||
+		lastFailedAt != 0 || nextAttemptAt != 0 || blockedClaimVersion != 0 {
+		t.Fatalf("unexpected fencing defaults: version=%d state=%q sequence=%d class=%q code=%q count=%d timestamps=%d/%d/%d blocked_version=%d",
+			claimVersion, failureState, failureSequence, failureClass, failureCode, failureCount,
+			firstFailedAt, lastFailedAt, nextAttemptAt, blockedClaimVersion)
+	}
+	if _, err := a.db.Exec(`UPDATE runtime_outbox_consumers SET failure_state = 'unknown'
+		WHERE consumer_name = 'legacy-consumer'`); err == nil {
+		t.Fatal("upgraded SQLite consumer accepted an unsupported failure state")
+	}
+	if _, err := a.db.Exec(`UPDATE runtime_outbox_consumers SET claim_version = -1
+		WHERE consumer_name = 'legacy-consumer'`); err == nil {
+		t.Fatal("upgraded SQLite consumer accepted a negative claim version")
+	}
+}
+
 func TestRuntimeOnboardingSubmissionSchemaStaysStrictAcrossDialects(t *testing.T) {
 	sqliteSchema := strings.Join(sqliteExecutionSchema(), "\n")
 	if !strings.Contains(sqliteSchema, "CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_onboarding_submission_account_generation") {

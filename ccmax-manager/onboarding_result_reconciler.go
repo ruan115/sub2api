@@ -319,15 +319,26 @@ func (a *app) applyRuntimeOnboardingResult(
 		return err
 	}
 	if conflictID != 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET runtime_status = 'failed', runtime_error_code = 'duplicate_identity',
-			auth_status = 'invalid', auth_error = 'runtime onboarding identity conflict', schedulable = 0, updated_at = `+nowSQL+`
-			WHERE id = ? AND runtime_generation = ? AND runtime_status = 'provisioning'`, candidate.AccountID, generation); err != nil {
+		nextGeneration := generation + 1
+		result, err := tx.ExecContext(ctx, `UPDATE accounts SET runtime_status = 'failed', runtime_error_code = ?,
+			auth_status = 'invalid', auth_error = 'runtime onboarding identity conflict', schedulable = 0,
+			runtime_generation = ?, updated_at = `+nowSQL+`
+			WHERE id = ? AND runtime_generation = ? AND runtime_status = 'provisioning'`,
+			runtimeDuplicateIdentityError, nextGeneration, candidate.AccountID, generation)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return errRuntimeOnboardingStale
+		}
+		if err := enqueueDuplicateIdentityDrainTx(ctx, tx, candidate.AccountID, conflictID, nextGeneration); err != nil {
 			return err
 		}
 		detail, _ := json.Marshal(map[string]any{"conflict_account_id": conflictID})
 		if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_operation_audit
 			(event_id, account_id, operation, status, error_code, detail_json)
-			VALUES (?, ?, 'account.runtime.result_projected', 'blocked', 'duplicate_identity', ?)`, candidate.EventID, candidate.AccountID, string(detail)); err != nil {
+			VALUES (?, ?, 'account.runtime.result_projected', 'blocked', ?, ?)`,
+			candidate.EventID, candidate.AccountID, runtimeDuplicateIdentityError, string(detail)); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {

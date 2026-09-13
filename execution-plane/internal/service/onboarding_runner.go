@@ -12,6 +12,7 @@ import (
 const (
 	defaultProvisioningPollInterval = time.Second
 	defaultProvisioningBatchSize    = 100
+	defaultProvisioningMaxFailures  = 5
 )
 
 var ErrProvisioningRun = errors.New("secure onboarding provisioning runner failed")
@@ -21,10 +22,11 @@ type ProvisioningAdvancer interface {
 }
 
 type ProvisioningRunnerConfig struct {
-	PollInterval time.Duration
-	BatchSize    int
-	OnError      func(workflowID string, err error)
-	Now          func() time.Time
+	PollInterval           time.Duration
+	BatchSize              int
+	MaxConsecutiveFailures int
+	OnError                func(workflowID string, err error)
+	Now                    func() time.Time
 }
 
 type ProvisioningRunResult struct {
@@ -52,7 +54,11 @@ func NewProvisioningRunner(
 	if config.BatchSize == 0 {
 		config.BatchSize = defaultProvisioningBatchSize
 	}
-	if config.PollInterval <= 0 || config.BatchSize < 1 || config.BatchSize > 1000 {
+	if config.MaxConsecutiveFailures == 0 {
+		config.MaxConsecutiveFailures = defaultProvisioningMaxFailures
+	}
+	if config.PollInterval <= 0 || config.BatchSize < 1 || config.BatchSize > 1000 ||
+		config.MaxConsecutiveFailures < 1 || config.MaxConsecutiveFailures > 1000 {
 		return nil, ErrProvisioningRun
 	}
 	if config.OnError == nil {
@@ -74,9 +80,10 @@ func (r *ProvisioningRunner) Step(ctx context.Context) (ProvisioningRunResult, e
 	ids, err := r.repository.ListActiveProvisioningIDs(ctx, r.config.BatchSize)
 	if err != nil {
 		r.config.OnError("", ErrProvisioningRun)
-		return ProvisioningRunResult{}, ErrProvisioningRun
+		return ProvisioningRunResult{}, errors.Join(ErrProvisioningRun, err)
 	}
 	result := ProvisioningRunResult{Scanned: len(ids)}
+	var pageErr error
 	for _, workflowID := range ids {
 		if ctx.Err() != nil {
 			return result, ErrProvisioningRun
@@ -84,6 +91,7 @@ func (r *ProvisioningRunner) Step(ctx context.Context) (ProvisioningRunResult, e
 		if credential.ValidateTransportID(workflowID) != nil {
 			result.Failed++
 			r.config.OnError("", ErrProvisioningRun)
+			pageErr = errors.Join(pageErr, ErrProvisioningRun)
 			continue
 		}
 		if _, err := r.advancer.Advance(ctx, workflowID); err != nil {
@@ -91,18 +99,31 @@ func (r *ProvisioningRunner) Step(ctx context.Context) (ProvisioningRunResult, e
 			r.config.OnError(workflowID, ErrProvisioningAdvance)
 			if err := r.repository.DeferProvisioningRetry(ctx, workflowID, r.config.Now().UTC()); err != nil {
 				r.config.OnError(workflowID, ErrProvisioningRun)
+				pageErr = errors.Join(pageErr, ErrProvisioningRun, err)
 			}
 		}
 	}
-	return result, nil
+	return result, pageErr
 }
 
 func (r *ProvisioningRunner) Run(ctx context.Context) error {
 	if r == nil || ctx == nil || ctx.Err() != nil {
 		return ErrProvisioningRun
 	}
+	consecutiveFailures := 0
 	for {
-		_, _ = r.Step(ctx)
+		_, err := r.Step(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			consecutiveFailures++
+			if consecutiveFailures >= r.config.MaxConsecutiveFailures {
+				return errors.Join(ErrProvisioningRun, err)
+			}
+		} else {
+			consecutiveFailures = 0
+		}
 		timer := time.NewTimer(r.config.PollInterval)
 		select {
 		case <-ctx.Done():

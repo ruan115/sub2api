@@ -157,6 +157,9 @@ func (r *Repository) ValidateCurrentProxyLease(
 		return ErrProxyLeaseNotFound
 	}
 	var accountID string
+	// MySQL time is the production authority for every live expiry predicate.
+	// checkedAt remains an input-shape fence and deterministic MemoryRepository
+	// clock for tests, but a lagging orchestrator clock cannot extend a lease.
 	err := r.db.QueryRowContext(ctx, `
 SELECT pl.account_id
 FROM proxy_leases pl
@@ -168,12 +171,13 @@ JOIN proxy_reservation_grants prg
   ON prg.reservation_id = pl.reservation_id AND prg.account_id = pl.account_id
  AND prg.desired_generation = pl.desired_generation AND prg.binding_revision = pl.binding_revision
 WHERE pl.proxy_lease_id = ? AND pl.slot_id = ? AND pl.execution_epoch = ? AND pl.revoked_at IS NULL
-  AND pl.created_at <= ?
+  AND pl.created_at <= UTC_TIMESTAMP(6)
   AND sa.actual_state = 'running' AND sa.healthy = TRUE
   AND sa.desired_generation = s.desired_generation AND sa.image_digest = s.image_digest
-  AND el.node_id = sa.node_id AND el.revoked_at IS NULL AND el.expires_at > ? AND el.created_at <= ?
-  AND prg.revoked_at IS NULL AND prg.created_at <= ?`,
-		proxyLeaseID, slotID, executionEpoch, checkedAt, checkedAt, checkedAt, checkedAt).Scan(&accountID)
+  AND el.node_id = sa.node_id AND el.revoked_at IS NULL
+  AND el.expires_at > UTC_TIMESTAMP(6) AND el.created_at <= UTC_TIMESTAMP(6)
+  AND prg.revoked_at IS NULL AND prg.created_at <= UTC_TIMESTAMP(6)`,
+		proxyLeaseID, slotID, executionEpoch).Scan(&accountID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrProxyLeaseNotFound
 	}

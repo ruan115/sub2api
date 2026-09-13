@@ -19,6 +19,16 @@ type healthySlotStartIntent struct {
 	ExpiresAt         time.Time
 }
 
+type healthySlotStartRuntimeBinding struct {
+	NodeID                  string
+	ExecutionEpoch          uint64
+	ImageDigest             string
+	LastObservedAt          time.Time
+	ExecutionLeaseCreatedAt time.Time
+	ExecutionLeaseExpiresAt time.Time
+	ReservationCreatedAt    time.Time
+}
+
 // StartHealthySlotOnboarding is the only write boundary for starting work on
 // an intent. It deliberately reads no encrypted intent columns and does not
 // claim the intent; claim/decrypt remains a later controller transition.
@@ -35,6 +45,14 @@ func (r *Repository) StartHealthySlotOnboarding(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	trigger, err := lockHealthySlotStartTrigger(ctx, tx, spec)
+	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, onboarding.ErrHealthySlotStartRejected) {
+		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+	}
+	if err != nil {
+		return onboarding.Provisioning{}, false, fmt.Errorf("lock healthy-slot onboarding trigger: %w", err)
+	}
+
 	intent, err := lockHealthySlotStartIntent(ctx, tx, spec.IntentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
@@ -45,12 +63,36 @@ func (r *Repository) StartHealthySlotOnboarding(
 
 	existing, err := getOnboardingWorkflowByIntent(ctx, tx, intent.ID, true)
 	if err == nil {
-		matches, replayErr := sameHealthySlotStartReplay(ctx, tx, intent, existing, spec)
+		matches, replayErr := sameHealthySlotStartReplay(ctx, tx, trigger, intent, existing, spec)
 		if replayErr != nil {
 			existing.Destroy()
 			return onboarding.Provisioning{}, false, fmt.Errorf("read healthy-slot onboarding replay binding: %w", replayErr)
 		}
 		if !matches {
+			existing.Destroy()
+			return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+		}
+		switch trigger.Status {
+		case onboarding.StartTriggerStarted:
+			if trigger.StartedWorkflowID != existing.ID {
+				existing.Destroy()
+				return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+			}
+		case onboarding.StartTriggerClaimed:
+			databaseNow, clockErr := healthySlotStartDatabaseTime(ctx, tx)
+			if clockErr != nil {
+				existing.Destroy()
+				return onboarding.Provisioning{}, false, clockErr
+			}
+			if !healthySlotStartClaimCurrent(trigger, databaseNow) || !intent.ExpiresAt.After(databaseNow) {
+				existing.Destroy()
+				return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+			}
+			if markErr := markOnboardingStartTriggerStarted(ctx, tx, trigger, existing.ID); markErr != nil {
+				existing.Destroy()
+				return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+			}
+		default:
 			existing.Destroy()
 			return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
 		}
@@ -63,14 +105,15 @@ func (r *Repository) StartHealthySlotOnboarding(
 	if !errors.Is(err, sql.ErrNoRows) {
 		return onboarding.Provisioning{}, false, fmt.Errorf("read healthy-slot onboarding replay: %w", err)
 	}
-	if intent.Status != onboarding.IntentPending || intent.DesiredGeneration == 0 || !intent.ExpiresAt.After(spec.StartedAt) {
+	if trigger.Status != onboarding.StartTriggerClaimed || intent.Status != onboarding.IntentPending || intent.DesiredGeneration == 0 ||
+		intent.AccountID != trigger.AccountID || intent.DesiredGeneration != trigger.DesiredGeneration {
 		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
 	}
 
-	var nodeID, imageDigest string
-	var executionEpoch uint64
+	var binding healthySlotStartRuntimeBinding
 	err = tx.QueryRowContext(ctx, `
-SELECT sa.node_id, sa.execution_epoch, s.image_digest
+SELECT sa.node_id, sa.execution_epoch, s.image_digest, sa.last_observed_at,
+       el.created_at, el.expires_at, prg.created_at
 FROM slots s
 JOIN slot_assignments sa ON sa.slot_id = s.slot_id AND sa.released_at IS NULL
 JOIN execution_leases el
@@ -84,41 +127,51 @@ WHERE s.slot_id = ? AND s.account_id = ? AND s.desired_state = 'ready'
   AND sa.actual_state = 'running' AND sa.healthy = TRUE
   AND sa.image_digest = s.image_digest
   AND sa.last_observed_at IS NOT NULL
-  AND sa.last_observed_at >= ? AND sa.last_observed_at <= ?
-  AND el.revoked_at IS NULL AND el.expires_at > ? AND el.created_at <= ?
-  AND prg.revoked_at IS NULL AND prg.created_at <= ?
+  AND el.node_id = sa.node_id AND el.revoked_at IS NULL
+  AND prg.revoked_at IS NULL
 FOR UPDATE`,
-		spec.ReservationID, spec.BindingRevision, spec.SlotID, intent.AccountID, intent.DesiredGeneration,
-		spec.ObservationFreshAfter.UTC(), spec.StartedAt.UTC(), spec.StartedAt.UTC(), spec.StartedAt.UTC(), spec.StartedAt.UTC(),
-	).Scan(&nodeID, &executionEpoch, &imageDigest)
+		trigger.ReservationID, trigger.BindingRevision, trigger.SlotID, intent.AccountID, intent.DesiredGeneration,
+	).Scan(
+		&binding.NodeID, &binding.ExecutionEpoch, &binding.ImageDigest, &binding.LastObservedAt,
+		&binding.ExecutionLeaseCreatedAt, &binding.ExecutionLeaseExpiresAt, &binding.ReservationCreatedAt,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
 	}
 	if err != nil {
 		return onboarding.Provisioning{}, false, fmt.Errorf("lock healthy-slot runtime binding: %w", err)
 	}
+	binding.canonicalize()
+	databaseNow, err := healthySlotStartDatabaseTime(ctx, tx)
+	if err != nil {
+		return onboarding.Provisioning{}, false, err
+	}
+	if !healthySlotStartAuthorityCurrent(trigger, intent, binding, spec, databaseNow) {
+		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+	}
 
-	deadline := spec.RequestedCommandDeadline.UTC()
+	commandTTL := spec.RequestedCommandDeadline.Sub(spec.StartedAt)
+	deadline := databaseNow.Add(commandTTL)
 	if intent.ExpiresAt.Before(deadline) {
 		deadline = intent.ExpiresAt
 	}
 	workflow := onboarding.Provisioning{
 		ID: spec.WorkflowID, IdempotencyKey: spec.IdempotencyKey, IntentID: intent.ID, Owner: spec.Owner,
 		AccountID: intent.AccountID, DesiredGeneration: intent.DesiredGeneration,
-		NodeID: nodeID, SlotID: spec.SlotID, ExecutionEpoch: executionEpoch, ImageDigest: imageDigest,
+		NodeID: binding.NodeID, SlotID: trigger.SlotID, ExecutionEpoch: binding.ExecutionEpoch, ImageDigest: binding.ImageDigest,
 		CredentialLeaseID: spec.CredentialLeaseID, ProxyLeaseID: spec.ProxyLeaseID,
 		KeyCommandID: spec.KeyCommandID, ActivationCommandID: spec.ActivationCommandID,
 		CommandDeadline: deadline, Status: onboarding.ProvisioningPendingKey,
-		CreatedAt: spec.StartedAt.UTC(), UpdatedAt: spec.StartedAt.UTC(),
+		CreatedAt: databaseNow, UpdatedAt: databaseNow,
 	}
 	if workflow.Validate() != nil {
 		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
 	}
 	lease := ProxyLease{
-		ID: spec.ProxyLeaseID, ReservationID: spec.ReservationID, AccountID: intent.AccountID,
-		DesiredGeneration: intent.DesiredGeneration, BindingRevision: spec.BindingRevision,
-		SlotID: spec.SlotID, ExecutionEpoch: executionEpoch,
-		CreatedAt: spec.StartedAt.UTC(), UpdatedAt: spec.StartedAt.UTC(),
+		ID: spec.ProxyLeaseID, ReservationID: trigger.ReservationID, AccountID: intent.AccountID,
+		DesiredGeneration: intent.DesiredGeneration, BindingRevision: trigger.BindingRevision,
+		SlotID: trigger.SlotID, ExecutionEpoch: binding.ExecutionEpoch,
+		CreatedAt: databaseNow, UpdatedAt: databaseNow,
 	}
 	if validateProxyLease(lease) != nil {
 		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
@@ -162,10 +215,97 @@ INSERT INTO onboarding_workflows (
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
 	}
+	if err := markOnboardingStartTriggerStarted(ctx, tx, trigger, workflow.ID); err != nil {
+		return onboarding.Provisioning{}, false, onboarding.ErrHealthySlotStartRejected
+	}
 	if err := tx.Commit(); err != nil {
 		return onboarding.Provisioning{}, false, fmt.Errorf("commit healthy-slot onboarding start: %w", err)
 	}
 	return workflow, true, nil
+}
+
+func lockHealthySlotStartTrigger(
+	ctx context.Context,
+	tx *sql.Tx,
+	spec onboarding.HealthySlotStartSpec,
+) (onboarding.OnboardingStartTrigger, error) {
+	trigger, err := getOnboardingStartTrigger(ctx, tx, spec.TriggerEventID, true)
+	if err != nil {
+		return onboarding.OnboardingStartTrigger{}, err
+	}
+	if trigger.EventID != spec.TriggerEventID || trigger.ClaimOwner != spec.TriggerClaimOwner ||
+		trigger.ClaimVersion != spec.TriggerClaimVersion || trigger.IntentID != spec.IntentID ||
+		trigger.SlotID != spec.SlotID || trigger.ReservationID != spec.ReservationID ||
+		trigger.BindingRevision != spec.BindingRevision ||
+		(trigger.Status != onboarding.StartTriggerClaimed && trigger.Status != onboarding.StartTriggerStarted) {
+		return onboarding.OnboardingStartTrigger{}, onboarding.ErrHealthySlotStartRejected
+	}
+	return trigger, nil
+}
+
+func healthySlotStartClaimCurrent(trigger onboarding.OnboardingStartTrigger, checkedAt time.Time) bool {
+	return trigger.Status == onboarding.StartTriggerClaimed && trigger.ClaimExpiresAt != nil &&
+		trigger.ClaimExpiresAt.After(checkedAt) && trigger.IntentExpiresAt.After(checkedAt)
+}
+
+func (binding *healthySlotStartRuntimeBinding) canonicalize() {
+	binding.LastObservedAt = binding.LastObservedAt.UTC()
+	binding.ExecutionLeaseCreatedAt = binding.ExecutionLeaseCreatedAt.UTC()
+	binding.ExecutionLeaseExpiresAt = binding.ExecutionLeaseExpiresAt.UTC()
+	binding.ReservationCreatedAt = binding.ReservationCreatedAt.UTC()
+}
+
+func healthySlotStartDatabaseTime(ctx context.Context, tx *sql.Tx) (time.Time, error) {
+	var databaseNow time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT UTC_TIMESTAMP(6)`).Scan(&databaseNow); err != nil {
+		return time.Time{}, fmt.Errorf("read healthy-slot onboarding database time: %w", err)
+	}
+	databaseNow = canonicalRuntimeTime(databaseNow)
+	if databaseNow.IsZero() {
+		return time.Time{}, errors.New("read healthy-slot onboarding database time: zero timestamp")
+	}
+	return databaseNow, nil
+}
+
+func healthySlotStartAuthorityCurrent(
+	trigger onboarding.OnboardingStartTrigger,
+	intent healthySlotStartIntent,
+	binding healthySlotStartRuntimeBinding,
+	spec onboarding.HealthySlotStartSpec,
+	databaseNow time.Time,
+) bool {
+	observationMaxAge := spec.StartedAt.Sub(spec.ObservationFreshAfter)
+	commandTTL := spec.RequestedCommandDeadline.Sub(spec.StartedAt)
+	if observationMaxAge < 0 || commandTTL <= 0 || !healthySlotStartClaimCurrent(trigger, databaseNow) ||
+		!intent.ExpiresAt.After(databaseNow) {
+		return false
+	}
+	freshAfter := databaseNow.Add(-observationMaxAge)
+	return !binding.LastObservedAt.Before(freshAfter) && !binding.LastObservedAt.After(databaseNow) &&
+		!binding.ExecutionLeaseCreatedAt.After(databaseNow) && binding.ExecutionLeaseExpiresAt.After(databaseNow) &&
+		!binding.ReservationCreatedAt.After(databaseNow)
+}
+
+func markOnboardingStartTriggerStarted(
+	ctx context.Context,
+	tx *sql.Tx,
+	trigger onboarding.OnboardingStartTrigger,
+	workflowID string,
+) error {
+	result, err := tx.ExecContext(ctx, `
+UPDATE onboarding_start_triggers
+SET status = 'started', started_workflow_id = ?, started_at = UTC_TIMESTAMP(6), last_error_code = ''
+WHERE event_id = ? AND status = 'claimed' AND claim_owner = ? AND claim_version = ?
+	  AND claim_expires_at > UTC_TIMESTAMP(6) AND intent_expires_at > UTC_TIMESTAMP(6)`,
+		workflowID, trigger.EventID, trigger.ClaimOwner, trigger.ClaimVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("mark onboarding start trigger started: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return onboarding.ErrHealthySlotStartRejected
+	}
+	return nil
 }
 
 func lockHealthySlotStartIntent(ctx context.Context, tx *sql.Tx, intentID string) (healthySlotStartIntent, error) {
@@ -182,13 +322,14 @@ FROM onboarding_intents WHERE intent_id = ? FOR UPDATE`, intentID).Scan(
 func sameHealthySlotStartReplay(
 	ctx context.Context,
 	tx *sql.Tx,
+	trigger onboarding.OnboardingStartTrigger,
 	intent healthySlotStartIntent,
 	workflow onboarding.Provisioning,
 	spec onboarding.HealthySlotStartSpec,
 ) (bool, error) {
 	if workflow.ID != spec.WorkflowID || workflow.IdempotencyKey != spec.IdempotencyKey ||
 		workflow.IntentID != intent.ID || workflow.Owner != spec.Owner || workflow.AccountID != intent.AccountID ||
-		workflow.DesiredGeneration != intent.DesiredGeneration || workflow.SlotID != spec.SlotID ||
+		workflow.DesiredGeneration != intent.DesiredGeneration || workflow.SlotID != trigger.SlotID ||
 		workflow.CredentialLeaseID != spec.CredentialLeaseID || workflow.ProxyLeaseID != spec.ProxyLeaseID ||
 		workflow.KeyCommandID != spec.KeyCommandID || workflow.ActivationCommandID != spec.ActivationCommandID ||
 		workflow.CommandDeadline.After(intent.ExpiresAt) {
@@ -201,8 +342,8 @@ func sameHealthySlotStartReplay(
 		}
 		return false, err
 	}
-	return lease.ReservationID == spec.ReservationID && lease.AccountID == workflow.AccountID &&
-		lease.DesiredGeneration == workflow.DesiredGeneration && lease.BindingRevision == spec.BindingRevision &&
+	return lease.ReservationID == trigger.ReservationID && lease.AccountID == workflow.AccountID &&
+		lease.DesiredGeneration == workflow.DesiredGeneration && lease.BindingRevision == trigger.BindingRevision &&
 		lease.SlotID == workflow.SlotID && lease.ExecutionEpoch == workflow.ExecutionEpoch, nil
 }
 

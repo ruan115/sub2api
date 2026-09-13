@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/outbox"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
@@ -22,32 +23,50 @@ var ErrProxyReservationEvent = errors.New("trusted proxy reservation event is in
 
 type ProxyReservationOutboxHandler struct {
 	repository store.ProxyReservationGrantRepository
+	now        func() time.Time
 }
 
-func NewProxyReservationOutboxHandler(repository store.ProxyReservationGrantRepository) (*ProxyReservationOutboxHandler, error) {
+func NewProxyReservationOutboxHandler(
+	repository store.ProxyReservationGrantRepository,
+	now func() time.Time,
+) (*ProxyReservationOutboxHandler, error) {
 	if repository == nil {
 		return nil, ErrProxyReservationEvent
 	}
-	return &ProxyReservationOutboxHandler{repository: repository}, nil
+	if now == nil {
+		now = time.Now
+	}
+	return &ProxyReservationOutboxHandler{repository: repository, now: now}, nil
 }
 
 func (h *ProxyReservationOutboxHandler) ApplyRuntimeEvent(ctx context.Context, event outbox.Event) error {
-	if h == nil || h.repository == nil || ctx == nil || ctx.Err() != nil || event.Validate() != nil ||
-		(event.EventType != ProxyReservationGrantedEvent && event.EventType != ProxyReservationRevokedEvent) {
+	if h == nil || h.repository == nil || h.now == nil || ctx == nil || ctx.Err() != nil {
 		return ErrProxyReservationEvent
+	}
+	if event.Validate() != nil ||
+		(event.EventType != ProxyReservationGrantedEvent && event.EventType != ProxyReservationRevokedEvent) {
+		return outbox.BlockingHandlerError(
+			outbox.FailureIntegrity, "proxy_reservation_event_invalid", ErrProxyReservationEvent,
+		)
 	}
 	payload, err := decodeProxyReservationPayload(event.PayloadJSON)
 	if err != nil {
-		return ErrProxyReservationEvent
+		return outbox.BlockingHandlerError(
+			outbox.FailureTerminal, "proxy_reservation_payload_invalid", ErrProxyReservationEvent,
+		)
 	}
 	accountID := strconv.FormatInt(event.AccountID, 10)
 	for _, value := range []string{accountID, event.EventID, payload.ReservationID} {
 		if store.ValidateProxyReservationOpaqueID(value) != nil {
-			return ErrProxyReservationEvent
+			return outbox.BlockingHandlerError(
+				outbox.FailureTerminal, "proxy_reservation_payload_invalid", ErrProxyReservationEvent,
+			)
 		}
 	}
 	if store.ValidateProxyBindingID(payload.ProxyBindingID) != nil {
-		return ErrProxyReservationEvent
+		return outbox.BlockingHandlerError(
+			outbox.FailureTerminal, "proxy_reservation_payload_invalid", ErrProxyReservationEvent,
+		)
 	}
 	switch event.EventType {
 	case ProxyReservationGrantedEvent:
@@ -64,7 +83,13 @@ func (h *ProxyReservationOutboxHandler) ApplyRuntimeEvent(ctx context.Context, e
 		})
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrProxyReservationEvent, err)
+		wrapped := fmt.Errorf("%w: %w", ErrProxyReservationEvent, err)
+		if errors.Is(err, store.ErrProxyReservationConflict) || errors.Is(err, store.ErrProxyReservationNotFound) {
+			return outbox.BlockingHandlerError(
+				outbox.FailureAuthority, "proxy_reservation_authority_conflict", wrapped,
+			)
+		}
+		return retryRuntimeEvent(h.now, "proxy_reservation_projection_unavailable", wrapped)
 	}
 	return nil
 }

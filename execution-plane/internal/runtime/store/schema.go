@@ -25,8 +25,10 @@ var requiredRuntimeTables = []string{
 	"proxy_leases",
 	"credential_security_events",
 	"onboarding_intents",
+	"onboarding_start_triggers",
 	"onboarding_workflows",
 	"onboarding_results",
+	"lifecycle_event_apply_receipts",
 }
 
 type runtimeSchemaColumn struct {
@@ -34,14 +36,35 @@ type runtimeSchemaColumn struct {
 	name  string
 }
 
-// These columns are added by the same multi-statement migration as
-// proxy_reservation_grants. Checking them separately prevents a partially
-// applied migration from being mistaken for a usable runtime schema.
+// These post-core columns are checked separately so a partially applied
+// additive migration cannot be mistaken for a usable runtime schema.
 var requiredRuntimeColumns = []runtimeSchemaColumn{
 	{table: "slot_assignments", name: "desired_generation"},
 	{table: "proxy_leases", name: "reservation_id"},
 	{table: "proxy_leases", name: "desired_generation"},
 	{table: "proxy_leases", name: "binding_revision"},
+	{table: "onboarding_start_triggers", name: "status"},
+	{table: "onboarding_start_triggers", name: "claim_version"},
+	{table: "onboarding_start_triggers", name: "intent_expires_at"},
+	{table: "onboarding_start_triggers", name: "started_workflow_id"},
+	{table: "onboarding_start_triggers", name: "started_at"},
+	{table: "lifecycle_event_apply_receipts", name: "receipt_id"},
+	{table: "lifecycle_event_apply_receipts", name: "source_sequence"},
+	{table: "lifecycle_event_apply_receipts", name: "event_id"},
+	{table: "lifecycle_event_apply_receipts", name: "event_account_id"},
+	{table: "lifecycle_event_apply_receipts", name: "event_type"},
+	{table: "lifecycle_event_apply_receipts", name: "desired_generation"},
+	{table: "lifecycle_event_apply_receipts", name: "event_payload_sha256"},
+	{table: "lifecycle_event_apply_receipts", name: "event_created_at"},
+	{table: "lifecycle_event_apply_receipts", name: "slot_id"},
+	{table: "lifecycle_event_apply_receipts", name: "slot_account_id"},
+	{table: "lifecycle_event_apply_receipts", name: "provider"},
+	{table: "lifecycle_event_apply_receipts", name: "desired_state"},
+	{table: "lifecycle_event_apply_receipts", name: "required_labels_json"},
+	{table: "lifecycle_event_apply_receipts", name: "image_digest"},
+	{table: "lifecycle_event_apply_receipts", name: "cpu_request_millis"},
+	{table: "lifecycle_event_apply_receipts", name: "memory_request_bytes"},
+	{table: "lifecycle_event_apply_receipts", name: "applied_at"},
 }
 
 type runtimeSchemaIndex struct {
@@ -52,6 +75,13 @@ type runtimeSchemaIndex struct {
 
 var requiredRuntimeUniqueIndexes = []runtimeSchemaIndex{
 	{table: "onboarding_workflows", name: "uq_onboarding_workflows_intent", expectedColumns: "intent_id"},
+	{table: "onboarding_start_triggers", name: "uq_onboarding_start_triggers_event", expectedColumns: "event_id"},
+	{table: "onboarding_start_triggers", name: "uq_onboarding_start_triggers_sequence", expectedColumns: "source_sequence"},
+	{table: "onboarding_start_triggers", name: "uq_onboarding_start_triggers_intent", expectedColumns: "intent_id"},
+	{table: "onboarding_start_triggers", name: "uq_onboarding_start_triggers_account_generation", expectedColumns: "account_id,desired_generation"},
+	{table: "lifecycle_event_apply_receipts", name: "PRIMARY", expectedColumns: "receipt_id"},
+	{table: "lifecycle_event_apply_receipts", name: "uq_lifecycle_event_apply_receipts_event", expectedColumns: "event_id"},
+	{table: "lifecycle_event_apply_receipts", name: "uq_lifecycle_event_apply_receipts_sequence", expectedColumns: "source_sequence"},
 }
 
 // VerifyRuntimeSchema is intentionally read-only. Production migrations are an

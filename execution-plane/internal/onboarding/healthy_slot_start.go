@@ -14,6 +14,9 @@ var ErrHealthySlotStartRejected = errors.New("healthy-slot onboarding start reje
 // timing bounds. Account, generation, node, epoch and image are read from the
 // locked intent/runtime projection by the repository.
 type HealthySlotStartSpec struct {
+	TriggerEventID           string
+	TriggerClaimOwner        string
+	TriggerClaimVersion      uint64
 	IntentID                 string
 	SlotID                   string
 	ReservationID            string
@@ -32,14 +35,14 @@ type HealthySlotStartSpec struct {
 
 func (s HealthySlotStartSpec) Validate() error {
 	for _, value := range []string{
-		s.IntentID, s.SlotID, s.ReservationID, s.WorkflowID, s.IdempotencyKey, s.Owner,
+		s.TriggerEventID, s.TriggerClaimOwner, s.IntentID, s.SlotID, s.ReservationID, s.WorkflowID, s.IdempotencyKey, s.Owner,
 		s.CredentialLeaseID, s.ProxyLeaseID, s.KeyCommandID, s.ActivationCommandID,
 	} {
 		if credential.ValidateTransportID(value) != nil {
 			return ErrHealthySlotStartRejected
 		}
 	}
-	if s.BindingRevision == 0 || s.Owner != s.WorkflowID || s.KeyCommandID == s.ActivationCommandID ||
+	if s.TriggerClaimVersion == 0 || s.BindingRevision == 0 || s.Owner != s.WorkflowID || s.KeyCommandID == s.ActivationCommandID ||
 		s.StartedAt.IsZero() || s.ObservationFreshAfter.IsZero() || s.ObservationFreshAfter.After(s.StartedAt) ||
 		!s.RequestedCommandDeadline.After(s.StartedAt) ||
 		!s.StartedAt.Equal(s.StartedAt.UTC().Truncate(time.Microsecond)) ||
