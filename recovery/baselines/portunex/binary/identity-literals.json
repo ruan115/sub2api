@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "kind": "portunex.identity.static_literals",
+  "source": {
+    "path": "/opt/gateway/bin/portunex-server",
+    "size": 45810904,
+    "sha256": "5097f64d5042f1e43178df14decfb94ead48e96c16a4fae15bfc1fea14d7014a"
+  },
+  "runtime_verified": false,
+  "business_rows_read": false,
+  "extraction": "clipped ASCII runs (tab/LF/CR/0x20-0x7e), minimum 4 bytes",
+  "markers": [
+    {
+      "marker": "argon2",
+      "count": 8,
+      "first_offsets": [
+        50992,
+        88551,
+        125015,
+        228611,
+        242735,
+        1058564,
+        1058571,
+        30995420
+      ]
+    },
+    {
+      "marker": "bcrypt",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "scrypt",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "password-hash",
+      "count": 4,
+      "first_offsets": [
+        82307,
+        103356,
+        108767,
+        136401
+      ]
+    },
+    {
+      "marker": "snowflake",
+      "count": 3,
+      "first_offsets": [
+        297470,
+        361311,
+        423991
+      ]
+    },
+    {
+      "marker": "sonyflake",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "ulid",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "nanoid",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "sess_",
+      "count": 3,
+      "first_offsets": [
+        124002,
+        850284,
+        1006893
+      ]
+    },
+    {
+      "marker": "ptx_",
+      "count": 3,
+      "first_offsets": [
+        31264,
+        23066669,
+        23067937
+      ]
+    },
+    {
+      "marker": "auth_sessions",
+      "count": 74,
+      "first_offsets": [
+        248177,
+        248567,
+        248589,
+        248630,
+        248653,
+        248692,
+        248717,
+        248761,
+        248789,
+        248865,
+        248895,
+        312018
+      ]
+    },
+    {
+      "marker": "password_phc",
+      "count": 27,
+      "first_offsets": [
+        246220,
+        247010,
+        310061,
+        310851,
+        372741,
+        373531,
+        543452,
+        544311,
+        544456,
+        544821,
+        545201,
+        620962
+      ]
+    },
+    {
+      "marker": "SESSION_TTL",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "SESSION_DURATION",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "SESSION_SECRET",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "INSERT INTO auth_sessions",
+      "count": 1,
+      "first_offsets": [
+        509409
+      ]
+    },
+    {
+      "marker": "UPDATE auth_sessions",
+      "count": 25,
+      "first_offsets": [
+        507884,
+        508514,
+        508643,
+        508823,
+        604618,
+        604995,
+        605130,
+        674275,
+        674652,
+        759469,
+        759846,
+        792369
+      ]
+    },
+    {
+      "marker": "FROM auth_sessions",
+      "count": 15,
+      "first_offsets": [
+        507726,
+        508142,
+        508373,
+        508972,
+        509294,
+        604876,
+        674533,
+        759727,
+        792211,
+        792627,
+        836693,
+        876558
+      ]
+    },
+    {
+      "marker": "gen_random",
+      "count": 0,
+      "first_offsets": []
+    },
+    {
+      "marker": "nextval",
+      "count": 0,
+      "first_offsets": []
+    }
+  ],
+  "windows": [
+    {
+      "start": 50992,
+      "end": 51000,
+      "segments": [
+        {
+          "start": 50992,
+          "end": 51000,
+          "sha256": "752130b27b0023d1296c0b2f3bb2c5518e1eaa41a4e788f931b4105d7a82e205",
+          "text": "argon2id"
+        }
+      ]
+    },
+    {
+      "start": 88487,
+      "end": 88574,
+      "segments": [
+        {
+          "start": 88487,
+          "end": 88574,
+          "sha256": "a97af2b77118fdb8635067c43052652bf250db4afceebc18bea55a4f454d111b",
+          "text": "/Users/qyw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/argon2-0.5.3/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "start": 242671,
+      "end": 242760,
+      "segments": [
+        {
+          "start": 242671,
+          "end": 242760,
+          "sha256": "0569ae2c1fe4089cdd8152a4b4f2d90bace51c40dd9553723300ca06620b9ba8",
+          "text": "/Users/qyw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/argon2-0.5.3/src/block.rs"
+        }
+      ]
+    },
+    {
+      "start": 124002,
+      "end": 124007,
+      "segments": [
+        {
+          "start": 124002,
+          "end": 124007,
+          "sha256": "abb8de358567c0bca71ff99905add062c6f35694d47f26af61edb020e6e72e88",
+          "text": "sess_"
+        }
+      ]
+    },
+    {
+      "start": 297200,
+      "end": 297545,
+      "segments": [
+        {
+          "start": 297200,
+          "end": 297545,
+          "sha256": "1d202f93c97bc0c23781049bce8cc950f4de56e18f4a6d52377d748393734113",
+          "text": "ation, dead tuples\n-- and WAL churn on every cleanup delete, plus FOR KEY SHARE row locks on every consume\n-- INSERT contending with the cleanup DELETE's row locks. Nothing reads those columns back\n-- (write-only: INSERT + entity projection; the API DTO drops them) and snowflake ids are\n-- never reused, so dangling historical ids are harmless "
+        }
+      ]
+    },
+    {
+      "start": 507602,
+      "end": 509583,
+      "segments": [
+        {
+          "start": 507602,
+          "end": 509583,
+          "sha256": "94fd60203a6afcdbe9735a8868538f1ff154603d29545c4778691d368be10726",
+          "text": "            SELECT id, user_id, token, expires_at, ip_address, user_agent, created_at, last_used_at, deleted_at\n            FROM auth_sessions\n            WHERE user_id = $1 AND expires_at > NOW() AND deleted_at IS NULL\n            ORDER BY created_at DESC\n            \n            UPDATE auth_sessions\n            SET expires_at = $1, last_used_at = $2\n            WHERE id = $3 AND deleted_at IS NULL\n            \n            SELECT id, user_id, token, expires_at, ip_address, user_agent, created_at, last_used_at, deleted_at\n            FROM auth_sessions\n            WHERE token = $1 AND expires_at > NOW() AND deleted_at IS NULL\n            \n            SELECT id, user_id, token, expires_at, ip_address, user_agent, created_at, last_used_at, deleted_at\n            FROM auth_sessions\n            WHERE expires_at > NOW() AND deleted_at IS NULL\n            ORDER BY created_at DESC\n            \n            UPDATE auth_sessions\n            SET last_used_at = $1\n            WHERE id = $2 AND deleted_at IS NULL\n            \n            UPDATE auth_sessions\n            SET deleted_at = $2\n            WHERE user_id = $1 AND expires_at < $3 AND deleted_at IS NULL\n            RETURNING token\n            \n            UPDATE auth_sessions\n            SET deleted_at = $2\n            WHERE user_id = $1 AND deleted_at IS NULL AND id NOT IN (\n                SELECT id FROM auth_sessions\n                WHERE user_id = $1 AND deleted_at IS NULL\n                ORDER BY created_at DESC\n                LIMIT 10\n            )\n            RETURNING token\n            \n            SELECT id, user_id, token, expires_at, ip_address, user_agent, created_at, last_used_at, deleted_at\n            FROM auth_sessions\n            WHERE id = $1\n              AND ($2 OR deleted_at IS NULL)\n            \n            INSERT INTO auth_sessions (id, user_id, token, expires_at, ip_address, user_agent, created_at, last_used_at)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)\n            \n"
+        }
+      ]
+    },
+    {
+      "start": 1058640,
+      "end": 1058705,
+      "segments": [
+        {
+          "start": 1058640,
+          "end": 1058705,
+          "sha256": "bbb52bee3b51dea3f2e6e05487061463dfde71fa79d12f4766e080acb0de55c5",
+          "text": "Admin access requiredAdmin access requires session authentication"
+        }
+      ]
+    },
+    {
+      "start": 1058771,
+      "end": 1058802,
+      "segments": [
+        {
+          "start": 1058771,
+          "end": 1058802,
+          "sha256": "eab21b677e34f3373afcead8874a420c5a39c3931167c42220e427ddc13d806d",
+          "text": "Session authentication required"
+        }
+      ]
+    }
+  ]
+}

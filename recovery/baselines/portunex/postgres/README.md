@@ -1,4 +1,24 @@
-# 认证目录结构线索（不是数据库恢复包）
+# 认证目录与定义线索（不是数据库恢复包）
+
+## 新增定义采集（2026-09-13，独立于首轮快照）
+
+`identity-definition.json` 与 `definition-provenance.json` 新增白名单三表的
+30 列（含 default/collation）、14 个约束、17 个索引及 `public.citext 1.8` 元数据。
+采集 SQL 为 `recovery/collectors/postgres/identity-definition.sql`，保持显式只读事务和短超时。
+表达式只反编译为文本、不执行，先筛查和人工审阅；未读取业务行。
+
+- 三个 ID、会话 expires_at 都无默认表达式；仍需应用生成策略证据。
+- users.email、auth_sessions.token、api_keys.key_text 的唯一索引带 `deleted_at IS NULL`。
+- 两个 user_id 外键为物理 `ON DELETE CASCADE`，不能据此假定软删除会级联。
+- email/password_phc/role 的列非空标志为 false；role CHECK 的 admin/user 不禁止 NULL。
+- NUMERIC(30,18) 不得映射成浮点；citext 的数据库 locale 和真实比较行为尚未验证。
+
+这是定义元数据，不是完整备份或可直接上线的迁移：函数体、序列现值、真实凭据、
+完整 SQLx 迁移正文及原认证业务行为未采集。原始 psql stdout 只在内存筛查，
+来源文件明确不保留原输出；规范化文件有独立哈希，不能冒充原输出哈希。
+下文保留首轮采集的范围说明，新增定义不改写旧快照。
+
+## 首轮目录快照
 
 `identity-inventory.json` 来自 2026-09-13 的显式只读 PostgreSQL catalog 查询，
 执行文件为 `recovery/collectors/postgres/identity-inventory.sql`。

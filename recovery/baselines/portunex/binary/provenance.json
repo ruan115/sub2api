@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "portunex.identity.static_literal_provenance",
+  "source": "Authorized read-only SSH (en0) static file inspection on 216.106.185.119, 2026-09-13",
+  "collector_path": "recovery/collectors/binary/identity_literals.py",
+  "collector_sha256": "8fc5a1ebf72a88e9a9df6ac407dec6f2077a7ab69845d3b6752043a1c437500a",
+  "artifact_path": "recovery/baselines/portunex/binary/identity-literals.json",
+  "artifact_sha256": "256b85dc4d08515d2c7e944ba7b8fbc884fe22826ac9f4d680752d0d4a0dbca5",
+  "representation": "Reviewed normalized JSON with exact source byte offsets and SHA-256 for each ASCII excerpt; not the original ELF or a runtime trace",
+  "content_screening": "Collector stdout passed recoverykit.evidence.policy.check_content before display; eight narrowed excerpts were manually reviewed before retention. Screening is not an exhaustive guarantee about arbitrary binaries.",
+  "source_executed": false,
+  "process_memory_read": false,
+  "business_rows_read": false,
+  "original_elf_retained": false,
+  "runtime_verified": false,
+  "authentication_compatibility_verified": false
+}

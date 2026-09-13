@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "portunex.identity.definition_provenance",
+  "source": "Authorized read-only psql catalog query via SSH bound to en0; portunex-postgres / portunex on 216.106.185.119, 2026-09-13",
+  "collector_path": "recovery/collectors/postgres/identity-definition.sql",
+  "collector_sha256": "633afc0f9e416cd1f4d464f9d94084c78abe15c3a3048f8997b3298b20fb9c28",
+  "definition_path": "recovery/baselines/portunex/postgres/identity-definition.json",
+  "definition_sha256": "123591bf9fefc63ba0d04beea66734032618b60fcf07f5ef1a011ca763f65840",
+  "definition_representation": "JSON parsed from the successful psql stdout and pretty-printed with two-space indentation and final newline; definition_sha256 covers this normalized artifact, not raw psql stdout",
+  "raw_stdout_sha256": "0446f5c988efc2eefcc5ead3ffe556f414e59fbf52edcb496a0733d688077aea",
+  "raw_stdout_bytes": 19679,
+  "raw_stdout_retained": false,
+  "execution_exit_code": 0,
+  "business_rows_read": false,
+  "function_bodies_read": false,
+  "sequence_current_values_read": false,
+  "schema_restore_verified": false,
+  "authentication_compatibility_verified": false,
+  "content_screening": "recoverykit.evidence.policy.check_content(text_only=True) passed before output; deparsed expression literals were restricted to reviewed non-secret constants before manual inspection",
+  "expression_review": "Reviewed 30 column definitions (10 defaults), 14 constraints and 17 indexes. Non-null defaults are true, false, now(), 0 and 'user'::text; role CHECK literals are admin/user; index predicates are deleted_at IS NULL. No business values, function bodies or sequence current values were collected. These are reviewed collection claims, not an independent database audit."
+}

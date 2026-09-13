@@ -1,6 +1,6 @@
 # 下一切片规划：旧 Bearer 认证兼容闭环
 
-日期：2026-09-13。状态：证据驱动规划；尚未实现旧生产认证。
+日期：2026-09-13。状态：用户已确认，进入分步开发；尚未实现旧生产认证。
 前置证据：[首批 wire 观察](../contracts-wire/portunex/README.md)、
 [认证表结构线索](../baselines/portunex/postgres/README.md)。
 
@@ -72,6 +72,6 @@ MCP/gRPC/VM 接线不塞进此认证切片。它们继续保留在总计划的�
 ## 5. 确认门槛与风险
 
 本次采用 `web-reverse-master` 的“证据 → 方案 → 确认 → 还原”流程。
-在进入这一新的旧认证实现切片前确认本方案；没有完整证据的行为保持未实现，
+用户已确认本方案；实施见 `openspec/changes/restore-portunex-legacy-identity/`。没有完整证据的行为保持未实现，
 不以强制重新注册、Cookie-only、硬编码过期时间或猜测 ID 生成器宣称兼容。
 即使本地通过，也不自动开启线上执行开关、升级 Bun、推送或部署。
