@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "id": "portunex.wire.identity.20260913",
+  "artifact_manifest_id": "portunex.static-wire.20260913",
+  "observations": [
+    {
+      "id": "portunex.wire.login.method",
+      "record_id": "portunex.identity.api.login",
+      "path": "/portunex/auth/login",
+      "aspect": "method",
+      "statement": "Static auth helper calls the shared Axios instance's post method for this path; this establishes client intent, not a server acceptance test.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3713,
+          "end": 3805,
+          "sha256": "52f309f896746f70bfbfa50acc9218785d7ed07b831bdd05a161934c2a0100ef",
+          "literal": "/portunex/auth/login"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 32790,
+          "end": 33027,
+          "sha256": "f433681c7bfe96f65061a657e061addae350d16388ce5e2f9770a59e93582a10",
+          "literal": "method:t"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.login.form",
+      "record_id": "portunex.identity.api.login",
+      "path": "/portunex/auth/login",
+      "aspect": "request_body",
+      "statement": "The password-login UI defines email/password fields, passes form values to its login action, and the auth helper passes that object to post. The minimum-length check is a client rule, not proof of server validation.",
+      "anchors": [
+        {
+          "artifact": "auth-Bexrmzau.js",
+          "start": 2045,
+          "end": 2125,
+          "sha256": "fe6d94f07be48ddcc3e15f3b848d1c211b1ae9b6b7b2526e9f5e24940e50420c",
+          "literal": "password:k().min(6"
+        },
+        {
+          "artifact": "auth-Bexrmzau.js",
+          "start": 4054,
+          "end": 4125,
+          "sha256": "d160c05d78160bf0afba7c9d349c1482231b9f59463c90daf6c278b77c9f5bd2",
+          "literal": "await O(s)"
+        },
+        {
+          "artifact": "auth-Bexrmzau.js",
+          "start": 8182,
+          "end": 8202,
+          "sha256": "967f21d6739b8d57bc5e1497b7c00fde5f0c8d1e124926b1daefa6ffb8f0699c",
+          "literal": "y.handleSubmit(Q)"
+        },
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3713,
+          "end": 3805,
+          "sha256": "52f309f896746f70bfbfa50acc9218785d7ed07b831bdd05a161934c2a0100ef",
+          "literal": "/portunex/auth/login"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.login.json",
+      "record_id": "portunex.identity.api.login",
+      "path": "/portunex/auth/login",
+      "aspect": "request_header",
+      "statement": "The application creates its shared Axios instance with Content-Type application/json. Normal object input reaches the bundled JSON transform; exceptional/non-object input is not covered by this observation.",
+      "anchors": [
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36674,
+          "end": 36755,
+          "sha256": "479f1b41441fb3381d899d8a6b97e7fdde5176d6e04ce7c50cbdb765786b52e3",
+          "literal": "\"Content-Type\":\"application/json\""
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 12588,
+          "end": 12650,
+          "sha256": "da89cca05081fcd087187218ed56146892b01c1f8957a72509d1deacffa24618",
+          "literal": "Rn(t)"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 11645,
+          "end": 11792,
+          "sha256": "f5a48789ca82707186dceb042a77bc018431d93d28d6e4ffbf085ff22c54118b",
+          "literal": "JSON.stringify"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.login.result",
+      "record_id": "portunex.identity.api.login",
+      "path": "/portunex/auth/login",
+      "aspect": "response_field",
+      "statement": "The helper destructures Axios response.data, stores its token, and the store consumes the returned user and user.role. This indicates top-level token/user in the client-consumed response body, not a complete server schema.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3713,
+          "end": 3805,
+          "sha256": "52f309f896746f70bfbfa50acc9218785d7ed07b831bdd05a161934c2a0100ef",
+          "literal": "/portunex/auth/login"
+        },
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 8049,
+          "end": 8153,
+          "sha256": "3d0d77d714b6d28e940956bae40d5effb2cdbefc11d85d06ae7b1010eee5b2ce",
+          "literal": "user:r.user"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.login.token",
+      "record_id": "portunex.identity.api.login",
+      "path": "/portunex/auth/login",
+      "aspect": "credentials",
+      "statement": "The client token helper uses localStorage key portunex_token and classifies sess_/ptx_ prefixes. These are client checks only; token generation, server acceptance, storage protection and expiry remain unknown.",
+      "anchors": [
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36410,
+          "end": 36440,
+          "sha256": "4c4fe71e58d00134f7a482cb3b7cfc8857ae700cc7614c49dfe28af52d702df0",
+          "literal": "portunex_token"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36756,
+          "end": 36955,
+          "sha256": "b4d46e5358efadbbf276267573cb1aa28c237f5b2f9526d9d6e9d2328c42565e",
+          "literal": "localStorage.getItem(me)"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.login.unauthorized",
+      "record_id": "portunex.identity.api.login",
+      "path": "/portunex/auth/login",
+      "aspect": "error",
+      "statement": "The shared 401 handler distinguishes login/register from other authenticated requests and reads response-body message for an authentication error. Actual login error payload/status behavior has not been exercised.",
+      "anchors": [
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 37890,
+          "end": 38007,
+          "sha256": "9701a5ecc86b719361930ddf18647d9f45cba448c0aa896c779350183a79554e",
+          "literal": "case 401:"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 38189,
+          "end": 38264,
+          "sha256": "127a60cb8dba8299d5b2e810fb45a78daca5e05a44e9de3b5b7972cc032e6815",
+          "literal": "i.message"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.logout.method",
+      "record_id": "portunex.identity.api.logout",
+      "path": "/portunex/auth/logout",
+      "aspect": "method",
+      "statement": "The auth helper calls post without an explicit body argument, then clears the local token only after the request resolves. Server revocation and response schema remain unverified.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3806,
+          "end": 3892,
+          "sha256": "3b22ee10355b80bca09e3a97b9f131b535b85393cec6cc8a3a87b2de789c4588",
+          "literal": "/portunex/auth/logout"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.logout.bearer",
+      "record_id": "portunex.identity.api.logout",
+      "path": "/portunex/auth/logout",
+      "aspect": "credentials",
+      "statement": "The shared request interceptor reads the stored token and sets Authorization Bearer when present; logout uses this client. This does not rule out additional cookie/XSRF behavior in the underlying browser transport.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3806,
+          "end": 3892,
+          "sha256": "3b22ee10355b80bca09e3a97b9f131b535b85393cec6cc8a3a87b2de789c4588",
+          "literal": "/portunex/auth/logout"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36956,
+          "end": 37047,
+          "sha256": "7565925ba09c3018662c6f20fc46fb874643240afaa7ca692dcba152ffd635fc",
+          "literal": "e.headers.Authorization=`Bearer ${t}`"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36756,
+          "end": 36955,
+          "sha256": "b4d46e5358efadbbf276267573cb1aa28c237f5b2f9526d9d6e9d2328c42565e",
+          "literal": "localStorage.getItem(me)"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.logout.cleanup",
+      "record_id": "portunex.identity.api.logout",
+      "path": "/portunex/auth/logout",
+      "aspect": "response_field",
+      "statement": "The application store clears its user/authenticated UI in finally even when logout fails; the lower helper clears localStorage only after successful post. No compatibility claim is made about failure or revocation semantics.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3806,
+          "end": 3892,
+          "sha256": "3b22ee10355b80bca09e3a97b9f131b535b85393cec6cc8a3a87b2de789c4588",
+          "literal": "/portunex/auth/logout"
+        },
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 8291,
+          "end": 8403,
+          "sha256": "3b4bddc0e34b4c25cdd14136b31397c30e4a49c1b86c7788164e301c727ccc2e",
+          "literal": "finally{t({user:null"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "id": "portunex.wire.providers.20260913",
+  "artifact_manifest_id": "portunex.static-wire.20260913",
+  "observations": [
+    {
+      "id": "portunex.wire.providers.list",
+      "record_id": "portunex.providers.api.admin_collection",
+      "path": "/portunex/admin/providers",
+      "aspect": "method",
+      "statement": "The reviewed providers helper calls get on the administrative provider collection and returns Axios response.data; create/update are distinct calls.",
+      "anchors": [
+        {
+          "artifact": "use-providers-HlnM_V-l.js",
+          "start": 266,
+          "end": 364,
+          "sha256": "13e2473d8953cf11bfbf5dab5c902d98cd645438294450fca4a6e96c4e13e288",
+          "literal": "/portunex/admin/providers"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.providers.params",
+      "record_id": "portunex.providers.api.admin_collection",
+      "path": "/portunex/admin/providers",
+      "aspect": "pagination",
+      "statement": "The list helper forwards its input as params. Concrete page filter/default/pagination consumption is still unconfirmed because the Provider page bundle is excluded by the secret-shaped-URL screening gate.",
+      "anchors": [
+        {
+          "artifact": "use-providers-HlnM_V-l.js",
+          "start": 266,
+          "end": 364,
+          "sha256": "13e2473d8953cf11bfbf5dab5c902d98cd645438294450fca4a6e96c4e13e288",
+          "literal": "/portunex/admin/providers"
+        },
+        {
+          "artifact": "use-providers-HlnM_V-l.js",
+          "start": 2166,
+          "end": 2266,
+          "sha256": "1e9d5683a1bc6b4ee6dbaf1fe556c98b0d796024db9229f77194796a7fb0d40e",
+          "literal": "o.list(e)"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.providers.list_field",
+      "record_id": "portunex.providers.api.admin_collection",
+      "path": "/portunex/admin/providers",
+      "aspect": "response_field",
+      "statement": "The health-mutation optimistic cache update expects a providers array on list results. This is indirect client-consumption evidence only, not the full list envelope or actual response body.",
+      "anchors": [
+        {
+          "artifact": "use-providers-HlnM_V-l.js",
+          "start": 4100,
+          "end": 4209,
+          "sha256": "64fcd9da004e3b060d67484da87ab21a09808c24112803cab0dafb412f8112ca",
+          "literal": "providers:p.providers.map"
+        },
+        {
+          "artifact": "use-providers-HlnM_V-l.js",
+          "start": 266,
+          "end": 364,
+          "sha256": "13e2473d8953cf11bfbf5dab5c902d98cd645438294450fca4a6e96c4e13e288",
+          "literal": "/portunex/admin/providers"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.providers.bearer",
+      "record_id": "portunex.providers.api.admin_collection",
+      "path": "/portunex/admin/providers",
+      "aspect": "credentials",
+      "statement": "Provider calls use the shared Authorization Bearer client. No real provider action or authentication test was performed.",
+      "anchors": [
+        {
+          "artifact": "use-providers-HlnM_V-l.js",
+          "start": 266,
+          "end": 364,
+          "sha256": "13e2473d8953cf11bfbf5dab5c902d98cd645438294450fca4a6e96c4e13e288",
+          "literal": "/portunex/admin/providers"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36956,
+          "end": 37047,
+          "sha256": "7565925ba09c3018662c6f20fc46fb874643240afaa7ca692dcba152ffd635fc",
+          "literal": "e.headers.Authorization=`Bearer ${t}`"
+        }
+      ]
+    }
+  ]
+}

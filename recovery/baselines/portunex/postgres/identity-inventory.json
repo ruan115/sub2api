@@ -1,0 +1,330 @@
+{
+  "kind": "portunex.identity.catalog_inventory",
+  "scope": {
+    "schema": "public",
+    "tables": [
+      "api_keys",
+      "auth_sessions",
+      "users"
+    ],
+    "expressions_read": false,
+    "business_rows_read": false,
+    "reconstructable_schema": false
+  },
+  "columns": [
+    {
+      "name": "id",
+      "type": "bigint",
+      "table": "api_keys",
+      "identity": "",
+      "position": 1,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": true
+    },
+    {
+      "name": "user_id",
+      "type": "bigint",
+      "table": "api_keys",
+      "identity": "",
+      "position": 2,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "key_text",
+      "type": "text",
+      "table": "api_keys",
+      "identity": "",
+      "position": 3,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "prefix",
+      "type": "text",
+      "table": "api_keys",
+      "identity": "",
+      "position": 4,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "active",
+      "type": "boolean",
+      "table": "api_keys",
+      "identity": "",
+      "position": 5,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "settings",
+      "type": "jsonb",
+      "table": "api_keys",
+      "identity": "",
+      "position": 6,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "table": "api_keys",
+      "identity": "",
+      "position": 7,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "rotated_at",
+      "type": "timestamp with time zone",
+      "table": "api_keys",
+      "identity": "",
+      "position": 8,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "deleted_at",
+      "type": "timestamp with time zone",
+      "table": "api_keys",
+      "identity": "",
+      "position": 9,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "name",
+      "type": "text",
+      "table": "api_keys",
+      "identity": "",
+      "position": 10,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "last_used_at",
+      "type": "timestamp with time zone",
+      "table": "api_keys",
+      "identity": "",
+      "position": 11,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "id",
+      "type": "bigint",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 1,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": true
+    },
+    {
+      "name": "user_id",
+      "type": "bigint",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 2,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": true
+    },
+    {
+      "name": "token",
+      "type": "text",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 3,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": true
+    },
+    {
+      "name": "expires_at",
+      "type": "timestamp with time zone",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 4,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": true
+    },
+    {
+      "name": "ip_address",
+      "type": "text",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 5,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "user_agent",
+      "type": "text",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 6,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 7,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "last_used_at",
+      "type": "timestamp with time zone",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 8,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "deleted_at",
+      "type": "timestamp with time zone",
+      "table": "auth_sessions",
+      "identity": "",
+      "position": 9,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "id",
+      "type": "bigint",
+      "table": "users",
+      "identity": "",
+      "position": 1,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": true
+    },
+    {
+      "name": "email",
+      "type": "public.citext",
+      "table": "users",
+      "identity": "",
+      "position": 2,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "password_phc",
+      "type": "text",
+      "table": "users",
+      "identity": "",
+      "position": 3,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "points",
+      "type": "numeric(30,18)",
+      "table": "users",
+      "identity": "",
+      "position": 4,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "role",
+      "type": "text",
+      "table": "users",
+      "identity": "",
+      "position": 5,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "table": "users",
+      "identity": "",
+      "position": 6,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "table": "users",
+      "identity": "",
+      "position": 7,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": false
+    },
+    {
+      "name": "deleted_at",
+      "type": "timestamp with time zone",
+      "table": "users",
+      "identity": "",
+      "position": 8,
+      "generated": "",
+      "has_default": false,
+      "column_not_null": false
+    },
+    {
+      "name": "can_purchase_subscription",
+      "type": "boolean",
+      "table": "users",
+      "identity": "",
+      "position": 9,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": true
+    },
+    {
+      "name": "daily_recharge_limit",
+      "type": "numeric(30,18)",
+      "table": "users",
+      "identity": "",
+      "position": 10,
+      "generated": "",
+      "has_default": true,
+      "column_not_null": true
+    }
+  ],
+  "database": "portunex",
+  "collected_at": "2026-09-13T13:31:32.30952+00:00",
+  "public_counts": {
+    "tables": 36,
+    "columns": 387,
+    "indexes": 135,
+    "policies": 0,
+    "routines": 48,
+    "foreign_keys": 28,
+    "user_triggers": 0
+  },
+  "schema_version": 1,
+  "server_version": "18.6 (Debian 18.6-1.pgdg13+2)",
+  "transaction_read_only": "on"
+}

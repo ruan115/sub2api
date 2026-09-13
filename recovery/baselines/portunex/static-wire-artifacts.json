@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "id": "portunex.static-wire.20260913",
+  "entries": [
+    {
+      "path": "_dashboard.api-keys-BWN_eIKN.js",
+      "size": 32010,
+      "sha256": "205a346a527e5a78bfba5ca5602913e5fc94b0143258ff4074a74c5c8c5d94da",
+      "source": "SSH read-only /opt/gateway/public/assets/_dashboard.api-keys-BWN_eIKN.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "_dashboard.users-PbTCLCMc.js",
+      "size": 14179,
+      "sha256": "fe45d7de5ddbfd4a3e7cd4a3ca81a47ea39410ce18329783f9ae4e09881621dc",
+      "source": "SSH read-only /opt/gateway/public/assets/_dashboard.users-PbTCLCMc.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "admin-qirDwatZ.js",
+      "size": 3496,
+      "sha256": "043494700fc6efc1a8adca8473952472136ed4222e23e7454965112c9390a0d1",
+      "source": "SSH read-only /opt/gateway/public/assets/admin-qirDwatZ.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "auth-Bexrmzau.js",
+      "size": 11078,
+      "sha256": "bc93baf48442e901e82a773c43e8962b5184cd60fe67017164447626f08b23a8",
+      "source": "SSH read-only /opt/gateway/public/assets/auth-Bexrmzau.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "auth-store-C1tFGCSg.js",
+      "size": 8504,
+      "sha256": "7bb77783e1f752295cdd8679324400339056a3ffe8b0e4e17d5652c36c778554",
+      "source": "SSH read-only /opt/gateway/public/assets/auth-store-C1tFGCSg.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "client-AMiB-Ne-.js",
+      "size": 39267,
+      "sha256": "6283e16cd7c659325ecb9c6759c3e3e71a66e37bd2c952a92cf7353b14044ab1",
+      "source": "SSH read-only /opt/gateway/public/assets/client-AMiB-Ne-.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "manifest-c2858866.js",
+      "size": 30518,
+      "sha256": "2a02a7cfa7c539c3760e22004365f2cfe102a71da12dbeaadeaa7fc617f1f6fc",
+      "source": "SSH read-only /opt/gateway/public/assets/manifest-c2858866.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "use-api-keys-_Qqurcxx.js",
+      "size": 4791,
+      "sha256": "cbb9a6746fa534cf77eeb991b6838dd599c800dd4b3d2bc630546450c1c7aec7",
+      "source": "SSH read-only /opt/gateway/public/assets/use-api-keys-_Qqurcxx.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "use-pagination-DHRgEu59.js",
+      "size": 6334,
+      "sha256": "4f33102d9e1cc3cac26c8b28f1720c8e0e5e949f8cb23ab387f8b0c2e9535196",
+      "source": "SSH read-only /opt/gateway/public/assets/use-pagination-DHRgEu59.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "use-providers-HlnM_V-l.js",
+      "size": 11180,
+      "sha256": "10bb4b011273bce0f70dfa0c589f003c9cf06d63ec6c7cc7b02500de21bf30db",
+      "source": "SSH read-only /opt/gateway/public/assets/use-providers-HlnM_V-l.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    },
+    {
+      "path": "use-users-Dh47o_nl.js",
+      "size": 2332,
+      "sha256": "69613594e4591de867cb470f79ef5f102f9443b785bbeb2db48bd3dbed6ee234",
+      "source": "SSH read-only /opt/gateway/public/assets/use-users-Dh47o_nl.js on 216.106.185.119, observed 2026-09-13; original bytes retained privately, not executed."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "kind": "portunex.identity.catalog_provenance",
+  "source": "Authorized read-only psql catalog query via SSH; portunex-postgres / portunex on 216.106.185.119, 2026-09-13",
+  "collector_path": "recovery/collectors/postgres/identity-inventory.sql",
+  "collector_sha256": "26da1e26aa8bb2e48e859a0bd52ec4d73e4df9016254afadcf2f282bd149c0a9",
+  "inventory_path": "recovery/baselines/portunex/postgres/identity-inventory.json",
+  "inventory_sha256": "c9d0a28bbf087a8c4934d6b2e8ddcd641a25083d9d6e399ffdd96f864e64ae1b",
+  "inventory_representation": "JSON parsed from the successful psql stdout and pretty-printed with two-space indentation and final newline; hash covers this normalized artifact, not raw psql stdout",
+  "execution_exit_code": 0,
+  "business_rows_read": false,
+  "schema_restore_verified": false
+}

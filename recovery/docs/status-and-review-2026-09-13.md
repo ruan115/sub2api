@@ -2,6 +2,11 @@
 
 日期：2026-09-13。分支：`codex/claude-execution-plane-v1`。
 
+后续同日新增：[首批旧接口证据切片验收](../../openspec/changes/restore-portunex-wire-contracts/verification.md)
+与 [旧 Bearer 认证下一切片规划](portunex-identity-next-slice.md)。下面的四次提交记录保留其交付时点；
+新切片已取得 11 份白名单原件、27 条静态观察及 3 张认证相关表的 30 列目录信息，
+但仍未实现旧接口认证，也未恢复完整数据库。
+
 ## 结论与边界
 
 当前可交付的是执行面 5.5c 收尾、恢复工具底座、接口发现清单，以及

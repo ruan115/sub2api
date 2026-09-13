@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "id": "portunex.wire.apikeys.20260913",
+  "artifact_manifest_id": "portunex.static-wire.20260913",
+  "observations": [
+    {
+      "id": "portunex.wire.keys.list",
+      "record_id": "portunex.apikeys.api.collection",
+      "path": "/portunex/api-keys",
+      "aspect": "method",
+      "statement": "The user-owned key list calls get on /portunex/api-keys with params; it is separate from /portunex/admin/api-keys.",
+      "anchors": [
+        {
+          "artifact": "use-api-keys-_Qqurcxx.js",
+          "start": 349,
+          "end": 434,
+          "sha256": "137e9ab1f03bb6aac4eaa6649357b60ea6007ddf0343e6cd659dc4383182ae37",
+          "literal": "/portunex/api-keys"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.keys.query",
+      "record_id": "portunex.apikeys.api.collection",
+      "path": "/portunex/api-keys",
+      "aspect": "pagination",
+      "statement": "For non-admin mode the page passes offset and limit to the user-key list hook. The shared pagination hook starts at page 1 with page size 10 and computes offset as (page-1)*size; these are UI defaults.",
+      "anchors": [
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16759,
+          "end": 16796,
+          "sha256": "f8858a6930eb0e474419d9c736b1446e1cd1dc2f0582fe80a068e940fa3d2d42",
+          "literal": "Ls({offset:u,limit:o},!s)"
+        },
+        {
+          "artifact": "use-api-keys-_Qqurcxx.js",
+          "start": 1129,
+          "end": 1229,
+          "sha256": "19f2b6f85abcffacf48461e7d10bdf83224044d51e574d0cdb9f42eb35751b50",
+          "literal": "c.list(e)"
+        },
+        {
+          "artifact": "use-pagination-DHRgEu59.js",
+          "start": 6015,
+          "end": 6098,
+          "sha256": "11ad1831db6a3d9f20b1105f6ad71b03e097a07aa21c11156342290e7b2d25b5",
+          "literal": "defaultPageSize:t=10"
+        },
+        {
+          "artifact": "use-pagination-DHRgEu59.js",
+          "start": 2265,
+          "end": 2295,
+          "sha256": "930c6543c234b155484149c1a35e10e756d74f5707e844a4340c4a373b9f581b",
+          "literal": "return(t-1)*e"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.keys.envelope",
+      "record_id": "portunex.apikeys.api.collection",
+      "path": "/portunex/api-keys",
+      "aspect": "response_field",
+      "statement": "The page chooses the user or admin query result by role and consumes api_keys and total. This establishes client-consumed fields, not a complete key item schema or permission contract.",
+      "anchors": [
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16797,
+          "end": 16842,
+          "sha256": "87b0fa741ce0863153ccea787b97fd0099a4ec311c62bf18cc54f616e472fdab",
+          "literal": "W=s?R.data:$.data"
+        },
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16938,
+          "end": 16982,
+          "sha256": "513785d1ca46f802bd26fa9329f8b09f174fffca49c091f000022b79d30ccf07",
+          "literal": "W?.api_keys"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.adminkeys.list",
+      "record_id": "portunex.apikeys.api.admin_collection",
+      "path": "/portunex/admin/api-keys",
+      "aspect": "method",
+      "statement": "The administrative key list calls get with params on /portunex/admin/api-keys; it does not use the user-owned collection.",
+      "anchors": [
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 2610,
+          "end": 2707,
+          "sha256": "b5911fa23c1a1b5c594e1bb5a3e81cfc75fc8776a104d3fd3ca62216c3017a2b",
+          "literal": "/portunex/admin/api-keys"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.adminkeys.query",
+      "record_id": "portunex.apikeys.api.admin_collection",
+      "path": "/portunex/admin/api-keys",
+      "aspect": "pagination",
+      "statement": "Admin mode supplies offset/limit plus optional user_id/id converted by parseInt base 10, then calls the admin hook. Server validation, sorting and filter semantics are unverified.",
+      "anchors": [
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16633,
+          "end": 16758,
+          "sha256": "bf0636b4b1f2b3a8a6376573ac63046e92d7edccf1061ab1c9291e264493cd3c",
+          "literal": "user_id:parseInt"
+        },
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16759,
+          "end": 16796,
+          "sha256": "f8858a6930eb0e474419d9c736b1446e1cd1dc2f0582fe80a068e940fa3d2d42",
+          "literal": "R=Ts(F,s)"
+        },
+        {
+          "artifact": "use-api-keys-_Qqurcxx.js",
+          "start": 2998,
+          "end": 3106,
+          "sha256": "443f6722499a7dc5836cc4489e262fc72eb2843c0822a047d93e6462dd799a3a",
+          "literal": "o.apiKeys.list(e)"
+        },
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 2610,
+          "end": 2707,
+          "sha256": "b5911fa23c1a1b5c594e1bb5a3e81cfc75fc8776a104d3fd3ca62216c3017a2b",
+          "literal": "/portunex/admin/api-keys"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.adminkeys.envelope",
+      "record_id": "portunex.apikeys.api.admin_collection",
+      "path": "/portunex/admin/api-keys",
+      "aspect": "response_field",
+      "statement": "Admin mode selects R.data and the page consumes api_keys and total; missing-field UI fallbacks are not a wire validation rule.",
+      "anchors": [
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16797,
+          "end": 16842,
+          "sha256": "87b0fa741ce0863153ccea787b97fd0099a4ec311c62bf18cc54f616e472fdab",
+          "literal": "W=s?R.data:$.data"
+        },
+        {
+          "artifact": "_dashboard.api-keys-BWN_eIKN.js",
+          "start": 16938,
+          "end": 16982,
+          "sha256": "513785d1ca46f802bd26fa9329f8b09f174fffca49c091f000022b79d30ccf07",
+          "literal": "W?.total"
+        },
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 2610,
+          "end": 2707,
+          "sha256": "b5911fa23c1a1b5c594e1bb5a3e81cfc75fc8776a104d3fd3ca62216c3017a2b",
+          "literal": "/portunex/admin/api-keys"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.adminkeys.bearer",
+      "record_id": "portunex.apikeys.api.admin_collection",
+      "path": "/portunex/admin/api-keys",
+      "aspect": "credentials",
+      "statement": "Administrative key calls share the Authorization Bearer interceptor; actual administrator authorization and cross-user isolation require isolated server tests.",
+      "anchors": [
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 2610,
+          "end": 2707,
+          "sha256": "b5911fa23c1a1b5c594e1bb5a3e81cfc75fc8776a104d3fd3ca62216c3017a2b",
+          "literal": "/portunex/admin/api-keys"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36956,
+          "end": 37047,
+          "sha256": "7565925ba09c3018662c6f20fc46fb874643240afaa7ca692dcba152ffd635fc",
+          "literal": "e.headers.Authorization=`Bearer ${t}`"
+        }
+      ]
+    }
+  ]
+}

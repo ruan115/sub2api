@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "id": "portunex.wire.users.20260913",
+  "artifact_manifest_id": "portunex.static-wire.20260913",
+  "observations": [
+    {
+      "id": "portunex.wire.me.method",
+      "record_id": "portunex.users.api.me",
+      "path": "/portunex/users/me",
+      "aspect": "method",
+      "statement": "The current-user helper calls the shared client's get method for /portunex/users/me and returns response.data; no separate current-session endpoint was found in this reviewed chain.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3893,
+          "end": 3964,
+          "sha256": "d6e370db625e5f30f88b1c5ab4217c456744e9ed57de975bfe14118223bee0cf",
+          "literal": "/portunex/users/me"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.me.bootstrap",
+      "record_id": "portunex.users.api.me",
+      "path": "/portunex/users/me",
+      "aspect": "credentials",
+      "statement": "Refresh skips getMe when no stored token exists; otherwise the shared client sends Authorization Bearer. This is a token-based client bootstrap, not evidence that the server uses the synthetic cookie session route.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 7710,
+          "end": 7827,
+          "sha256": "87849fcec41343bfb8688ec9c2233f1d1c80695fbaa267db9d998a8798205869",
+          "literal": "if(!i.get())"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36956,
+          "end": 37047,
+          "sha256": "7565925ba09c3018662c6f20fc46fb874643240afaa7ca692dcba152ffd635fc",
+          "literal": "e.headers.Authorization=`Bearer ${t}`"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.me.user",
+      "record_id": "portunex.users.api.me",
+      "path": "/portunex/users/me",
+      "aspect": "response_field",
+      "statement": "The returned getMe body is assigned directly as the user and its role drives admin preloading. Complete user fields, authorization and error semantics remain unknown.",
+      "anchors": [
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 3893,
+          "end": 3964,
+          "sha256": "d6e370db625e5f30f88b1c5ab4217c456744e9ed57de975bfe14118223bee0cf",
+          "literal": "/portunex/users/me"
+        },
+        {
+          "artifact": "auth-store-C1tFGCSg.js",
+          "start": 7803,
+          "end": 7896,
+          "sha256": "0592c926e0bfb373f6820d2f7a7622407fe348b48e5ccc25f2643a40310c2f2f",
+          "literal": "user:r"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.users.list",
+      "record_id": "portunex.users.api.admin_collection",
+      "path": "/portunex/admin/users",
+      "aspect": "method",
+      "statement": "The admin users list helper calls get with a params object and returns Axios response.data. The same collection also has create, so this observation covers list only.",
+      "anchors": [
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 50,
+          "end": 142,
+          "sha256": "d7a95b1ac149c4376d484c20521edf904a47005d326a117eb57b604ba824c2da",
+          "literal": "/portunex/admin/users"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.users.query",
+      "record_id": "portunex.users.api.admin_collection",
+      "path": "/portunex/admin/users",
+      "aspect": "pagination",
+      "statement": "The users page builds offset/limit, optional trimmed id/email filters, and an unmodified role filter when role is not all; id is converted with Number. The hook forwards that object to users.list. These are observed client parameters, not tested server filtering or default behavior.",
+      "anchors": [
+        {
+          "artifact": "_dashboard.users-PbTCLCMc.js",
+          "start": 2271,
+          "end": 2408,
+          "sha256": "431d628241e6c30064f8f0f1afbb777b2f246ee2cdc30d80c65bfde9219bcd82",
+          "literal": "offset:Y,limit:y"
+        },
+        {
+          "artifact": "_dashboard.users-PbTCLCMc.js",
+          "start": 2456,
+          "end": 2486,
+          "sha256": "558b9768e24953b7c716938cb2122f68eda756f2c7087f2a5487f85f07a9779c",
+          "literal": "Ns(Ue"
+        },
+        {
+          "artifact": "use-users-Dh47o_nl.js",
+          "start": 379,
+          "end": 478,
+          "sha256": "f20ffe46ef8990a1e102a81c5032c2057df425e910be6b39ab2f28aaaf1f89f8",
+          "literal": "n.users.list(e)"
+        },
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 50,
+          "end": 142,
+          "sha256": "d7a95b1ac149c4376d484c20521edf904a47005d326a117eb57b604ba824c2da",
+          "literal": "/portunex/admin/users"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.users.envelope",
+      "record_id": "portunex.users.api.admin_collection",
+      "path": "/portunex/admin/users",
+      "aspect": "response_field",
+      "statement": "The users page consumes users and total directly from the query result, defaulting to empty array/zero. UI fallback values do not prove the server permits missing fields.",
+      "anchors": [
+        {
+          "artifact": "_dashboard.users-PbTCLCMc.js",
+          "start": 2529,
+          "end": 2573,
+          "sha256": "76abac9a0a02a0d28c5aa6a6b516072ae25d01002a509322a82cbbd81107f62c",
+          "literal": "ae?.users"
+        },
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 50,
+          "end": 142,
+          "sha256": "d7a95b1ac149c4376d484c20521edf904a47005d326a117eb57b604ba824c2da",
+          "literal": "/portunex/admin/users"
+        }
+      ]
+    },
+    {
+      "id": "portunex.wire.users.bearer",
+      "record_id": "portunex.users.api.admin_collection",
+      "path": "/portunex/admin/users",
+      "aspect": "credentials",
+      "statement": "The admin users helper imports the shared client, whose interceptor adds Authorization Bearer from localStorage. Client role-gating is not proof of server-side administrator enforcement.",
+      "anchors": [
+        {
+          "artifact": "admin-qirDwatZ.js",
+          "start": 50,
+          "end": 142,
+          "sha256": "d7a95b1ac149c4376d484c20521edf904a47005d326a117eb57b604ba824c2da",
+          "literal": "/portunex/admin/users"
+        },
+        {
+          "artifact": "client-AMiB-Ne-.js",
+          "start": 36956,
+          "end": 37047,
+          "sha256": "7565925ba09c3018662c6f20fc46fb874643240afaa7ca692dcba152ffd635fc",
+          "literal": "e.headers.Authorization=`Bearer ${t}`"
+        },
+        {
+          "artifact": "_dashboard.users-PbTCLCMc.js",
+          "start": 2456,
+          "end": 2486,
+          "sha256": "558b9768e24953b7c716938cb2122f68eda756f2c7087f2a5487f85f07a9779c",
+          "literal": "role===\"admin\""
+        }
+      ]
+    }
+  ]
+}
