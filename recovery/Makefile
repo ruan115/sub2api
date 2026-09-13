@@ -6,9 +6,15 @@ NPM ?= npm
 
 .PHONY: check test contracts protocol help
 
-.PHONY: check-demo backend-demo web-demo runtime-smoke runtime-shutdown-gate
+.PHONY: check-demo backend-demo web-demo runtime-smoke runtime-shutdown-gate postgres-integration
 
 check-demo: check backend-demo web-demo runtime-smoke
+
+# Explicit opt-in only: the helper requires PORTUNEX_TEST_PG_BIN and refuses DSNs.
+# Missing runtime is a failure, not a successful skipped integration gate.
+postgres-integration:
+	cd ../backend && go test -tags portunex_integration -race -count=1 -timeout=180s ./internal/portunex/...
+	cd ../backend && go vet -tags portunex_integration ./internal/portunex/...
 
 runtime-smoke:
 	cd ../execution-plane/isthmus-runtime && $(BUN) run test/loopback.smoke.ts

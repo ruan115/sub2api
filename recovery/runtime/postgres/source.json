@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "version": "18.6",
+  "archive_url": "https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.gz",
+  "checksum_url": "https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.gz.sha256",
+  "archive_bytes": 29598283,
+  "archive_sha256": "983ee554ec53dbeb9b70797bef9fcf4e67e117e7e48ca1463cc80b3ff8e8ff3f",
+  "configure_flags": ["--without-icu", "--without-readline"],
+  "extra_extension": "citext",
+  "extension_version": "1.8",
+  "test_locale": "C",
+  "test_encoding": "UTF8",
+  "production_build_parity_verified": false,
+  "system_install": false,
+  "automatic_download": false
+}

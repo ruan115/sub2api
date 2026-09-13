@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "portunex.synthetic_postgres.local_build",
+  "built_on": "2026-09-14",
+  "runtime_id": "postgres-18.6-runtime.GSZYGx",
+  "source_sha256": "983ee554ec53dbeb9b70797bef9fcf4e67e117e7e48ca1463cc80b3ff8e8ff3f",
+  "platform": "Darwin arm64",
+  "compiler": "Apple clang 14.0.3",
+  "postgres_version": "18.6",
+  "citext_version": "1.8",
+  "configure_flags": ["--without-icu", "--without-readline"],
+  "test_transport": "private Unix socket only; TCP disabled",
+  "test_locale": "C",
+  "test_encoding": "UTF8",
+  "system_software_replaced": false,
+  "production_database_accessed": false,
+  "original_legacy_server_executed": false,
+  "reproducible_binary_build_verified": false,
+  "files": [
+    {"path": "bin/postgres", "bytes": 9473781, "sha256": "de4e2735fc7fdfeee48062a5c427edc4a8fa64e0a534b2099141634bf3786fa7"},
+    {"path": "bin/initdb", "bytes": 191747, "sha256": "a1508bee7c0fbd5e332b0011e5aca9a5f7be86460d2bff338dac988eab5dea6c"},
+    {"path": "bin/psql", "bytes": 549569, "sha256": "024f1c63e3e66a2cf7444612f4cab40ca656c9d13729babcba60ca6ac633cb2a"},
+    {"path": "bin/pg_config", "bytes": 57430, "sha256": "ae8a26011280a57034991dce3042090e78882382307a1c0b95c0427d5d2cc6dc"},
+    {"path": "lib/citext.dylib", "bytes": 36329, "sha256": "825c721d388a05d4d93fdf35d5bf7ffcf6c857750505b7bf5ab8c419d67073f5"},
+    {"path": "share/extension/citext.control", "bytes": 173, "sha256": "da2a338a0a3eae999cbff9d70df9f8763fc53f77fcec9dced7b9c63d9ea1f541"}
+  ]
+}
