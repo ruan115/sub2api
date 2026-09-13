@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "id": "portunex.providers",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_admin",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/admin-qirDwatZ.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains provider OAuth path literals, including provider-specific start/complete/refresh paths and two import paths."
+    },
+    {
+      "id": "frontend_providers",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/use-providers-HlnM_V-l.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the listed provider inventory, health, statistics and batch-operation path literals."
+    },
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists provider pages."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists providers, provider_credentials and provider_refusal_events among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.providers.api.oauth_claude_start",
+        "path": "/portunex/admin/oauth/claude/start",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["OAuth request fields, redirect configuration, state handling and authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_claude_complete",
+        "path": "/portunex/admin/oauth/claude/complete",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Callback payload, credential sealing and error behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_claude_refresh",
+        "path": "/portunex/admin/oauth/claude/refresh",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Refresh trigger, credential lifecycle, egress and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_openai_start",
+        "path": "/portunex/admin/oauth/openai/start",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["OAuth request fields, redirect configuration, state handling and authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_openai_complete",
+        "path": "/portunex/admin/oauth/openai/complete",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Callback payload, credential sealing and error behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_openai_refresh",
+        "path": "/portunex/admin/oauth/openai/refresh",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Refresh trigger, credential lifecycle, egress and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_openai_import",
+        "path": "/portunex/admin/oauth/openai/import",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Import format, secret handling, duplicate semantics and authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_gemini_start",
+        "path": "/portunex/admin/oauth/gemini/start",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["OAuth request fields, redirect configuration, state handling and authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_gemini_complete",
+        "path": "/portunex/admin/oauth/gemini/complete",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Callback payload, credential sealing and error behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_gemini_refresh",
+        "path": "/portunex/admin/oauth/gemini/refresh",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Refresh trigger, credential lifecycle, egress and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_antigravity_start",
+        "path": "/portunex/admin/oauth/antigravity/start",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["OAuth request fields, redirect configuration, state handling and authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_antigravity_complete",
+        "path": "/portunex/admin/oauth/antigravity/complete",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Callback payload, credential sealing and error behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_antigravity_refresh",
+        "path": "/portunex/admin/oauth/antigravity/refresh",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Refresh trigger, credential lifecycle, egress and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.oauth_antigravity_import",
+        "path": "/portunex/admin/oauth/antigravity/import",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Import format, secret handling, duplicate semantics and authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_collection",
+        "path": "/portunex/admin/providers",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Supported operations, filters, pagination and administrator authorization are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_by_id",
+        "path": "/portunex/admin/providers/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Identifier type, supported operations and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_credential",
+        "path": "/portunex/admin/providers/{id}/credential",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Credential reveal/write behavior, encryption and audit requirements are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_health",
+        "path": "/portunex/admin/providers/{id}/health",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Health trigger semantics, upstream effects, timing and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_stats",
+        "path": "/portunex/admin/providers/{id}/stats",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Metrics, aggregation windows and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_window_states_reset",
+        "path": "/portunex/admin/providers/{id}/window-states/reset",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Reset scope, authorization, concurrency and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_import",
+        "path": "/portunex/admin/providers/import",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Import source, format, secret safety and duplicate behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_error_types",
+        "path": "/portunex/admin/providers/error-types",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Error taxonomy and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_window_summary",
+        "path": "/portunex/admin/providers/window-summary",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Window aggregation semantics and response schema are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_batch_delete",
+        "path": "/portunex/admin/providers/batch/delete",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Batch selector, atomicity, idempotency, authorization and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_batch_health",
+        "path": "/portunex/admin/providers/batch/health",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Batch health trigger semantics, queueing and response behavior are unknown."]
+      },
+      {
+        "id": "portunex.providers.api.admin_batch_window_states_reset",
+        "path": "/portunex/admin/providers/batch/window-states/reset",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_providers"],
+        "unknowns": ["Batch reset selector, atomicity, authorization and audit behavior are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.providers.page.collection",
+        "path": "/dashboard/providers",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Table columns, controls, role guard and data-loading behavior require UI fixtures."]
+      },
+      {
+        "id": "portunex.providers.page.stats",
+        "path": "/dashboard/providers/:id/stats",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Route parameter validation, chart behavior and authorization are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.providers.database_group.provider_credentials",
+        "name": "provider inventory and credential business group",
+        "kind": "business_table_group",
+        "tables": ["providers", "provider_credentials", "provider_refusal_events"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Exact provider records, credential encryption, OAuth material, lifecycle states and constraints are unknown."]
+      },
+      {
+        "id": "portunex.providers.database_group.health_sticky",
+        "name": "provider health, window-state and sticky-routing business group",
+        "kind": "business_table_group",
+        "tables": [],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["This cross-domain grouping has no additional table ownership here; health windows and sticky-routing tables are owned by quotas. Reset semantics, indexes and retention are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Provider path discovery does not authorize credential import or refresh against a real provider.",
+    "No provider credential, OAuth token, proxy or external request is stored in this repository."
+  ]
+}

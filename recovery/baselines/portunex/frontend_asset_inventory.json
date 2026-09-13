@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "id": "portunex.frontend.static_asset_inventory",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "recovery_analysis",
+      "kind": "analysis_document",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:47-91",
+      "observed": "The Caddy static root, 23-route manifest, observed page paths and API path groups were recorded from a read-only static analysis."
+    },
+    {
+      "id": "static_asset_audit",
+      "kind": "static_asset_inventory",
+      "source": "analysis: Portunex frontend static-asset audit (2026-09-13)",
+      "observed": "Exact chunk names below were recorded from compiled assets without executing JavaScript or making requests."
+    }
+  ],
+  "discovered": {
+    "static_root": "/opt/gateway/public",
+    "route_manifest": "/opt/gateway/public/assets/manifest-c2858866.js:1",
+    "asset_count": 150,
+    "javascript_asset_count": 135,
+    "css_asset_count": 2,
+    "chunks": [
+      {
+        "path": "/opt/gateway/public/assets/auth-store-C1tFGCSg.js:1",
+        "path_groups": ["/portunex/auth/*", "/portunex/users/me"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/oauth-qrEG9ZVM.js:1",
+        "path_groups": ["/portunex/oauth/*"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/oidc.authorize-BTx8fNJX.js:1",
+        "path_groups": ["/oidc/authorize/approve"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/use-api-keys-_Qqurcxx.js:1",
+        "path_groups": ["/portunex/api-keys"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/admin-qirDwatZ.js:1",
+        "path_groups": ["/portunex/admin/users", "/portunex/admin/api-keys", "/portunex/admin/sessions", "/portunex/admin/oauth/*"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/use-providers-HlnM_V-l.js:1",
+        "path_groups": ["/portunex/admin/providers"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/_dashboard.logs-CbdjChuI.js:1",
+        "path_groups": ["/portunex/admin/usage", "/portunex/users/me/usage"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/_dashboard._index-DDfncEXf.js:1",
+        "path_groups": ["/portunex/admin/stats", "/portunex/users/me/stats"],
+        "evidence": ["static_asset_audit"]
+      },
+      {
+        "path": "/opt/gateway/public/assets/use-request-logs-Dv2pSNpg.js:1",
+        "path_groups": ["/portunex/admin/request-logs", "/portunex/request-logs"],
+        "evidence": ["static_asset_audit"]
+      }
+    ]
+  },
+  "unknowns": [
+    "Compiled chunks are evidence of path literals and client behavior only; they do not establish complete HTTP methods, bodies, authorization or responses.",
+    "Source maps, original TS/TSX, build configuration and package lockfiles were not recovered.",
+    "This baseline is metadata only; no production static bundle is copied into the repository."
+  ]
+}

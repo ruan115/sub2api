@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-09-13",
+  "evidence_level": "read_only_metadata",
+  "source": "docs/analysis/online-stack-recovery-2026-09-13.md",
+  "components": {
+    "portunex_backend": {
+      "language_evidence": "Rust/Axum/SQLx/Tonic markers in stripped ELF",
+      "binary_size": 45810904,
+      "binary_sha256": "5097f64d5042f1e43178df14decfb94ead48e96c16a4fae15bfc1fea14d7014a",
+      "original_source_recovered": false,
+      "local_binary_preservation_verified": false
+    },
+    "portunex_web": {
+      "framework_evidence": "React 19.2.1 and React Router manifest",
+      "route_record_count": 23,
+      "javascript_file_count": 135,
+      "css_file_count": 2,
+      "source_maps_recovered": false,
+      "local_assets_preservation_verified": false
+    },
+    "portunex_database": {
+      "server_version": "18.6",
+      "table_count": 36,
+      "column_count": 387,
+      "foreign_key_count": 28,
+      "migration_count": 28,
+      "business_rows_read": false,
+      "consistent_backup_verified": false
+    },
+    "isthmus": {
+      "image_digest": "sha256:07133e34395851570153cee759bf42d247b28a9401a53f2ab02f38171f0fcc94",
+      "image_architecture": "linux/amd64",
+      "image_size": 384091990,
+      "container_count": 77,
+      "all_runtime_binaries_verified": false,
+      "extracted_bundle_size": 1050518,
+      "extracted_bundle_sha256": "8a3f86d446e52785d9361644e49ef8cabba9d820f31cbaf1c2c1da625996f92a",
+      "extracted_bundle_preserved_by_foundation": false,
+      "extracted_bundle_exclusion": "Credential-shaped URL pattern hit; original left untouched pending review",
+      "text_manifest": "recovery/baselines/isthmus/manifest.json"
+    }
+  },
+  "limits": [
+    "Metadata snapshot is not a data backup or a deployable recovered system",
+    "Discovery and offline tests do not prove production business behavior",
+    "No production secrets, records or archives included"
+  ]
+}

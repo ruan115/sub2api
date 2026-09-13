@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "portunex.catalog",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_catalog_pages",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists model-alias and provider-type-pricing pages."
+    },
+    {
+      "id": "frontend_catalog_api",
+      "kind": "static_asset",
+      "source": "analysis: static extraction from Portunex dashboard catalog chunks (2026-09-13)",
+      "observed": "Static extraction recorded the listed model-alias path literals; exact chunk filenames were not retained in this catalog."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists model_aliases and vendor_models among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.catalog.api.admin_model_aliases",
+        "path": "/portunex/admin/model-aliases",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_catalog_api"],
+        "unknowns": ["Supported operations, alias schema, pagination and authorization are unknown."]
+      },
+      {
+        "id": "portunex.catalog.api.admin_model_alias_by_id",
+        "path": "/portunex/admin/model-aliases/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_catalog_api"],
+        "unknowns": ["Identifier type, mutation semantics and response schema are unknown."]
+      },
+      {
+        "id": "portunex.catalog.api.admin_model_alias_by_alias",
+        "path": "/portunex/admin/model-aliases/by-alias/{alias}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_catalog_api"],
+        "unknowns": ["Alias normalization, lookup behavior, authorization and response schema are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.catalog.page.model_aliases",
+        "path": "/dashboard/model-aliases",
+        "status": "discovered",
+        "evidence": ["frontend_catalog_pages"],
+        "unknowns": ["Visible alias fields, forms, validation and role guard require UI fixtures."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.catalog.database_group.models_aliases",
+        "name": "model catalog and alias business group",
+        "kind": "business_table_group",
+        "tables": ["model_aliases", "vendor_models"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Canonical model IDs, alias uniqueness, provider relationships, columns and constraints are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Static path literals do not prove model-selection or routing precedence.",
+    "No model catalog rows or pricing records have been recovered."
+  ]
+}

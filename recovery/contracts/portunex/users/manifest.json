@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "id": "portunex.users",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_auth_store",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/auth-store-C1tFGCSg.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the current-user path literal."
+    },
+    {
+      "id": "frontend_admin",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/admin-qirDwatZ.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the listed administrative user path literals."
+    },
+    {
+      "id": "frontend_dashboard_logs",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/_dashboard.logs-CbdjChuI.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the current-user usage path literal."
+    },
+    {
+      "id": "frontend_dashboard_index",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/_dashboard._index-DDfncEXf.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the current-user statistics path literal."
+    },
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists the user-management pages."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists users among 36 public-schema tables; role-table names were not listed."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.users.api.me",
+        "path": "/portunex/users/me",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["Authentication requirements, response fields and cache behavior are unknown."]
+      },
+      {
+        "id": "portunex.users.api.me_usage",
+        "path": "/portunex/users/me/usage",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_dashboard_logs"],
+        "unknowns": ["Usage time range, units, pagination and response schema are unknown."]
+      },
+      {
+        "id": "portunex.users.api.me_stats",
+        "path": "/portunex/users/me/stats",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_dashboard_index"],
+        "unknowns": ["Statistics aggregation windows, authorization and response schema are unknown."]
+      },
+      {
+        "id": "portunex.users.api.admin_collection",
+        "path": "/portunex/admin/users",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Supported operations, pagination, filtering and administrator authorization are unknown."]
+      },
+      {
+        "id": "portunex.users.api.admin_by_id",
+        "path": "/portunex/admin/users/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Identifier type, supported operations and response schema are unknown."]
+      },
+      {
+        "id": "portunex.users.api.admin_role",
+        "path": "/portunex/admin/users/{id}/role",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Role vocabulary, authorization, request body and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.users.api.admin_reset_password",
+        "path": "/portunex/admin/users/{id}/reset-password",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Reset delivery, token lifecycle, auditing and response behavior are unknown."]
+      },
+      {
+        "id": "portunex.users.api.admin_password",
+        "path": "/portunex/admin/users/{id}/password",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Password mutation semantics, policy, authorization and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.users.api.admin_stats",
+        "path": "/portunex/admin/users/{id}/stats",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Aggregation logic, interval controls and response schema are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.users.page.collection",
+        "path": "/dashboard/users",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Table columns, role guard and data-loading behavior require UI fixtures."]
+      },
+      {
+        "id": "portunex.users.page.stats",
+        "path": "/dashboard/users/:id/stats",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Route parameter validation, chart behavior and authorization are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.users.database_group.users_roles",
+        "name": "users and role/permission business group",
+        "kind": "business_table_group",
+        "tables": ["users"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Role model, foreign keys, uniqueness rules and mapping to current Sub2API users are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "No current Sub2API user/auth table may be treated as the Portunex source of truth from this discovery alone.",
+    "The frontend evidence does not prove backend authorization enforcement.",
+    "The administrative /portunex/admin/users/{id}/points path is cataloged by the billing module because its points-ledger semantics are not a users-domain contract."
+  ]
+}

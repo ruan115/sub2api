@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "isthmus-static-text-2026-09-12",
+  "entries": [
+    {"path": "recovered/messages.proto", "size": 4433, "sha256": "c582535f7620ea07a7a2de5957f50903a97eabe13579ce739127ff9e6329a369", "source": "Strict static template decoding from the recovered Bun module"},
+    {"path": "recovered/body-rewrite-worker.js", "size": 17527, "sha256": "6446866bec9be89a27a098fac97eeb4ac7880e12999a42db9923805afebc7fa0", "source": "Static base64 extraction; reference only; never executed"},
+    {"path": "scripts-source/Dockerfile.vm", "size": 5098, "sha256": "b51a59151f6b89f43a6afd4fe0cb6fcbc4894a78922b5b71ac730e62ef61d991", "source": "Read-only copy of deployment Dockerfile"},
+    {"path": "scripts-source/bin/deploy-vm.sh", "size": 85030, "sha256": "f303608b82cd87bba610c2a3d640218b299a0e2f0b37c2d4d010ffbcb6d7bac8", "source": "Read-only deployment script; do not run"},
+    {"path": "scripts-source/bin/isthmus-supervisor.sh", "size": 16688, "sha256": "1f78315cecb82c20d81cf95eaa28d19814653b751a85dc368584b553afd20f74", "source": "Read-only supervisor script; do not run"},
+    {"path": "scripts-source/bin/lib/backend.sh", "size": 26802, "sha256": "cc8e5aa6ea56abd86e6b37314e3926c532d4524289d5e4eb28ea4bc211cdb142", "source": "Read-only provider contract script"},
+    {"path": "scripts-source/bin/lib/backend/docker.sh", "size": 54776, "sha256": "4cd3d23a0d8c5c5358d9ec5f8312240bfa0debaf9d657926aa326f3e58a2df83", "source": "Read-only Docker implementation script"},
+    {"path": "scripts-source/bin/lib/pkg.sh", "size": 6882, "sha256": "0e1503ac3339d276f241e3c6fdd725ced795f22088c2fc089bc3d2e30757623e", "source": "Read-only package lifecycle script; no package or keyfile copied"},
+    {"path": "scripts-source/bin/lib/install.sh", "size": 22307, "sha256": "138faf72534925f13d87d13ffd8281fd64fb4d7cf10e354d1149a26b796f3f35", "source": "Read-only install script; do not run"}
+  ]
+}

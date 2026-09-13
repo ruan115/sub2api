@@ -1,0 +1,14 @@
+{
+  "name": "@sub2api/isthmus-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.9",
+  "description": "Offline protocol foundation and deterministic fake transports for isthmus recovery.",
+  "scripts": {
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": "1.3.9"
+  }
+}

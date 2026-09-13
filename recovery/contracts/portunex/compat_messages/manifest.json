@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "portunex.compat_messages",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_compat_paths",
+      "kind": "static_asset",
+      "source": "analysis: static extraction from Portunex compiled frontend assets (2026-09-13)",
+      "observed": "Static code referenced /v1/messages and /v1/models; no request was sent and no complete request/response schema was extracted."
+    },
+    {
+      "id": "server_runtime_inventory",
+      "kind": "server_inventory",
+      "source": "analysis: online Portunex Rust binary markers Axum/SQLx/Tonic (2026-09-13)",
+      "observed": "The online backend was identified as a stripped Rust ELF; this does not prove individual compatibility endpoint behavior."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.compat_messages.api.messages",
+        "path": "/v1/messages",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_compat_paths"],
+        "unknowns": ["HTTP method, authentication, streaming semantics, model routing, error envelope and billing behavior are unknown."]
+      },
+      {
+        "id": "portunex.compat_messages.api.models",
+        "path": "/v1/models",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_compat_paths"],
+        "unknowns": ["HTTP method, authentication, returned model schema and cache behavior are unknown."]
+      }
+    ],
+    "protocols": [
+      {
+        "id": "portunex.compat_messages.protocol.anthropic_shape",
+        "name": "possible Anthropic-compatible message surface",
+        "kind": "protocol_surface",
+        "status": "discovered",
+        "evidence": ["frontend_compat_paths", "server_runtime_inventory"],
+        "unknowns": ["The frontend path names alone do not establish wire compatibility with any public Anthropic API version."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Do not route existing callers to this recovered surface until golden request/response fixtures exist.",
+    "No relationship to CCMAX gateway transforms or execution-plane dispatch is proven by these literals."
+  ]
+}

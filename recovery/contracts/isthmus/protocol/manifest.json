@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "isthmus.protocol",
+  "owner": "isthmus",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "messages_proto_provenance",
+      "kind": "recovered_proto_provenance",
+      "source": "execution-plane/isthmus-runtime/contracts/grpc/provenance.json",
+      "observed": "The checked-in provenance records a byte-identical extracted isthmus.v1.Messages proto, SHA-256 c582535f7620ea07a7a2de5957f50903a97eabe13579ce739127ff9e6329a369, and static-source scope only."
+    },
+    {
+      "id": "isthmus_runtime_readme",
+      "kind": "recovery_documentation",
+      "source": "execution-plane/isthmus-runtime/README.md",
+      "observed": "The first-phase runtime module documents known application-frame tags and explicitly excludes listeners, credentials, lifecycle and live compatibility verification."
+    }
+  ],
+  "discovered": {
+    "protocols": [
+      {
+        "id": "isthmus.protocol.grpc.messages",
+        "name": "isthmus.v1.Messages recovered gRPC contract",
+        "kind": "grpc_proto",
+        "status": "discovered",
+        "evidence": ["messages_proto_provenance"],
+        "unknowns": ["The catalog indexes the canonical proto but does not prove a generated binding, listener, authentication model or live server compatibility."]
+      },
+      {
+        "id": "isthmus.protocol.websocket.application_frames",
+        "name": "isthmus application WebSocket frame surface",
+        "kind": "websocket_application_frame",
+        "status": "discovered",
+        "evidence": ["isthmus_runtime_readme"],
+        "unknowns": ["Connection state, text frames, fragmentation, compression, event ordering, cancellation and backpressure remain unverified."]
+      }
+    ]
+  },
+  "unknowns": [
+    "This index does not copy the proto; execution-plane/isthmus-runtime/contracts/grpc/messages.proto is the sole canonical copy.",
+    "No network listener, CLI/PTY, credential flow, MCP service or deployment is implemented by the catalog."
+  ]
+}

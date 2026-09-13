@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "artifact": {
+    "path": "messages.proto",
+    "sha256": "c582535f7620ea07a7a2de5957f50903a97eabe13579ce739127ff9e6329a369",
+    "size_bytes": 4433
+  },
+  "source": {
+    "kind": "statically-extracted-embedded-proto",
+    "path": "/Users/ruanyang/My-project/api/z/isthmus-static-analysis.HjfIFn/recovered/messages.proto",
+    "reference_bundle": "isthmus.readable.mjs",
+    "reference_lines": {
+      "start": 30558,
+      "end": 30660
+    }
+  },
+  "preserved_on": "2026-09-13",
+  "preservation": "Byte-identical copy of the extracted proto; package, comments and field numbers are unchanged.",
+  "verification_scope": "Static source and byte integrity only. No generated client, listener or live compatibility verification is included."
+}

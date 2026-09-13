@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "id": "portunex.usage",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_dashboard_logs",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/_dashboard.logs-CbdjChuI.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains usage-related path literals; no request was sent."
+    },
+    {
+      "id": "frontend_dashboard_index",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/_dashboard._index-DDfncEXf.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains dashboard statistics path literals; no request was sent."
+    },
+    {
+      "id": "frontend_request_logs",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/use-request-logs-Dv2pSNpg.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains user and administrative request-log path literals."
+    },
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists dashboard usage and request-log pages."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists usage_records, reasoning_extraction_dynamic_rules and kv_store among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.usage.api.admin_usage",
+        "path": "/portunex/admin/usage",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_dashboard_logs"],
+        "unknowns": ["Time filters, dimensions, units, authorization and response schema are unknown."]
+      },
+      {
+        "id": "portunex.usage.api.admin_stats",
+        "path": "/portunex/admin/stats",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_dashboard_index"],
+        "unknowns": ["Aggregation windows, cache behavior, authorization and response schema are unknown."]
+      },
+      {
+        "id": "portunex.usage.api.admin_request_logs",
+        "path": "/portunex/admin/request-logs",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_request_logs"],
+        "unknowns": ["Filters, pagination, redaction and authorization are unknown."]
+      },
+      {
+        "id": "portunex.usage.api.admin_request_log_by_trace",
+        "path": "/portunex/admin/request-logs/{traceId}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_request_logs"],
+        "unknowns": ["Trace-ID format, body redaction, access control and response schema are unknown."]
+      },
+      {
+        "id": "portunex.usage.api.user_request_logs",
+        "path": "/portunex/request-logs",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_request_logs"],
+        "unknowns": ["Filters, pagination, user scoping and redaction are unknown."]
+      },
+      {
+        "id": "portunex.usage.api.user_request_log_by_trace",
+        "path": "/portunex/request-logs/{traceId}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_request_logs"],
+        "unknowns": ["Trace-ID format, ownership check, body redaction and response schema are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.usage.page.logs",
+        "path": "/dashboard/logs",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Displayed metrics, date controls, role guard and loading behavior require UI fixtures."]
+      },
+      {
+        "id": "portunex.usage.page.request_logs",
+        "path": "/dashboard/request-logs",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Table columns, filters, redaction and data-loading behavior require UI fixtures."]
+      },
+      {
+        "id": "portunex.usage.page.request_log_by_trace",
+        "path": "/dashboard/request-logs/:traceId",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Trace rendering, access guard and redaction behavior are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.usage.database_group.usage",
+        "name": "usage accounting and aggregation business group",
+        "kind": "business_table_group",
+        "tables": ["usage_records"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Usage units, write timing, aggregation jobs, foreign keys, columns and constraints are unknown."]
+      },
+      {
+        "id": "portunex.usage.database_group.request_audit",
+        "name": "request trace and audit-log business group",
+        "kind": "business_table_group",
+        "tables": [],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["The observed schema inventory does not name a request-log table; trace identity, payload retention/redaction, indexing and access rules are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Observed paths do not prove the durable usage or billing transaction model.",
+    "No real request body, response body, usage row or audit record has been retained."
+  ]
+}

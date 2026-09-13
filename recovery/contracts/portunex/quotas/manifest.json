@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "id": "portunex.quotas",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_quota_pages",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists the window-configuration page."
+    },
+    {
+      "id": "frontend_quota_api",
+      "kind": "static_asset",
+      "source": "analysis: static extraction from Portunex dashboard window-configuration chunk (2026-09-13)",
+      "observed": "Static extraction recorded the listed window-config path literals; exact request shapes were not retained."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists provider_window_configs, provider_window_resets, provider_window_states and sticky_routing among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.quotas.api.admin_window_configs",
+        "path": "/portunex/admin/window-configs",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_quota_api"],
+        "unknowns": ["Supported operations, configuration fields, priority and authorization are unknown."]
+      },
+      {
+        "id": "portunex.quotas.api.admin_window_config_by_id",
+        "path": "/portunex/admin/window-configs/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_quota_api"],
+        "unknowns": ["Identifier type, mutation semantics, validation and response schema are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.quotas.page.window_configs",
+        "path": "/dashboard/window-configs",
+        "status": "discovered",
+        "evidence": ["frontend_quota_pages"],
+        "unknowns": ["Visible fields, validation, admin role guard and data-loading behavior require UI fixtures."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.quotas.database_group.window_quotas",
+        "name": "window quota and rate/concurrency policy business group",
+        "kind": "business_table_group",
+        "tables": ["provider_window_configs", "provider_window_resets", "provider_window_states"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Window algorithm, units, reset schedule, concurrency behavior, columns and constraints are unknown."]
+      },
+      {
+        "id": "portunex.quotas.database_group.sticky",
+        "name": "sticky selection/state business group",
+        "kind": "business_table_group",
+        "tables": ["sticky_routing"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Sticky key composition, TTL, isolation scope, columns and links to provider selection are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Path discovery does not establish the quota algorithm or its enforcement point.",
+    "The current execution-plane worker leases are not inferred to be Portunex window quotas."
+  ]
+}

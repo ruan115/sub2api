@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "portunex.redemption",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists redemption_codes, redemption_records and redemption_attempts in the public schema."
+    }
+  ],
+  "discovered": {
+    "database_entities": [
+      {
+        "id": "portunex.redemption.database_group.redemption",
+        "name": "redemption-code business group",
+        "kind": "business_table_group",
+        "tables": ["redemption_codes", "redemption_records", "redemption_attempts"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Code format, claim idempotency, failed-attempt policy, points/subscription effects and transaction rules are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "No redemption HTTP endpoint or page is evidenced by the current static extraction.",
+    "The known table names do not establish a compatible redemption algorithm or authorization rule."
+  ]
+}

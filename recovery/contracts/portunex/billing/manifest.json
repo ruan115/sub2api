@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "id": "portunex.billing",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_admin_points",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/admin-qirDwatZ.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains an administrative user-points path literal."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists orders, payment_channels, points_details and four subscription tables among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.billing.api.admin_user_points",
+        "path": "/portunex/admin/users/{id}/points",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin_points"],
+        "unknowns": ["Points units, positive/negative adjustment rules, ledger idempotency, authorization and response schema are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.billing.database_group.points_ledger",
+        "name": "points and billing-ledger business group",
+        "kind": "business_table_group",
+        "tables": ["orders", "payment_channels", "points_details"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Transaction boundaries, currency/units, balance snapshots, columns and retention are unknown."]
+      },
+      {
+        "id": "portunex.billing.database_group.subscriptions",
+        "name": "subscription and consumption-window business group",
+        "kind": "business_table_group",
+        "tables": ["subscription_plans", "user_subscriptions", "subscription_usage_states", "subscription_consume_details"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Plan vocabulary, renewal/payment integration, usage allocation, columns and constraints are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "No billing, payment, subscription or points API beyond the observed administrative path has been asserted.",
+    "No balances, invoices, payment details or secrets are present in this catalog."
+  ]
+}

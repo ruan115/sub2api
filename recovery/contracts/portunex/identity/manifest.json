@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "id": "portunex.identity",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_auth_store",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/auth-store-C1tFGCSg.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the listed Portunex authentication path literals; no request was sent."
+    },
+    {
+      "id": "frontend_oauth",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/oauth-qrEG9ZVM.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the listed third-party login path literals; no request was sent."
+    },
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists the authentication page paths."
+    },
+    {
+      "id": "frontend_admin",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/admin-qirDwatZ.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains administrative session path literals; no request was sent."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists users, api_keys, auth_sessions, magic_link_tokens, oauth_identities and oauth_states among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.identity.api.check_email",
+        "path": "/portunex/auth/check-email",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["HTTP method, request fields, rate limits, authentication and response shape require captured-contract evidence."]
+      },
+      {
+        "id": "portunex.identity.api.login",
+        "path": "/portunex/auth/login",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["Credential format, session-cookie behavior, error envelope and MFA behavior are not yet verified."]
+      },
+      {
+        "id": "portunex.identity.api.logout",
+        "path": "/portunex/auth/logout",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["HTTP method, CSRF behavior, cookie invalidation and response shape are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.register",
+        "path": "/portunex/auth/register",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["Registration fields, verification requirements, role defaults and error behavior are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.magic_link",
+        "path": "/portunex/auth/magic-link",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["Delivery provider, request schema, expiration and replay protection are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.magic_link_verify",
+        "path": "/portunex/auth/magic-link/verify",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_auth_store"],
+        "unknowns": ["Verification token transport, one-time-use behavior and resulting session semantics are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.linuxdo_start",
+        "path": "/portunex/oauth/linuxdo/start",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_oauth"],
+        "unknowns": ["Redirect parameters, state storage, scopes and client configuration are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.oauth_callback",
+        "path": "/portunex/oauth/callback",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_oauth"],
+        "unknowns": ["Provider callback validation, state handling, identity linking and final redirect are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.admin_sessions",
+        "path": "/portunex/admin/sessions",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Supported operations, filters, privacy controls and administrator authorization are unknown."]
+      },
+      {
+        "id": "portunex.identity.api.admin_session_by_id",
+        "path": "/portunex/admin/sessions/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Identifier type, revocation behavior, auditing and response schema are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.identity.page.auth",
+        "path": "/auth",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Rendered fields, loaders, guards and server-side fallback behavior require asset/behavior fixtures."]
+      },
+      {
+        "id": "portunex.identity.page.magic",
+        "path": "/auth/magic",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Rendered fields, token handoff and success/failure navigation are unknown."]
+      },
+      {
+        "id": "portunex.identity.page.oauth_callback",
+        "path": "/auth/oauth/callback",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Callback query handling, errors and final navigation are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.identity.database_group.authentication",
+        "name": "user authentication and session business group",
+        "kind": "business_table_group",
+        "tables": ["auth_sessions", "magic_link_tokens", "oauth_identities", "oauth_states"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Columns, constraints, password/session hashing, indexes and deletion/expiry behavior are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "The online backend is a stripped Rust binary; frontend paths do not establish the server implementation.",
+    "No real login, OAuth exchange, database row or secret has been read by this catalog."
+  ]
+}

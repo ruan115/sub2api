@@ -135,6 +135,13 @@ docs/*
 !docs/prd/
 docs/prd/*
 !docs/prd/claude-execution-plane-v1.md
+!docs/prd/online-stack-recovery-v1.md
+!docs/analysis/
+docs/analysis/*
+!docs/analysis/online-stack-recovery-2026-09-13.md
+!docs/plans/
+docs/plans/*
+!docs/plans/online-stack-recovery-v1.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
@@ -151,3 +158,17 @@ output/
 .vite/
 .playwright-cli/
 execution-plane/.local-build/
+
+# Recovery tooling: tests are source; private evidence is never a Git artifact.
+!recovery/tests/
+!recovery/tests/**
+recovery/.private/
+recovery/**/__pycache__/
+recovery/**/*.pyc
+portunex-web/node_modules/
+portunex-web/dist/
+!portunex-web/tests/
+!portunex-web/tests/**
+portunex-web/coverage/
+execution-plane/isthmus-runtime/node_modules/
+execution-plane/isthmus-runtime/dist/

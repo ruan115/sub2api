@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package isthmus.v1;
+
+// Byte-transparent /v1/messages transport. The request carries the raw
+// Anthropic JSON body and the responses carry verbatim upstream bytes — this
+// mirrors the HTTP and WebSocket transports exactly. isthmus NEVER reshapes the
+// body; all splicing happens later in the MITM body relay. The single per-turn
+// core (`http/messages/prepareStartedTurn.ts` over `prepareTurn.ts`) is shared
+// across all three transports.
+service Messages {
+  // Non-streaming: drive one turn and return the accumulated JSON Message (or an
+  // Error carrying the verbatim upstream / local-transport failure). Mirrors the
+  // HTTP `stream:false` path (`buildJsonResponse`).
+  rpc Create(CreateRequest) returns (CreateResponse);
+
+  // Streaming: drive one turn and emit a ResponseStart, then verbatim upstream
+  // SSE chunks, then the server half-closes the stream (or a single Error
+  // event). Mirrors the HTTP `stream:true` passthrough and the WS event stream.
+  rpc CreateStream(CreateRequest) returns (stream StreamEvent);
+}
+
+message CreateRequest {
+  // Raw Anthropic POST /v1/messages request body (JSON bytes), forwarded
+  // verbatim — the same payload the HTTP POST body / WS REQUEST frame carries.
+  bytes body = 1;
+  // Optional anthropic-beta tokens to APPEND to the forwarded upstream request
+  // header (parity with the WS BETA frame). Charset-validated server-side, so a
+  // malformed token can never inject a header.
+  repeated string beta = 2;
+  // Optional anthropic-beta tokens to REMOVE from the forwarded upstream request
+  // header (parity with the WS BETA_REMOVE frame). Exact match, genuine tokens
+  // included; removal is applied AFTER the appends, so a token named in both
+  // lists ends up removed. Removing every token deletes the header.
+  repeated string beta_remove = 3;
+  // Optional beta-passthrough (REPLACE), parity with the WS BETA_REPLACE frame.
+  // A message field so its PRESENCE is meaningful (proto3 repeated fields have no
+  // presence): when SET — even with an empty `tokens` list — the forwarded
+  // anthropic-beta header is REBUILT as the two mandatory genuine tokens followed
+  // by `tokens` (deduped), discarding the genuine value, so the result always
+  // begins with `claude-code-20250219,oauth-2025-04-20`. Applied BEFORE `beta` /
+  // `beta_remove`. When UNSET the genuine header is preserved. Charset-validated
+  // server-side.
+  BetaPassthrough beta_passthrough = 4;
+  // Optional exact `anthropic-usage-limit` value to PIN on the forwarded upstream
+  // request header (parity with the WS USAGE_LIMIT frame and the HTTP
+  // `anthropic-usage-limit` request header). When non-empty the MITM overwrites
+  // the child's own header value, or ADDS the header when the child sent none;
+  // empty / unset (the default) leaves the child's header untouched.
+  // Charset-validated server-side (a malformed value is ignored).
+  string usage_limit = 5;
+}
+
+// Passthrough (REPLACE) beta tokens. Wrapped in a message (rather than a bare
+// `repeated string`) so the field carries presence: an empty `tokens` list with
+// the message present is a valid "replace with just the mandatory tokens"
+// request, distinct from omitting the field entirely.
+message BetaPassthrough {
+  repeated string tokens = 1;
+}
+
+// Metadata for a 2xx upstream response start (status line + headers), mirroring
+// the WS RESPONSE_START event and the HTTP response's status/headers.
+message ResponseStart {
+  uint32 status = 1;
+  string status_text = 2;
+  map<string, string> headers = 3;
+}
+
+// Any non-2xx outcome — validation / Tier-2 local 502·400 / Tier-3 upstream
+// 4xx·5xx passed through verbatim — carrying the original status + headers +
+// body. Mirrors the WS ERROR event.
+message Error {
+  uint32 status = 1;
+  string status_text = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+}
+
+// A fully-accumulated non-streaming response: the single JSON Message body plus
+// its 2xx status/headers.
+message Message {
+  uint32 status = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+}
+
+message CreateResponse {
+  oneof outcome {
+    Message ok = 1;
+    Error error = 2;
+  }
+}
+
+message StreamEvent {
+  oneof kind {
+    ResponseStart start = 1;
+    // A client-facing SSE chunk (normally upstream-verbatim; terminal refusal
+    // recovery may synthesize message_stop). Raw bytes — no base64.
+    bytes chunk = 2;
+    Error error = 3;
+  }
+}

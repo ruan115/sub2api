@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "portunex.oidc",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_oidc_authorize",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/oidc.authorize-BTx8fNJX.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains a POST path literal for OIDC approval; no request was sent."
+    },
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists the OIDC authorization and forbidden page paths."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists oidc_clients, oidc_authorization_codes, oidc_consents and oidc_tokens among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.oidc.api.authorize_approve",
+        "path": "/oidc/authorize/approve",
+        "method": "POST",
+        "status": "discovered",
+        "evidence": ["frontend_oidc_authorize"],
+        "unknowns": ["Approval body, client authentication, consent persistence, redirect response and error schema are not verified."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.oidc.page.authorize",
+        "path": "/oidc/authorize",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Authorization query validation, consent UI, client lookup and redirect rules are unknown."]
+      },
+      {
+        "id": "portunex.oidc.page.forbidden",
+        "path": "/403",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["The conditions and response/navigation behavior that select this page are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.oidc.database_group.oidc",
+        "name": "OIDC client, consent, authorization and token business group",
+        "kind": "business_table_group",
+        "tables": ["oidc_clients", "oidc_authorization_codes", "oidc_consents", "oidc_tokens"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Columns, client/grant semantics, token storage, key material, indexes and retention rules are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Only one OIDC POST route and two frontend pages are currently evidenced.",
+    "Issuer configuration, discovery endpoints, token endpoints and cryptographic keys are not cataloged."
+  ]
+}

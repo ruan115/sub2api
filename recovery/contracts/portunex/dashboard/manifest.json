@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "portunex.dashboard",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists the landing and dashboard index pages and 23 total route records."
+    },
+    {
+      "id": "frontend_dashboard_index",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/_dashboard._index-DDfncEXf.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains dashboard client data-fetching behavior, without a live request."
+    }
+  ],
+  "discovered": {
+    "pages": [
+      {
+        "id": "portunex.dashboard.page.landing",
+        "path": "/",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Rendered content, static asset dependencies, cache headers and fallback behavior require UI fixtures."]
+      },
+      {
+        "id": "portunex.dashboard.page.index",
+        "path": "/dashboard",
+        "status": "discovered",
+        "evidence": ["frontend_routes", "frontend_dashboard_index"],
+        "unknowns": ["Role guard, visible metrics, query parameters and data-loading behavior are unknown."]
+      }
+    ],
+    "assets": [
+      {
+        "id": "portunex.dashboard.asset_bundle",
+        "name": "Portunex compiled React static bundle",
+        "kind": "static_asset_bundle",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Original TypeScript source, package lock, build configuration and source maps have not been recovered."]
+      }
+    ]
+  },
+  "unknowns": [
+    "The static route manifest does not establish SSR, loader/action behavior or backend route coverage.",
+    "The original React source is not represented by this discovery catalog."
+  ]
+}

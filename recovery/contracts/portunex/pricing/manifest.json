@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "id": "portunex.pricing",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_pricing_pages",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists model-alias pricing, provider-type pricing and user-facing model-pricing pages."
+    },
+    {
+      "id": "frontend_pricing_api",
+      "kind": "static_asset",
+      "source": "analysis: static extraction from Portunex dashboard pricing chunks (2026-09-13)",
+      "observed": "Static extraction recorded the listed pricing path literals; exact request shapes were not retained."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists model_alias_pricing, provider_model_pricing and provider_type_pricing among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.pricing.api.admin_model_alias_pricings",
+        "path": "/portunex/admin/model-alias-pricings",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_api"],
+        "unknowns": ["Supported operations, price units, effective dates and authorization are unknown."]
+      },
+      {
+        "id": "portunex.pricing.api.admin_model_alias_pricing_by_id",
+        "path": "/portunex/admin/model-alias-pricings/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_api"],
+        "unknowns": ["Identifier type, mutation semantics, validation and response schema are unknown."]
+      },
+      {
+        "id": "portunex.pricing.api.admin_provider_type_pricings",
+        "path": "/portunex/admin/provider-type-pricings",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_api"],
+        "unknowns": ["Supported operations, provider-type vocabulary and priority rules are unknown."]
+      },
+      {
+        "id": "portunex.pricing.api.admin_provider_type_pricing_by_id",
+        "path": "/portunex/admin/provider-type-pricings/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_api"],
+        "unknowns": ["Identifier type, mutation semantics, validation and response schema are unknown."]
+      },
+      {
+        "id": "portunex.pricing.api.models",
+        "path": "/portunex/pricing/models",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_api"],
+        "unknowns": ["Audience, model list fields, effective price resolution and cache behavior are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.pricing.page.model_alias_pricing",
+        "path": "/dashboard/model-alias-pricing",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_pages"],
+        "unknowns": ["Displayed price fields, forms, validation and role guard require UI fixtures."]
+      },
+      {
+        "id": "portunex.pricing.page.provider_type_pricing",
+        "path": "/dashboard/provider-type-pricing",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_pages"],
+        "unknowns": ["Displayed price fields, forms, validation and role guard require UI fixtures."]
+      },
+      {
+        "id": "portunex.pricing.page.models",
+        "path": "/dashboard/pricing",
+        "status": "discovered",
+        "evidence": ["frontend_pricing_pages"],
+        "unknowns": ["Audience, price display rules and data-loading behavior are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.pricing.database_group.pricing",
+        "name": "model-alias and provider-type pricing business group",
+        "kind": "business_table_group",
+        "tables": ["model_alias_pricing", "provider_model_pricing", "provider_type_pricing"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Price precision, priority, snapshotting, effective-date rules, columns and constraints are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "Pricing literals do not establish billing formulas or settlement behavior.",
+    "No production price values are present in the catalog."
+  ]
+}

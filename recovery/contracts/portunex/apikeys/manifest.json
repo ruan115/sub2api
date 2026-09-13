@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "id": "portunex.apikeys",
+  "owner": "portunex",
+  "status": "discovered",
+  "evidence": [
+    {
+      "id": "frontend_api_keys",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/use-api-keys-_Qqurcxx.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the listed user API-key path literals."
+    },
+    {
+      "id": "frontend_admin",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/admin-qirDwatZ.js:1 (2026-09-13)",
+      "observed": "Compiled frontend code contains the listed administrative API-key path literals."
+    },
+    {
+      "id": "frontend_routes",
+      "kind": "static_asset",
+      "source": "analysis: /opt/gateway/public/assets/manifest-c2858866.js:1 (2026-09-13)",
+      "observed": "React Router manifest lists API-key pages."
+    },
+    {
+      "id": "server_pg_inventory",
+      "kind": "server_inventory",
+      "source": "docs/analysis/online-stack-recovery-2026-09-13.md:110-131",
+      "observed": "The read-only PostgreSQL inventory lists api_keys among 36 public-schema tables."
+    }
+  ],
+  "discovered": {
+    "api_paths": [
+      {
+        "id": "portunex.apikeys.api.collection",
+        "path": "/portunex/api-keys",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_api_keys"],
+        "unknowns": ["Supported operations, key reveal policy, pagination and authorization are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.by_id",
+        "path": "/portunex/api-keys/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_api_keys"],
+        "unknowns": ["Identifier type, supported operations and response schema are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.rotate",
+        "path": "/portunex/api-keys/{id}/rotate",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_api_keys"],
+        "unknowns": ["Rotation overlap, secret display, idempotency and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.settings",
+        "path": "/portunex/api-keys/{id}/settings",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_api_keys"],
+        "unknowns": ["Settings fields, default policy and update semantics are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.stats",
+        "path": "/portunex/api-keys/{id}/stats",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_api_keys"],
+        "unknowns": ["Metrics, time filters, authorization and response schema are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.admin_collection",
+        "path": "/portunex/admin/api-keys",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Administrative operations, filters and authorization are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.admin_by_id",
+        "path": "/portunex/admin/api-keys/{id}",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Identifier type, operations and response schema are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.admin_activate",
+        "path": "/portunex/admin/api-keys/{id}/activate",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["State transition rules, authorization and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.admin_deactivate",
+        "path": "/portunex/admin/api-keys/{id}/deactivate",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["State transition rules, in-flight request handling and audit behavior are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.admin_settings",
+        "path": "/portunex/admin/api-keys/{id}/settings",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Administrative settings schema and precedence over user settings are unknown."]
+      },
+      {
+        "id": "portunex.apikeys.api.admin_stats",
+        "path": "/portunex/admin/api-keys/{id}/stats",
+        "method": "unknown",
+        "status": "discovered",
+        "evidence": ["frontend_admin"],
+        "unknowns": ["Metrics aggregation, authorization and response schema are unknown."]
+      }
+    ],
+    "pages": [
+      {
+        "id": "portunex.apikeys.page.collection",
+        "path": "/dashboard/api-keys",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Client validation, displayed columns and key-secret handling require UI fixtures."]
+      },
+      {
+        "id": "portunex.apikeys.page.stats",
+        "path": "/dashboard/api-keys/:id/stats",
+        "status": "discovered",
+        "evidence": ["frontend_routes"],
+        "unknowns": ["Route guard, chart behavior and statistics fields are unknown."]
+      }
+    ],
+    "database_entities": [
+      {
+        "id": "portunex.apikeys.database_group.keys",
+        "name": "API-key lifecycle and settings business group",
+        "kind": "business_table_group",
+        "tables": ["api_keys"],
+        "status": "discovered",
+        "evidence": ["server_pg_inventory"],
+        "unknowns": ["Secret storage, hashing, expiry, permissions, indexes and links to usage records are unknown."]
+      }
+    ]
+  },
+  "unknowns": [
+    "This catalog must not be used to recreate or import API-key secrets.",
+    "The static client evidence does not prove the exact key-management HTTP methods."
+  ]
+}
