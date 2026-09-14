@@ -35,7 +35,7 @@ web-demo:
 check: test contracts protocol
 
 test:
-	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tooling $(PYTHON) -m unittest discover -s tests -t . -v
+	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tooling:.. $(PYTHON) -m unittest discover -s tests -t . -v
 
 contracts:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tooling $(PYTHON) -m recoverykit contracts --root contracts
