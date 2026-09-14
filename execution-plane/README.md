@@ -68,8 +68,14 @@ constructs MySQL/KMS/PKI/recipient and serves the complete RPC graph; schema mig
 an explicit deployment step. CCMAX single-account creation and
 migrated Session Key reauthorization use the new bridge behind explicit configuration;
 the trusted CCMAX proxy-reservation grant/revoke records, immutable proxy-occupancy fences and execution-plane projection are implemented. A single commit-ordered CCMAX outbox checkpoint now routes authority, onboarding and lifecycle events; durable onboarding triggers are claimed by a bounded coordinator that retries until the projected slot has a healthy live assignment, then invokes the atomic workflow/proxy-lease starter. CCMAX now exposes an authenticated, transactionally audited exact-retry resolver for the configured consumer's current blocked event; it cannot skip or acknowledge an event. Fenced private route publication and duplicate-aware drain/archive batches are implemented under task 5.5c; production rollout remains gated. CCMAX gateway request dispatch,
-host-agent data-plane serving, Claude CLI runtime image and deployment
-automation are also incomplete.
+host-agent production data-plane serving, Claude CLI runtime image and deployment
+automation are also incomplete. DP1 now implements a non-listening, injectable
+host data-plane service with mTLS, authoritative binding/lease validation,
+bidirectional streaming and an existing-worker adapter. Actual two-hop loopback
+tests use synthetic workers and ephemeral credentials; production snapshot and
+ticket-source wiring, gateway dispatch and real CLI remain gated. See
+[`internal/dataplane/README.md`](internal/dataplane/README.md) for its exact scope
+and `make dataplane-check` for the local test entry.
 
 ## Fixed proxy egress boundary
 
