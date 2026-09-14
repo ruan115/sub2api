@@ -1,5 +1,7 @@
 # Portunex + isthmus 整套线上系统恢复 V1
 
+> 2026-09-14：本 PRD 的“整套 Portunex 业务恢复”范围已被用户后续明确收敛为 CCMAX 维护与旧版前端外观恢复。登录/用户权限/计费沿用 Sub2API；不删除 CCMAX 已有能力。Portunex 业务开发暂停，历史记录保留；当前执行 [CCMAX 恢复计划](../plans/ccmax-frontend-recovery-v1.md)。
+
 编写日期：2026-09-13。状态：**恢复底座与本地管理演示已交付；执行端异常停机、完整R0/R1与旧业务兼容尚未完成**。
 
 目标仓库/分支：当前 `sub2api` / `codex/claude-execution-plane-v1`。

@@ -1,5 +1,7 @@
 # 整套恢复实施清单与验收台账
 
+> 2026-09-14 范围变更：用户明确维护 CCMAX，产品登录/权限/计费沿用 Sub2API；仅沿用服务器旧前端外观，不继续重建 Portunex 整套业务。下文是历史台账，不再作为自动推进 Portunex R3–R7 的授权。当前以 [CCMAX 恢复计划](ccmax-frontend-recovery-v1.md) 为准；既有代码/提交保留，isthmus 与执行面工作继续独立验收。
+
 日期：2026-09-13。状态：恢复底座和本地管理演示已交付；执行端异常停机门槛、完整R0/R1与旧业务兼容尚未完成。
 PRD：`docs/prd/online-stack-recovery-v1.md`。
 
