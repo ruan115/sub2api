@@ -256,8 +256,9 @@ func (s *RuntimeServer) Execute(stream grpc.BidiStreamingServer[executionv1.Work
 	if _, err := s.guard.Authorize(begin.GetExecutionTicket(), "messages"); err != nil {
 		return authorizationError(err)
 	}
-	if !sameString(begin.GetRequest().GetAccountId(), s.identity.AccountID) {
-		return status.Error(codes.PermissionDenied, "execution account is not assigned to this worker")
+	request := begin.GetRequest()
+	if err := s.validateExecutionIdentity(request.GetAccountId(), request.GetSlotId(), request.GetExecutionEpoch(), request.GetRouteGeneration()); err != nil {
+		return err
 	}
 	return executionError(s.executor.Execute(&authorizedExecutionStream{
 		stream: stream,
@@ -272,8 +273,9 @@ func (s *RuntimeServer) CountTokens(ctx context.Context, request *executionv1.Wo
 	if _, err := s.guard.Authorize(request.GetExecutionTicket(), "count_tokens"); err != nil {
 		return nil, authorizationError(err)
 	}
-	if !sameString(request.GetRequest().GetAccountId(), s.identity.AccountID) {
-		return nil, status.Error(codes.PermissionDenied, "execution account is not assigned to this worker")
+	input := request.GetRequest()
+	if err := s.validateExecutionIdentity(input.GetAccountId(), input.GetSlotId(), input.GetExecutionEpoch(), input.GetRouteGeneration()); err != nil {
+		return nil, err
 	}
 	response, err := s.executor.CountTokens(ctx, request.GetRequest())
 	if err != nil {
@@ -283,6 +285,19 @@ func (s *RuntimeServer) CountTokens(ctx context.Context, request *executionv1.Wo
 		return nil, status.Error(codes.Internal, "count_tokens executor returned no response")
 	}
 	return &executionv1.WorkerRuntimeServiceCountTokensResponse{Response: response}, nil
+}
+
+func (s *RuntimeServer) validateExecutionIdentity(accountID, slotID string, epoch, routeGeneration uint64) error {
+	if !sameString(accountID, s.identity.AccountID) || !sameString(slotID, s.identity.SlotID) || epoch != s.identity.Epoch {
+		return status.Error(codes.PermissionDenied, "execution request is not assigned to this worker")
+	}
+	// Tickets bind this worker's identity, not the route generation. The host
+	// resolver must check generation against authoritative assignment state;
+	// this boundary only rejects requests that omit that routing fence entirely.
+	if routeGeneration == 0 {
+		return status.Error(codes.InvalidArgument, "execution route generation is required")
+	}
+	return nil
 }
 
 func executionError(err error) error {

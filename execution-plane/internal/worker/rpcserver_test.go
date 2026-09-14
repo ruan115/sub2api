@@ -146,7 +146,10 @@ func TestWorkerGRPCRedactsUnclassifiedExecutorErrors(t *testing.T) {
 
 	_, err := fixture.client.CountTokens(ctx, &executionv1.WorkerRuntimeServiceCountTokensRequest{
 		ExecutionTicket: fixture.ticket(t, "count_tokens"),
-		Request:         &executionv1.CountTokensRequest{AccountId: fixture.identity.AccountID},
+		Request: &executionv1.CountTokensRequest{
+			AccountId: fixture.identity.AccountID, SlotId: fixture.identity.SlotID,
+			ExecutionEpoch: fixture.identity.Epoch, RouteGeneration: 1,
+		},
 	})
 	if status.Code(err) != codes.Internal || strings.Contains(err.Error(), "secret-value") {
 		t.Fatalf("count_tokens leaked executor error: %v", err)
@@ -162,6 +165,7 @@ func TestWorkerGRPCRedactsUnclassifiedExecutorErrors(t *testing.T) {
 				ExecutionTicket: fixture.ticket(t, "messages"),
 				Request: &executionv1.BeginExecution{
 					RequestId: "request-redaction", AccountId: fixture.identity.AccountID,
+					SlotId: fixture.identity.SlotID, ExecutionEpoch: fixture.identity.Epoch, RouteGeneration: 1,
 				},
 			},
 		},
@@ -232,7 +236,8 @@ func TestWorkerGRPCActivationHealthAndCountTokens(t *testing.T) {
 	count, err := fixture.client.CountTokens(ctx, &executionv1.WorkerRuntimeServiceCountTokensRequest{
 		ExecutionTicket: fixture.ticket(t, "count_tokens"),
 		Request: &executionv1.CountTokensRequest{
-			AccountId: fixture.identity.AccountID,
+			AccountId: fixture.identity.AccountID, SlotId: fixture.identity.SlotID,
+			ExecutionEpoch: fixture.identity.Epoch, RouteGeneration: 1,
 		},
 	})
 	if err != nil {
@@ -258,6 +263,7 @@ func TestWorkerGRPCExecuteRequiresAuthorizedBegin(t *testing.T) {
 				ExecutionTicket: fixture.ticket(t, "messages"),
 				Request: &executionv1.BeginExecution{
 					RequestId: "request-1", AccountId: fixture.identity.AccountID,
+					SlotId: fixture.identity.SlotID, ExecutionEpoch: fixture.identity.Epoch, RouteGeneration: 1,
 					Mode: executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API,
 				},
 			},

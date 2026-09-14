@@ -348,7 +348,12 @@ func (r *Runtime) Health(ctx context.Context) (*executionv1.HealthResponse, erro
 	return r.client.Health(ctx, &executionv1.HealthRequest{ExecutionTicket: rawTicket})
 }
 
-func (r *Runtime) CountTokens(ctx context.Context, requestID string, body []byte) (*executionv1.CountTokensResponse, error) {
+// Deprecated: local fixture helper. Data-plane callers must use
+// CountTokensRequest with an explicit authoritative account and selected mode.
+func (r *Runtime) CountTokens(ctx context.Context, requestID string, body []byte, routeGeneration uint64) (*executionv1.CountTokensResponse, error) {
+	if routeGeneration == 0 {
+		return nil, status.Error(codes.InvalidArgument, "route generation is required")
+	}
 	rawTicket, err := r.issue(ctx, "count_tokens")
 	if err != nil {
 		return nil, err
@@ -358,6 +363,7 @@ func (r *Runtime) CountTokens(ctx context.Context, requestID string, body []byte
 		Request: &executionv1.CountTokensRequest{
 			RequestId: requestID, AccountId: r.identity.AccountID,
 			Mode: executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API, AnthropicRequestJson: append([]byte(nil), body...),
+			SlotId: r.identity.SlotID, ExecutionEpoch: r.identity.Epoch, RouteGeneration: routeGeneration,
 		},
 	})
 	if err != nil {
@@ -366,7 +372,12 @@ func (r *Runtime) CountTokens(ctx context.Context, requestID string, body []byte
 	return response.GetResponse(), nil
 }
 
-func (r *Runtime) Execute(ctx context.Context, requestID string, body []byte) ([]*executionv1.ExecuteResponse, error) {
+// Deprecated: local fixture helper that collects the entire response. New
+// data-plane forwarding must use OpenExecution and preserve streaming/backpressure.
+func (r *Runtime) Execute(ctx context.Context, requestID string, body []byte, routeGeneration uint64) ([]*executionv1.ExecuteResponse, error) {
+	if routeGeneration == 0 {
+		return nil, status.Error(codes.InvalidArgument, "route generation is required")
+	}
 	rawTicket, err := r.issue(ctx, "messages")
 	if err != nil {
 		return nil, err
@@ -381,6 +392,7 @@ func (r *Runtime) Execute(ctx context.Context, requestID string, body []byte) ([
 			Request: &executionv1.BeginExecution{
 				RequestId: requestID, AccountId: r.identity.AccountID,
 				Mode: executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API, AnthropicRequestJson: append([]byte(nil), body...),
+				SlotId: r.identity.SlotID, ExecutionEpoch: r.identity.Epoch, RouteGeneration: routeGeneration,
 			},
 		}},
 	}); err != nil {

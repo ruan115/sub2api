@@ -131,7 +131,10 @@ func TestDockerWorkerFakeUpstreamE2E(t *testing.T) {
 	}
 
 	body := []byte(`{"model":"claude-fake-1","messages":[{"role":"user","content":"hello isolated worker"}]}`)
-	responses, err := runtime.Execute(ctx, "request-e2e-messages", body)
+	// This isolated fixture owns the first route assignment; production must
+	// obtain its current generation from the authoritative assignment instead.
+	const fixtureRouteGeneration uint64 = 1
+	responses, err := runtime.Execute(ctx, "request-e2e-messages", body, fixtureRouteGeneration)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +151,7 @@ func TestDockerWorkerFakeUpstreamE2E(t *testing.T) {
 	if !strings.Contains(string(responseBody), "fake-anthropic-response") || !strings.HasPrefix(upstreamRequestID, "msg_e2e_") {
 		t.Fatalf("unexpected worker response: id=%q body=%s", upstreamRequestID, responseBody)
 	}
-	count, err := runtime.CountTokens(ctx, "request-e2e-count", body)
+	count, err := runtime.CountTokens(ctx, "request-e2e-count", body, fixtureRouteGeneration)
 	if err != nil {
 		t.Fatal(err)
 	}
