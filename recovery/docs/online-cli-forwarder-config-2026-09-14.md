@@ -2,6 +2,8 @@
 
 日期：2026-09-14。目标服务器：216.106.185.119。范围：CCMAX 复刻所需的转发、isthmus 与 Claude CLI 参数；不恢复第二套登录、权限或计费权威。
 
+后续核查见 [第二轮事实核查](online-cli-forwarder-clarifications-2026-09-14.md)：已补上本机 blue 路由、默认 pipeline 的 1h 缓存处理、CLI 设置优先级、实际窗口规则与全部核心 JS 哈希。本页保留第一轮时间点的观察及当时未知项；第二轮中已闭合的部分以新报告为准。
+
 ## 结论与证据等级
 
 存在可在线上读取的配置，而且不只有 5m / 1h。最直接对应这一记忆的是运行中 Portunex 的 `PORTUNEX__ANTHROPIC__DOWNGRADE_1H_CACHE_TO_5M`，blue、green 两个进程的启动环境均为 `false`，与各自 Docker Config.Env 一致。不能由此推断每个请求最终使用 1h；它只证明没有通过这个启动配置开启 1h → 5m 降级。
