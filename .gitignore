@@ -142,6 +142,7 @@ docs/analysis/*
 !docs/plans/
 docs/plans/*
 !docs/plans/online-stack-recovery-v1.md
+!docs/plans/ccmax-frontend-recovery-v1.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md

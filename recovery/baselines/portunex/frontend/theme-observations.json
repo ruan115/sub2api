@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "kind": "ccmax.legacy_frontend.theme_observations",
+  "source": {
+    "path": "assets/root-C2_MaqGk.css",
+    "bytes": 162108,
+    "sha256": "696b58cfd2978fa27dc8a5834364a249ec38b928ddbd64012164d8638b238fdf"
+  },
+  "method": "PostCSS parse only; no plugins, stylesheet loading, JavaScript execution, DOM or network",
+  "parser_version": "8.5.28",
+  "visual_parity_verified": false,
+  "original_javascript_executed": false,
+  "notes": [
+    "Static declarations include RGB fallbacks and conditional OKLCH variants; retain at-rule conditions and browser cascade.",
+    "Inter is an observed font-family declaration, not proof that its font files are local or loaded.",
+    "These theme anchors are not a complete component or page reconstruction."
+  ],
+  "declarations": [
+    {
+      "selector": ":root,:host",
+      "conditions": [
+        "@layer theme"
+      ],
+      "property": "--font-sans",
+      "value": "\"Inter\",ui-sans-serif,system-ui,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\",\"Segoe UI Symbol\",\"Noto Color Emoji\"",
+      "start_byte": 2415,
+      "end_byte": 2544,
+      "sha256": "4a4de4cf0ab6ff0acdb40399134a12937a5f76991021e3d89b3bb616fd43c2bc"
+    },
+    {
+      "selector": ":root",
+      "conditions": [],
+      "property": "--radius",
+      "value": ".625rem",
+      "start_byte": 150195,
+      "end_byte": 150212,
+      "sha256": "208fc1ec4754dfd1c065e30337638866851f5ae69e9298dba8a7123da7beb394"
+    },
+    {
+      "selector": ":root",
+      "conditions": [],
+      "property": "--background",
+      "value": "rgb(255, 255, 255)",
+      "start_byte": 150212,
+      "end_byte": 150244,
+      "sha256": "72637e5002dc1ea2a355d065144afa34d59d7663dcc73ec887b790fe83f1bcd2"
+    },
+    {
+      "selector": ":root",
+      "conditions": [],
+      "property": "--foreground",
+      "value": "rgb(10, 10, 10)",
+      "start_byte": 150244,
+      "end_byte": 150273,
+      "sha256": "5a6ade38a96826fad24c2c17d87098a6fb8c070b92a1ac3252549aa05dd37f29"
+    },
+    {
+      "selector": ":root",
+      "conditions": [],
+      "property": "--card",
+      "value": "rgb(255, 255, 255)",
+      "start_byte": 150273,
+      "end_byte": 150299,
+      "sha256": "6ccc11c77572f76f938d862bdf2881b995c4e09622dfef65299833bb801c8360"
+    },
+    {
+      "selector": ":root",
+      "conditions": [],
+      "property": "--border",
+      "value": "rgb(229, 229, 229)",
+      "start_byte": 150694,
+      "end_byte": 150722,
+      "sha256": "6ce5b0817cd42d783d7a8b732cf2ddabe719f8d3f263a2e85fddbe1419113dbc"
+    },
+    {
+      "selector": ":root",
+      "conditions": [],
+      "property": "--sidebar",
+      "value": "rgb(250, 250, 250)",
+      "start_byte": 150909,
+      "end_byte": 150938,
+      "sha256": "7f4db90505d04a061db390c9d18b2c980fc2c70d3d2d7d8bdd49a9cdb34dd8f4"
+    },
+    {
+      "selector": ":root",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--background",
+      "value": "oklch(100% 0 0)",
+      "start_byte": 151287,
+      "end_byte": 151316,
+      "sha256": "77baa78f0f15574ff2572b27dfe2e711e7594ecec117b343732c335f508f5d5e"
+    },
+    {
+      "selector": ":root",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--foreground",
+      "value": "oklch(14.5% 0 0)",
+      "start_byte": 151316,
+      "end_byte": 151346,
+      "sha256": "2fc42b5aeb0ae1b3fd438f0b483f8003d040bdc2e6a948a8fc39bd8208b8e5b5"
+    },
+    {
+      "selector": ":root",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--card",
+      "value": "oklch(100% 0 0)",
+      "start_byte": 151346,
+      "end_byte": 151369,
+      "sha256": "5ff3e9733e3289f3e2a9a58ad3325b9ae1ec1f38ae2d85a60366e3ecc528fdee"
+    },
+    {
+      "selector": ":root",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--border",
+      "value": "oklch(92.2% 0 0)",
+      "start_byte": 151903,
+      "end_byte": 151929,
+      "sha256": "6b8845503e0153051ef80725a8fb7b1bce4ae8811cda79aa7445e4fdeb7fe3bf"
+    },
+    {
+      "selector": ":root",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--sidebar",
+      "value": "oklch(98.5% 0 0)",
+      "start_byte": 152713,
+      "end_byte": 152740,
+      "sha256": "419e645e30ff8c081e8296cab83fce6d8fc10d22ece0689a8f651daa3da583dd"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [],
+      "property": "--background",
+      "value": "rgb(10, 10, 10)",
+      "start_byte": 153049,
+      "end_byte": 153078,
+      "sha256": "7f186f942760bcdb75357ba21af95e371982188a63ba049d04b0c492a8b54b7f"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [],
+      "property": "--foreground",
+      "value": "rgb(250, 250, 250)",
+      "start_byte": 153078,
+      "end_byte": 153110,
+      "sha256": "90c47a31db387d4d00562b93be15e32bdf99934bfc346b6f41658bd8c747798f"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [],
+      "property": "--card",
+      "value": "rgb(23, 23, 23)",
+      "start_byte": 153110,
+      "end_byte": 153133,
+      "sha256": "d92a89bc1de100f92e0ce385f1cf216bcea470f6082b88581ce93014cda4c743"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [],
+      "property": "--border",
+      "value": "rgba(255, 255, 255, .1)",
+      "start_byte": 153531,
+      "end_byte": 153564,
+      "sha256": "fb9629c824aa62afb44b374170effd8103b4b465f779be5b7c6cb79c10bdd111"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [],
+      "property": "--sidebar",
+      "value": "rgb(23, 23, 23)",
+      "start_byte": 153759,
+      "end_byte": 153785,
+      "sha256": "cd3e225e21d0925ba5bfb9ea7fd5883c423b415b4411505070561f1b345e68b9"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--background",
+      "value": "oklch(14.5% 0 0)",
+      "start_byte": 154140,
+      "end_byte": 154170,
+      "sha256": "a49b3fc998a3aa90d2b01ff9c29a870bca4bbffeec1247468f2806d15fc33157"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--foreground",
+      "value": "oklch(98.5% 0 0)",
+      "start_byte": 154170,
+      "end_byte": 154200,
+      "sha256": "a8750d84c5ad0435f04f7554db2083983f6ecd2a3ce6cedc22e5d1a25ca6d49f"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--card",
+      "value": "oklch(20.5% 0 0)",
+      "start_byte": 154200,
+      "end_byte": 154224,
+      "sha256": "f2f5eee53f13d7ef59e29e049f2ec02f6773456ef3f8376c7d209dc5f34cc9eb"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--border",
+      "value": "oklch(100% 0 0/.1)",
+      "start_byte": 154766,
+      "end_byte": 154794,
+      "sha256": "b2bf1b8dddff51c59f068e2c2f6a96b44b4e8ac341a290681318c5abc83a388e"
+    },
+    {
+      "selector": ".dark",
+      "conditions": [
+        "@supports (color: oklab(0% 0 0%))"
+      ],
+      "property": "--sidebar",
+      "value": "oklch(20.5% 0 0)",
+      "start_byte": 155582,
+      "end_byte": 155609,
+      "sha256": "f4c76686b982a6f69980c8769fa2b978c2a3f801132e2ac42711b85dc6c3439b"
+    }
+  ]
+}
