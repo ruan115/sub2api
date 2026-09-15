@@ -2,7 +2,9 @@
 
 本模块是 Portunex + isthmus 恢复工程的开发工具和证据入口，不是第四个生产服务。
 
-- [最新：隔离 PostgreSQL 与认证存储基础](docs/postgres-foundation-2026-09-14.md)
+- [最新核查：无真实账号的本地 CLI 缓存验证](docs/local-cli-cache-stub-2026-09-15.md)
+- [线上 CLI / 转发配置第二轮核查](docs/online-cli-forwarder-clarifications-2026-09-14.md)
+- [隔离 PostgreSQL 与认证存储基础](docs/postgres-foundation-2026-09-14.md)
 - [此前认证证据/密码模块切片](docs/identity-foundation-2026-09-13.md)
 - [此前演示与执行面阶段进度（2026-09-13）](docs/status-and-review-2026-09-13.md)
 - [首批旧 HTTP 调用证据](contracts-wire/portunex/README.md)
