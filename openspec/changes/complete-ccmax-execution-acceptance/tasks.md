@@ -13,6 +13,10 @@
 ## 后续（不自动视为 A 的完成内容）
 
 - [ ] B 可信状态、签票、runtime registry、host-agent 生产级装配与安全失败测试。
+  - [ ] B1 [会话绑定的持久化观察与只读权威快照](b1-design.md)。
+  - [ ] B2 主动健康验证/续期及受认证签票，不能由缓存心跳虚报新鲜度。
+  - [ ] B3 仅连接现有 runtime 的 registry 与失效清理。
+  - [ ] B4 host-agent 控制/数据/出口生产级装配与断连恢复证据。
 - [ ] C CCMAX gateway 新数据面接线、协议/usage/错误/取消闭环，默认关闭。
 - [ ] D CLI/isthmus/MCP/会话与可靠停机。
 - [ ] E Token 刷新/版本切换/生命周期/脱敏运维。

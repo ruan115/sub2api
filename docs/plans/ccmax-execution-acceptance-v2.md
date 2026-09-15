@@ -21,7 +21,7 @@ DP1 的真实回环 RPC / mTLS / fencing / 中继已通过，Docker 基础网络
 | 阶段 | 实现范围 / 模块 | 放行证据 |
 | --- | --- | --- |
 | A：实际 HTTP 执行器 | `execution-plane/internal/worker/upstream/` 有界响应转发；`upstreamusage/` 独立 usage 观察；`worker/process.go` 仅适配装配 | 首段早于上游结束、超过 2 MiB 累计 SSE、慢读背压、取消、出错后无伪完成/重试、非流/错误体上限、合成 usage 对照、race/vet |
-| B：宿主控制与权威装配 | 既有 `node/`、`ticket/`、`lease/`、`hostagent/`；按需新增职责明确的 snapshot/runtime registry 模块；`service/` 只装配 | 受认证签票、跨账号/节点/旧代拒绝、断连后拒绝服务、重连不复活旧实例、只查找已存在 runtime、ready 不虚报；签私钥仅控制面 |
+| B：宿主控制与权威装配 | 既有 `control/`、`runtime/store/`、`ticket/`、`lease/`、`hostagent/`；按需新增职责明确的 snapshot/runtime registry 模块；`service/` 只装配 | 受认证签票、跨账号/节点/旧代拒绝、断连后拒绝服务、重连不复活旧实例、只查找已存在 runtime、ready 不虚报；签私钥仅控制面 |
 | C：CCMAX 网关接通 | 优先新增独立 `ccmax-manager/internal/executiongateway/`，旧 `gateway.go` 仅接线；保留既有变换/usage所有权 | legacy 行为不变，migrated 不回退明文，Messages/count_tokens/models/Chat Completions、错误与取消端到端、开关默认关闭 |
 | D：CLI / isthmus | `execution-plane/isthmus-runtime/src/runtime/{cli,session,pool}/`、`src/tools/mcp/` 与 worker 内部适配 | 固定 CLI、无 builtins/严格 MCP、增量协议、工具续接、会话隔离、超时杀子进程、fake 与官方同版本 CLI 的无外联合成测试；Bun 停机缺口单独关闭 |
 | E：凭据与生命周期 | 复用 `credential/`、onboarding、outbox/lease；CCMAX 运维 API 不另建权限权威 | 刷新单飞与原子版本切换、旧票据/出口撤销、drain/recreate/archive/delete/restore、重启恢复、脱敏审计；合成凭据扫描 |
