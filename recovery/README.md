@@ -2,6 +2,7 @@
 
 本模块是 Portunex + isthmus 恢复工程的开发工具和证据入口，不是第四个生产服务。
 
+- [当前开发计划：CCMAX 转发与隔离验收收尾](../docs/plans/ccmax-execution-acceptance-v2.md)
 - [最新核查：无真实账号的本地 CLI 缓存验证](docs/local-cli-cache-stub-2026-09-15.md)
 - [线上 CLI / 转发配置第二轮核查](docs/online-cli-forwarder-clarifications-2026-09-14.md)
 - [隔离 PostgreSQL 与认证存储基础](docs/postgres-foundation-2026-09-14.md)
