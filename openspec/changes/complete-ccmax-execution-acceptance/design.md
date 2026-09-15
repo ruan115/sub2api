@@ -3,7 +3,8 @@
 ## A：worker 实际 HTTP 增量执行
 
 ```text
-worker/process.go                 # readiness/mode/凭据/固定请求构造与RPC适配
+worker/process.go                 # readiness/mode/进程装配
+worker/upstream_adapter.go        # 固定请求构造/凭据注入与RPC适配
 worker/upstream/                  # 独立有界HTTP响应读取和转发，不持凭据、不选路
 worker/upstreamusage/             # 有界JSON/SSE usage观察，不写原始正文
 worker/*upstream*_test.go          # 真正worker执行器的回环集成/错误/取消
@@ -14,6 +15,8 @@ worker/*upstream*_test.go          # 真正worker执行器的回环集成/错误
 传输负责 HTTP 状态、原始字节、资源收尾和背压；观察器负责 SSE 完整性与 usage 的有界解析，不承担计费结算。接通真实网关仍属于后续 C 阶段。具体大小/编码/完成语义以实施计划 A 合同及新增测试为准。
 
 ## 后续装配原则
+
+B1 的会话证明、只读存储与 snapshot 模块及其边界见 [B1设计](b1-design.md)。该模块不直接接入宿主 listener，也不通过已有 Docker/controller 启动接口冒充 runtime lookup。
 
 可信 assignment/lease 来自控制面，不以 Redis route 或调用方字段代替。host-agent 只获取一次性执行票据，不拥有签票私钥；控制台只能经过 CCMAX 服务端，不能直连 worker。新流程默认关闭，legacy 保持既有行为，迁入后故障不回退明文。
 

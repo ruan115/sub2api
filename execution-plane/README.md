@@ -10,6 +10,12 @@ added without changing placement or account lifecycle semantics.
 
 ## Current implementation slice
 
+Acceptance closure now includes actual HTTP-worker streaming (A) and a
+session-bound control-plane snapshot foundation (B1). Neither is a complete
+gateway/host/worker production rollout. See the [acceptance ledger](../openspec/changes/complete-ccmax-execution-acceptance/tasks.md)
+and [B1 boundaries](internal/executionauthority/README.md); migration 013 is not
+automatically applied, and historical unscoped observations remain unavailable.
+
 - slot lifecycle state machine;
 - validated pilot timing and capacity defaults;
 - Ed25519 execution tickets bound to node/account/slot/epoch;

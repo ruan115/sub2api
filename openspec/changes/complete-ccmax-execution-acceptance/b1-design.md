@@ -15,6 +15,8 @@
 3. 新 `internal/executionauthority/` 负责把只读结果转为 `dataplane.Snapshot`。它仅运行于控制面侧，仍需当前活动控制流和证书校验；数据库残留 connected 不能代表活跃连接。延迟读取后重新检查 freshness/租约有效期。现有 FencedResolver 继续独立验证 Redis lease，并在 runtime lookup 前后检查绑定。
 4. `control/` 提供只读当前会话校验，断连、上下文取消、证书撤销、会话替换均拒绝；不要持锁执行数据库 I/O。host-agent 不拿数据库、CA私钥或签票私钥。B1 尚不新增RPC、不打开listener、不注册默认生产路由。
 
+实现/review补充：Snapshot携带ControlSessionID，Resolver在lookup前后精确比对，连“途中重连且已重新确认同一实例”也拒绝返回旧查找结果。健康成功结果需匹配已发命令image/deadline，并在持久化同事务锁定核对assignment的实际image；没有provisioning job也必须通过。接收时间在observer前冻结，observer后重查期限，observer/storage都受命令context期限约束。已经打开的流尚不绑定最初session，这不是B1宣称关闭的门槛。
+
 ## 验收与边界
 
 - 单元、SQL合同和内存模型：无会话历史观察拒绝，当前会话允许，断连拒绝，只有 Hello/heartbeat 的重连拒绝，旧会话迟到结果拒绝且不落部分写入，新的受控结果可重建证明。

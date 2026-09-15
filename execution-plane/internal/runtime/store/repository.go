@@ -106,8 +106,14 @@ type Heartbeat struct {
 }
 
 type CommandResult struct {
-	CommandID           string
-	NodeID              string
+	CommandID string
+	NodeID    string
+	// ControlSessionID is supplied by the authenticated control server, never
+	// by the node's command result. Empty denotes an unproven legacy result.
+	ControlSessionID string
+	// ExpectedImageDigest comes from the issued command. Establishing proof
+	// requires it to match the locked active assignment, not just the reply.
+	ExpectedImageDigest string
 	Succeeded           bool
 	ErrorCode           string
 	ErrorMessage        string

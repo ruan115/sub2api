@@ -91,6 +91,8 @@ type Server struct {
 
 type nodeSession struct {
 	id                 string
+	context            context.Context
+	accepted           bool // protected by Server.mu, after the durable hello succeeds
 	capacity           store.Capacity
 	protocolMinor      uint32
 	capabilities       map[string]struct{}
@@ -268,7 +270,7 @@ func (s *Server) Control(stream executionv1.NodeControlService_ControlServer) er
 		return status.Error(codes.Internal, "create node session")
 	}
 	session := &nodeSession{
-		id: sessionID, capacity: capacity, protocolMinor: hello.GetProtocolVersion().GetMinor(),
+		id: sessionID, context: stream.Context(), capacity: capacity, protocolMinor: hello.GetProtocolVersion().GetMinor(),
 		capabilities:       capabilitySet(hello.GetCapabilities()),
 		outbound:           make(chan *executionv1.NodeControlServiceControlResponse, s.config.OutboundQueue),
 		done:               make(chan struct{}),
@@ -294,6 +296,9 @@ func (s *Server) Control(stream executionv1.NodeControlService_ControlServer) er
 		defer cancel()
 		_ = s.repository.MarkDisconnected(disconnectContext, identity.nodeID, sessionID, s.config.Now().UTC())
 	}()
+	s.mu.Lock()
+	session.accepted = true
+	s.mu.Unlock()
 
 	inbound := make(chan receiveResult, 1)
 	go receiveControl(stream, inbound)
@@ -539,6 +544,21 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	if err := validateSlotObservation(result.GetSlot()); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	observedAt := s.config.Now().UTC()
+	healthyResult := result.GetSucceeded() && result.GetSlot().GetHealthy()
+	// Only a current, bounded command for this exact image can establish a
+	// fresh healthy proof. A revocation acknowledgement, an old successful
+	// result or a different image must not revive the assignment.
+	if healthyResult &&
+		(pending.kind == pendingEpochRevocation || !imageDigestPattern.MatchString(pending.imageDigest) ||
+			result.GetSlot().GetImageDigest() != pending.imageDigest || pending.deadline.IsZero() || !pending.deadline.After(observedAt)) {
+		return status.Error(codes.InvalidArgument, "healthy observation does not match a current image command")
+	}
+	if healthyResult {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, pending.deadline)
+		defer cancel()
+	}
 	if pending.kind == pendingCredentialKey {
 		if result.GetSlot().GetImageDigest() != pending.imageDigest {
 			return status.Error(codes.InvalidArgument, "credential-key result image does not match its issued command")
@@ -566,21 +586,26 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	if err != nil {
 		return status.Error(codes.InvalidArgument, "slot observation is invalid")
 	}
-	now := s.config.Now().UTC()
+	// Observer/storage I/O may block; it cannot extend either the command's
+	// deadline or the age of the observation received on this stream.
+	if healthyResult && (ctx.Err() != nil || !pending.deadline.After(s.config.Now().UTC())) {
+		return status.Error(codes.DeadlineExceeded, "healthy observation command expired")
+	}
 	errorCode := result.GetErrorCode()
 	if !result.GetSucceeded() && errorCode == "" {
 		errorCode = "node_command_failed"
 	}
 	if err := s.repository.ApplyCommandResult(ctx, store.CommandResult{
-		CommandID: result.GetCommandId(), NodeID: nodeID, Succeeded: result.GetSucceeded(),
-		ErrorCode: errorCode, ErrorMessage: sanitizeError(result.GetErrorMessage()),
+		CommandID: result.GetCommandId(), NodeID: nodeID, ControlSessionID: session.id, Succeeded: result.GetSucceeded(),
+		ExpectedImageDigest: pending.imageDigest,
+		ErrorCode:           errorCode, ErrorMessage: sanitizeError(result.GetErrorMessage()),
 		SlotObservationJSON: observation,
 		Observation: &store.AssignmentObservation{
 			SlotID: result.GetSlot().GetSlotId(), ExecutionEpoch: result.GetSlot().GetExecutionEpoch(),
 			ProviderRef: result.GetSlot().GetProviderRef(), ActualState: result.GetSlot().GetActualState(),
-			Healthy: result.GetSlot().GetHealthy(), ReasonCode: sanitizeReasonCode(result.GetSlot().GetReason()), ObservedAt: now,
+			Healthy: result.GetSlot().GetHealthy(), ReasonCode: sanitizeReasonCode(result.GetSlot().GetReason()), ObservedAt: observedAt,
 		},
-		RetryAt: now.Add(s.config.CommandRetryDelay), ReceivedAt: now,
+		RetryAt: observedAt.Add(s.config.CommandRetryDelay), ReceivedAt: observedAt,
 	}); err != nil {
 		return status.Error(codes.Internal, "record command result failed")
 	}
@@ -829,7 +854,8 @@ func controlCommandID(response *executionv1.NodeControlServiceControlResponse) s
 
 func pendingFromResponse(response *executionv1.NodeControlServiceControlResponse) pendingCommand {
 	if command := response.GetSlotCommand(); command != nil {
-		return pendingCommand{kind: pendingSlotCommand, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch()}
+		return pendingCommand{kind: pendingSlotCommand, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch(),
+			imageDigest: command.GetImageDigest(), deadline: command.GetDeadline().AsTime()}
 	}
 	if revoke := response.GetRevokeEpoch(); revoke != nil {
 		return pendingCommand{kind: pendingEpochRevocation, slotID: revoke.GetSlotId(), executionEpoch: revoke.GetExecutionEpoch()}

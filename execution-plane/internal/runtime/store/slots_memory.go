@@ -124,6 +124,8 @@ func (r *MemoryRepository) ObserveAssignment(_ context.Context, observation Assi
 			assignment.ReasonCode = observation.ReasonCode
 			observed := observation.ObservedAt.UTC()
 			assignment.LastObservedAt = &observed
+			// This legacy observation has no authenticated control-session proof.
+			assignment.ObservedControlSessionID = ""
 			r.assignments[observation.SlotID] = assignments
 			return cloneAssignment(*assignment), nil
 		}

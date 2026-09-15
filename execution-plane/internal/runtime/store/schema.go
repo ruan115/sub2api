@@ -40,6 +40,7 @@ type runtimeSchemaColumn struct {
 // additive migration cannot be mistaken for a usable runtime schema.
 var requiredRuntimeColumns = []runtimeSchemaColumn{
 	{table: "slot_assignments", name: "desired_generation"},
+	{table: "slot_assignments", name: "observed_control_session_id"},
 	{table: "proxy_leases", name: "reservation_id"},
 	{table: "proxy_leases", name: "desired_generation"},
 	{table: "proxy_leases", name: "binding_revision"},

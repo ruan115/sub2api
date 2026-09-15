@@ -36,7 +36,7 @@ func TestApplyCommandResultCommitsObservationAndJobAtomically(t *testing.T) {
 		WithArgs(result.CommandID).
 		WillReturnRows(sqlmock.NewRows([]string{"slot_id"}).AddRow("slot-1"))
 	mock.ExpectExec(`(?s)UPDATE slot_assignments SET.*actual_generation.*WHERE slot_id = \? AND node_id = \? AND execution_epoch = \?`).
-		WithArgs("container-1", "created", "created", true, "", now, "slot-1", "srv74", uint64(7)).
+		WithArgs("container-1", "created", "created", true, "", now, "", "slot-1", "srv74", uint64(7)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`(?s)UPDATE provisioning_jobs SET status = 'completed'.*next_attempt_at = NULL`).
 		WithArgs(now, result.CommandID).

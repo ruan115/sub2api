@@ -305,10 +305,11 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 		config.CredentialSink = sink
 	})
 	stream := enrollAndOpenControl(t, test, secureHelloEvent("srv74"))
+	assignment := reserveControlTestAssignment(t, test, "sha256:"+strings.Repeat("d", 64))
 
 	keyCommand := &executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_CredentialKeyCommand{CredentialKeyCommand: &executionv1.CredentialKeyCommand{
-			CommandId: "cmd-key-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 7,
+			CommandId: "cmd-key-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: assignment.ExecutionEpoch,
 			ImageDigest: "sha256:" + strings.Repeat("d", 64), Deadline: timestamppb.New(test.now.Add(time.Minute)),
 		}},
 	}
@@ -331,7 +332,7 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 		Event: &executionv1.NodeControlServiceControlRequest_CommandResult{CommandResult: &executionv1.CommandResult{
 			CommandId: "cmd-key-1", Succeeded: true,
 			Slot: &executionv1.SlotObservation{
-				SlotId: "slot-1", ProviderRef: "container-1", ExecutionEpoch: 7, ActualState: "running", Healthy: true,
+				SlotId: "slot-1", ProviderRef: "container-1", ExecutionEpoch: assignment.ExecutionEpoch, ActualState: "running", Healthy: true,
 				ImageDigest: "sha256:" + strings.Repeat("d", 64),
 			},
 			CredentialTransportKey: &executionv1.CredentialTransportKeyOutput{KeyId: keyID, PublicKey: publicKey},
@@ -350,7 +351,7 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 
 	activationCommand := &executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
-			CommandId: "cmd-activate-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 7,
+			CommandId: "cmd-activate-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: assignment.ExecutionEpoch,
 			ImageDigest: "sha256:" + strings.Repeat("d", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
 			EncryptedCredentialBundle: []byte("process-bound-ciphertext"), Deadline: timestamppb.New(test.now.Add(time.Minute)),
 		}},
@@ -364,7 +365,7 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 	sealed := []byte("orchestrator-sealed-rotation")
 	if err := stream.Send(&executionv1.NodeControlServiceControlRequest{
 		Event: &executionv1.NodeControlServiceControlRequest_CredentialCommit{CredentialCommit: &executionv1.ControlCredentialCommit{
-			CommandId: "cmd-activate-1", AccountBinding: provider.RuntimeAccountID("account-1"), SlotId: "slot-1", ExecutionEpoch: 7,
+			CommandId: "cmd-activate-1", AccountBinding: provider.RuntimeAccountID("account-1"), SlotId: "slot-1", ExecutionEpoch: assignment.ExecutionEpoch,
 			CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1", SealedCredentialBundle: sealed,
 		}},
 	}); err != nil {
@@ -386,7 +387,7 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 		Event: &executionv1.NodeControlServiceControlRequest_CommandResult{CommandResult: &executionv1.CommandResult{
 			CommandId: "cmd-activate-1", Succeeded: true,
 			Slot: &executionv1.SlotObservation{
-				SlotId: "slot-1", ProviderRef: "container-1", ExecutionEpoch: 7, ActualState: "running", Healthy: true,
+				SlotId: "slot-1", ProviderRef: "container-1", ExecutionEpoch: assignment.ExecutionEpoch, ActualState: "running", Healthy: true,
 				ImageDigest: "sha256:" + strings.Repeat("d", 64),
 			},
 		}},

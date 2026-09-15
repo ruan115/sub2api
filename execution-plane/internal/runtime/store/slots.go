@@ -36,22 +36,23 @@ type Slot struct {
 }
 
 type Assignment struct {
-	ID                 string
-	SlotID             string
-	NodeID             string
-	ProviderRef        string
-	ExecutionEpoch     uint64
-	DesiredGeneration  uint64
-	ImageDigest        string
-	CPURequestMillis   uint64
-	MemoryRequestBytes uint64
-	ActualState        string
-	ActualGeneration   uint64
-	Healthy            bool
-	ReasonCode         string
-	AssignedAt         time.Time
-	LastObservedAt     *time.Time
-	ReleasedAt         *time.Time
+	ID                       string
+	SlotID                   string
+	NodeID                   string
+	ProviderRef              string
+	ExecutionEpoch           uint64
+	DesiredGeneration        uint64
+	ImageDigest              string
+	CPURequestMillis         uint64
+	MemoryRequestBytes       uint64
+	ActualState              string
+	ActualGeneration         uint64
+	Healthy                  bool
+	ReasonCode               string
+	AssignedAt               time.Time
+	LastObservedAt           *time.Time
+	ObservedControlSessionID string
+	ReleasedAt               *time.Time
 }
 
 type AssignmentReservation struct {
@@ -248,7 +249,8 @@ func (r *Repository) ObserveAssignment(ctx context.Context, observation Assignme
 UPDATE slot_assignments SET
   provider_ref = NULLIF(?, ''),
   actual_generation = actual_generation + IF(actual_state <> ?, 1, 0),
-  actual_state = ?, healthy = ?, reason_code = ?, last_observed_at = ?
+  actual_state = ?, healthy = ?, reason_code = ?, last_observed_at = ?,
+  observed_control_session_id = NULL
 WHERE slot_id = ? AND execution_epoch = ? AND released_at IS NULL`,
 		observation.ProviderRef, observation.ActualState, observation.ActualState, observation.Healthy,
 		observation.ReasonCode, observation.ObservedAt.UTC(), observation.SlotID, observation.ExecutionEpoch,
@@ -404,19 +406,20 @@ func getActiveAssignment(ctx context.Context, queryer slotQueryer, slotID string
 	query := `
 SELECT assignment_id, slot_id, node_id, COALESCE(provider_ref, ''), execution_epoch, desired_generation, image_digest,
        cpu_request_millis, memory_request_bytes, actual_state, actual_generation, healthy, reason_code,
-       assigned_at, last_observed_at, released_at
+       assigned_at, last_observed_at, released_at, observed_control_session_id
 FROM slot_assignments WHERE slot_id = ? AND released_at IS NULL`
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
 	var assignment Assignment
 	var desiredGeneration sql.NullInt64
+	var observedSession sql.NullString
 	var observed, released sql.NullTime
 	err := queryer.QueryRowContext(ctx, query, slotID).Scan(
 		&assignment.ID, &assignment.SlotID, &assignment.NodeID, &assignment.ProviderRef,
 		&assignment.ExecutionEpoch, &desiredGeneration, &assignment.ImageDigest, &assignment.CPURequestMillis, &assignment.MemoryRequestBytes,
 		&assignment.ActualState, &assignment.ActualGeneration, &assignment.Healthy, &assignment.ReasonCode,
-		&assignment.AssignedAt, &observed, &released,
+		&assignment.AssignedAt, &observed, &released, &observedSession,
 	)
 	if err != nil {
 		return Assignment{}, err
@@ -424,6 +427,7 @@ FROM slot_assignments WHERE slot_id = ? AND released_at IS NULL`
 	if desiredGeneration.Valid && desiredGeneration.Int64 > 0 {
 		assignment.DesiredGeneration = uint64(desiredGeneration.Int64)
 	}
+	assignment.ObservedControlSessionID = observedSession.String
 	if observed.Valid {
 		value := observed.Time.UTC()
 		assignment.LastObservedAt = &value

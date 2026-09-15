@@ -10,7 +10,7 @@ func TestRuntimeCoreMigrationContainsRequiredBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 12 {
+	if len(migrations) != 13 {
 		t.Fatalf("unexpected migrations: %+v", migrations)
 	}
 	for _, migration := range migrations {
@@ -60,6 +60,7 @@ func TestRuntimeCoreMigrationContainsRequiredBoundaries(t *testing.T) {
 	}
 	for _, boundary := range []string{
 		"control_session_id VARCHAR(32)",
+		"ADD COLUMN observed_control_session_id VARCHAR(32) NULL AFTER last_observed_at",
 		"allocatable_cpu_millis BIGINT UNSIGNED",
 		"reserved_cpu_millis BIGINT UNSIGNED",
 		"next_execution_epoch BIGINT UNSIGNED",
@@ -140,4 +141,41 @@ func TestLifecycleEventReceiptMigrationHasReversibleBoundary(t *testing.T) {
 		}
 	}
 	t.Fatal("missing lifecycle event receipt down migration")
+}
+
+func TestAssignmentObservationSessionMigrationIsNullableAndReversible(t *testing.T) {
+	for direction, want := range map[string]string{
+		"up":   "ALTER TABLE slot_assignments\n  ADD COLUMN observed_control_session_id VARCHAR(32) NULL AFTER last_observed_at;",
+		"down": "ALTER TABLE slot_assignments\n  DROP COLUMN observed_control_session_id;",
+	} {
+		migrations, err := Migrations(direction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, migration := range migrations {
+			if migration.Name != "013_assignment_observation_session."+direction+".sql" {
+				continue
+			}
+			found = true
+			var statements []string
+			for _, line := range strings.Split(migration.SQL, "\n") {
+				if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+					statements = append(statements, line)
+				}
+			}
+			if strings.TrimSpace(strings.Join(statements, "\n")) != want {
+				t.Fatalf("unexpected %s migration: %q", direction, migration.SQL)
+			}
+		}
+		if !found {
+			t.Fatalf("missing assignment observation session %s migration", direction)
+		}
+	}
+	for _, column := range requiredRuntimeColumns {
+		if column.table == "slot_assignments" && column.name == "observed_control_session_id" {
+			return
+		}
+	}
+	t.Fatal("runtime readiness gate does not require the observation-session column")
 }

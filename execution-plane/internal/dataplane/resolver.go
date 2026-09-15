@@ -18,8 +18,12 @@ type Snapshot struct {
 	Binding
 	ProviderRef  string
 	LeaseOwnerID string
-	Ready        bool
-	ObservedAt   time.Time
+	// Session-bound sources populate this control-plane-only fence. A
+	// reconnect during runtime lookup must not return the old connection,
+	// even if a new inspection has already confirmed the same assignment.
+	ControlSessionID string
+	Ready            bool
+	ObservedAt       time.Time
 }
 
 type SnapshotSource interface {
@@ -74,7 +78,7 @@ func (r *FencedResolver) Resolve(ctx context.Context, binding Binding) (Runtime,
 	}
 	// A lookup must not resurrect an assignment replaced while it was running.
 	after, err := r.current(ctx, binding)
-	if err != nil || after.ProviderRef != before.ProviderRef || after.LeaseOwnerID != before.LeaseOwnerID {
+	if err != nil || after.ProviderRef != before.ProviderRef || after.LeaseOwnerID != before.LeaseOwnerID || after.ControlSessionID != before.ControlSessionID {
 		return nil, ErrBindingUnavailable
 	}
 	return runtime, nil

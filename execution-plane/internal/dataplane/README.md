@@ -19,11 +19,15 @@ CCMAX service client -- TLS 1.3, ccmax service certificate --> data plane
 - `FencedResolver` requires a **trusted, internally consistent** `SnapshotSource`,
   a current execution `LeaseValidator`, and `RuntimeLookup`. A Redis route cache
   lacks account authority and is not a substitute for the snapshot source.
-  No production snapshot projection or repository access is wired in this slice.
+  The subsequent B1 slice adds a control-plane-only session-bound SQL projection
+  in [`executionauthority`](../executionauthority/README.md); it is not wired to
+  a production listener or exposed as host database access.
 - `RuntimeLookup` only returns an existing runtime, never `Controller.Start` or
   user-selected addresses. Resolve checks the complete binding before lookup and
   again afterwards. Snapshots older than 45 seconds (configurable only lower),
-  including those that age out during lease I/O, are rejected.
+  including those that age out during lease I/O, are rejected. Session-bound
+  sources also require an unchanged control session across lookup; this does
+  not yet bind an already-open stream to its original session after reconnect.
 - `hostagent.Runtime.OpenExecution` / `CountTokensRequest` copy request fields,
   replace the external account ID with the existing opaque runtime identity, and
   request a one-time scoped ticket from the injected control-plane TicketSource.
