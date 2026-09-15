@@ -40,6 +40,8 @@ B/C/D/E 内部还应按接口和依赖拆小提交。A 可以先独立完成，�
 6. gzip 由现有 Go transport 解码时可使用解码后响应；仍带未处理 Content-Encoding 的响应显式失败，不把压缩字节伪装成明文 SSE/JSON。
 7. 测试使用 httptest / 自建 transport / 合成事件，禁用依赖网络下载，不启线上连接或默认应用监听。
 
+实现/review 补充：HTTP 传输和 usage 观察共用同一 SSE 分类；非空但畸形的 Content-Type 在读取/输出前拒绝，避免分支不一致。原始 read buffer 借用给传输 Sink，RPC 适配器在交给 protobuf 前复制单块，避免后续读取覆盖已发送消息。SSE 事件/行观察上限 1 MiB，未知事件在活跃消息内可忽略，但不产生 usage 或完成；这个旁路限制及错误后的部分 usage 尚不能等同于全线上合同。
+
 ## 质量与进度规则
 
 - 每阶段：先补设计与合同 → 实现 → 正向/拒绝/故障测试 → 独立 review → 修复 → 主代理复跑 → 文档与 Git 提交。

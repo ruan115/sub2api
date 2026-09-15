@@ -31,7 +31,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const maxUpstreamResponseBytes = 2 << 20
+// Begin/count_tokens payloads remain bounded independently of cumulative SSE
+// output. Credential bundles keep their own maxCredentialBundleBytes limit.
+const maxWorkerRequestBytes = 2 << 20
+const maxWorkerRPCMessageBytes = maxWorkerRequestBytes + (64 << 10)
 
 type ProcessConfig struct {
 	ListenAddress       string
@@ -183,13 +186,6 @@ func (s *processState) Drain() {
 	s.mu.Unlock()
 }
 
-type upstreamExecutor struct {
-	state            processLifecycle
-	credentialSource activeCredentialSource
-	client           *http.Client
-	baseURL          *url.URL
-}
-
 type processLifecycle interface {
 	Activator
 	ModeHealthSource
@@ -201,89 +197,8 @@ type activeCredentialSource interface {
 	ActiveCredential() (ActiveCredential, error)
 }
 
-func (e *upstreamExecutor) Execute(stream ExecutionStream) error {
-	if !e.state.Ready() {
-		return status.Error(codes.FailedPrecondition, "worker is not ready")
-	}
-	begin := stream.Begin()
-	if begin.GetMode() != executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API {
-		return status.Error(codes.Unimplemented, "execution mode is not available")
-	}
-	response, body, err := e.request(stream.Context(), "/v1/messages", begin.GetAnthropicRequestJson(), begin.GetRequestHeaders())
-	if err != nil {
-		return err
-	}
-	if err := stream.Send(&executionv1.ExecuteResponse{Event: &executionv1.ExecuteResponse_Headers{Headers: &executionv1.ResponseHeaders{
-		StatusCode: int32(response.StatusCode), Headers: safeResponseHeaders(response.Header),
-	}}}); err != nil {
-		return err
-	}
-	if len(body) > 0 {
-		if err := stream.Send(&executionv1.ExecuteResponse{Event: &executionv1.ExecuteResponse_BodyChunk{BodyChunk: &executionv1.ResponseBodyChunk{Data: body}}}); err != nil {
-			return err
-		}
-	}
-	return stream.Send(&executionv1.ExecuteResponse{Event: &executionv1.ExecuteResponse_Completed{Completed: &executionv1.ExecutionCompleted{
-		UpstreamRequestId: response.Header.Get("X-Request-Id"),
-	}}})
-}
-
-func (e *upstreamExecutor) CountTokens(ctx context.Context, request *executionv1.CountTokensRequest) (*executionv1.CountTokensResponse, error) {
-	if !e.state.Ready() {
-		return nil, status.Error(codes.FailedPrecondition, "worker is not ready")
-	}
-	if request.GetMode() != executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API {
-		return nil, status.Error(codes.Unimplemented, "execution mode is not available")
-	}
-	response, body, err := e.request(ctx, "/v1/messages/count_tokens", request.GetAnthropicRequestJson(), nil)
-	if err != nil {
-		return nil, err
-	}
-	return &executionv1.CountTokensResponse{
-		StatusCode: int32(response.StatusCode), AnthropicResponseJson: body,
-		UpstreamRequestId: response.Header.Get("X-Request-Id"),
-	}, nil
-}
-
-func (e *upstreamExecutor) request(ctx context.Context, path string, body []byte, headers map[string]string) (*http.Response, []byte, error) {
-	if len(body) == 0 || len(body) > maxUpstreamResponseBytes {
-		return nil, nil, status.Error(codes.InvalidArgument, "upstream request body size is invalid")
-	}
-	endpoint := e.baseURL.ResolveReference(&url.URL{Path: path})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, nil, status.Error(codes.Internal, "create upstream request failed")
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "sub2api-execution-worker/1")
-	copySafeRequestHeaders(request.Header, headers)
-	if e.credentialSource != nil {
-		active, activeErr := e.credentialSource.ActiveCredential()
-		if activeErr != nil {
-			return nil, nil, status.Error(codes.FailedPrecondition, "worker credential is not active")
-		}
-		defer active.Destroy()
-		if err := applyActiveCredential(request.Header, active); err != nil {
-			return nil, nil, status.Error(codes.FailedPrecondition, "worker credential is invalid")
-		}
-	}
-	response, err := e.client.Do(request)
-	if err != nil {
-		return nil, nil, status.Error(codes.Unavailable, "upstream request failed")
-	}
-	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, maxUpstreamResponseBytes+1))
-	if err != nil {
-		return nil, nil, status.Error(codes.Unavailable, "read upstream response failed")
-	}
-	if len(payload) > maxUpstreamResponseBytes {
-		return nil, nil, status.Error(codes.ResourceExhausted, "upstream response exceeded size limit")
-	}
-	return response, payload, nil
-}
-
 func applyActiveCredential(headers http.Header, active ActiveCredential) error {
-	if headers == nil || !validCredentialVersionID(active.VersionID) || len(active.CredentialJSON) == 0 || len(active.CredentialJSON) > maxUpstreamResponseBytes {
+	if headers == nil || !validCredentialVersionID(active.VersionID) || len(active.CredentialJSON) == 0 || len(active.CredentialJSON) > maxCredentialBundleBytes {
 		return ErrActivationRejected
 	}
 	decoder := json.NewDecoder(bytes.NewReader(active.CredentialJSON))
@@ -321,16 +236,6 @@ func copySafeRequestHeaders(target http.Header, source map[string]string) {
 			target.Set(name, value)
 		}
 	}
-}
-
-func safeResponseHeaders(source http.Header) map[string]string {
-	result := make(map[string]string)
-	for _, name := range []string{"Content-Type", "X-Request-Id"} {
-		if value := source.Get(name); value != "" {
-			result[strings.ToLower(name)] = value
-		}
-	}
-	return result
 }
 
 func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) error {
@@ -401,8 +306,8 @@ func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) 
 	}
 	defer listener.Close()
 	grpcServer := grpc.NewServer(
-		grpc.MaxRecvMsgSize(maxUpstreamResponseBytes+(64<<10)),
-		grpc.MaxSendMsgSize(maxUpstreamResponseBytes+(64<<10)),
+		grpc.MaxRecvMsgSize(maxWorkerRPCMessageBytes),
+		grpc.MaxSendMsgSize(maxWorkerRPCMessageBytes),
 	)
 	runtimeServer.Register(grpcServer)
 	serveResult := make(chan error, 1)

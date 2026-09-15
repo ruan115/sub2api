@@ -77,6 +77,13 @@ ticket-source wiring, gateway dispatch and real CLI remain gated. See
 [`internal/dataplane/README.md`](internal/dataplane/README.md) for its exact scope
 and `make dataplane-check` for the local test entry.
 
+The 2026-09-16 acceptance closure starts with the actual HTTP worker: bounded
+incremental SSE forwarding, separate safe usage observation, cancellation and
+terminal validation. This replaces its whole-SSE aggregation, not the pending
+gateway/host-agent/CLI assembly. See the
+[acceptance plan](../docs/plans/ccmax-execution-acceptance-v2.md) and
+[HTTP relay boundary](internal/worker/upstream/README.md).
+
 ## Fixed proxy egress boundary
 
 Workers receive only an internal, credential-free HTTP proxy URL such as

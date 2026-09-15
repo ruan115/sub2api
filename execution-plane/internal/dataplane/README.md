@@ -52,10 +52,13 @@ unexpected headers fail closed. Future rate-limit headers need explicit tests
 and contract expansion. Runtime errors use fixed summaries; no retry into legacy
 or plaintext credentials exists here. `ListModels` is explicitly Unimplemented.
 
-Maximum relay message is 32 MiB; header map 32 KiB; session key 512 bytes. The
-existing real upstream worker still buffers and caps its HTTP body at 2 MiB, and
-its gRPC process has a corresponding smaller limit. The new relay does **not**
-remove that unfinished worker constraint or implement real CLI/MCP semantics.
+Maximum relay message is 32 MiB; header map 32 KiB; session key 512 bytes.
+The subsequent HTTP-worker acceptance slice now sends real upstream SSE in
+32 KiB chunks, with bounded usage observation and terminal checks; it no longer
+collects the whole SSE response under the former 2 MiB cap. Worker requests,
+nonstream/error bodies and its per-message gRPC limit remain independently
+bounded near 2 MiB. See [HTTP relay scope](../worker/upstream/README.md).
+Real CLI/MCP, production composition and end-to-end size parity remain open.
 
 ## Repeatable local check
 
