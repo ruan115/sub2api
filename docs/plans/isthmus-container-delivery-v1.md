@@ -123,3 +123,13 @@ execution-plane/internal/worker/           只装配实际执行器；按需独�
 `recoverykit lab inspect` 已实现；模块、参数、策略与测试分别放入上述独立目录。只允许显式本地Unix socket的五个只读GET，检查预期身份/架构/能力和空白资源；成功仍输出 `isolation_verified=false`、`execution_permitted=false`。两处超时边界已先复现再修复并获独立review关闭。
 
 45项lab合成测试及十轮重复通过；完整236项Python回归与116条合同清单结构检查通过，后者仍为 `business_verification=false`。[具体证据与边界](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#n3前置专用实验端点只读预检)。未启动真实Docker/VM、构建镜像或安装规则，所以总体仍 **23%**，镜像仍 **20%**。下一实现切片为I2/I3镜像构建/依赖固定，不跳过Linux实际验收，也不恢复暂停的业务接线。
+
+### I2/I3 下一项的已确认缺口
+
+本次重新读取已保全 `Dockerfile.vm` 前通过文本内容检查，SHA-256 为 `b51a59151f6b89f43a6afd4fe0cb6fcbc4894a78922b5b71ac730e62ef61d991`，与已有manifest一致；没有执行或复制原件进Git。这是历史静态证据，不代表刚检查线上。
+
+- **系统层**：原件使用浮动 `debian:13` 和未锁版本APT；已有 `07133e…` 是运行镜像config ID，不可冒充可拉取的OCI manifest digest。下一步须固定基底、必要包及来源/摘要，拒绝缺项时动态安装或退回latest。
+- **隔离差异**：原件给 `unshare` 设置 `CAP_SYS_ADMIN` 文件能力，并注释PID隔离失败会降级。本地不能为兼容旧脚本直接放宽NNP/dropALL/只读根门禁；需要验证新的进程隔离方案，失败必须停止，不声称现有Dockerfile已等价。
+- **Bun/CLI**：已有[CLI 2.1.258双架构摘要与有限运行证据](../../recovery/docs/local-cli-cache-stub-2026-09-15.md)；amd64原生及整链仍缺。Bun 1.4.2仅有[macOS候选验证](../../execution-plane/isthmus-runtime/docs/bun-stop-fix-validation.md)，不能当Linux通过，也不能擅自替换现行版本；两Linux架构制品及停机验证待补。
+- **应用与构建内容**：当前TS模块仍为fake，Go worker不是原镜像替代品。image模块只接显式锁定且审查的程序/源码，禁止复制整个仓库、旧bundle、账号home、证书或宿主配置。独立home属于I4，身份生成属于K，不能打进共享镜像。
+- **实现与验收顺序**：`image/` 内先闭合制品清单与最小构建上下文，再交付可实际构建的Dockerfile和显式专用宿主入口。检查失败/版本或架构不符/代理和秘密注入负例后，在真正专用Linux环境验证构建与冷启动。仅staging/静态Dockerfile不关闭I2/I3/I5；`--network=none`本身也不能证明FROM阶段不会拉取镜像。
