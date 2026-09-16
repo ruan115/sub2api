@@ -15,6 +15,8 @@
 - [ ] B 可信状态、签票、runtime registry、host-agent 生产级装配与安全失败测试。
   - [x] B1 [会话绑定的持久化观察与只读权威快照](b1-design.md) 本地库/合同验收、交叉review与阶段提交；真实DB迁移/并发仍属于后续整链门槛。
   - [ ] B2 主动健康验证/续期及受认证签票，不能由缓存心跳虚报新鲜度。
+    - [ ] B2a [有界主动宿主 INSPECT](b2a-design.md)：独立探测投影、会话固定、单飞/超时回收、离线 TLS 闭环；不代表 worker/凭据 ready。
+    - [ ] B2b worker 实际加载版本/代理/模式的主动证明、分 scope 受认证签票，以及可信证明驱动的双层续租。
   - [ ] B3 仅连接现有 runtime 的 registry 与失效清理。
   - [ ] B4 host-agent 控制/数据/出口生产级装配与断连恢复证据。
 - [ ] C CCMAX gateway 新数据面接线、协议/usage/错误/取消闭环，默认关闭。
