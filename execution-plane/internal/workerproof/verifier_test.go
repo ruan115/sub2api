@@ -307,3 +307,35 @@ func TestLoadedProofRejectsCrossBindingBeforeWorkerAndMalformedConfig(t *testing
 		}
 	}
 }
+
+func TestLoadedProofCancellationDuringFinalClockReadIsDenied(t *testing.T) {
+	now := time.Now().UTC()
+	b := candidate(now)
+	c := configFor(now, b)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sessions := 0
+	c.Sessions = sessionsFunc(func(context.Context, string, string) error {
+		sessions++
+		return nil
+	})
+	finalClockRead := false
+	c.Now = func() time.Time {
+		if sessions == 2 {
+			// All dependencies already returned successfully. Cancellation in
+			// the final clock callback must still prevent a successful receipt.
+			finalClockRead = true
+			cancel()
+		}
+		return now
+	}
+	v, err := New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := v.Check(ctx, binding(b), executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API)
+	if !finalClockRead || ctx.Err() != context.Canceled {
+		t.Fatal("did not exercise cancellation after the final dependency check")
+	}
+	requireDenied(t, receipt, err)
+}

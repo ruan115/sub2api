@@ -131,6 +131,11 @@ func (v *Verifier) Check(parent context.Context, want dataplane.Binding, mode ex
 	if now.Before(started) || !started.Add(v.config.Timeout).After(now) || !v.current(before, now) || !v.current(after, now) {
 		return Receipt{}, ErrUnavailable
 	}
+	// The final clock callback and validation must not hide cancellation that
+	// arrived after the last session/lease dependency returned.
+	if healthCtx.Err() != nil {
+		return Receipt{}, ErrUnavailable
+	}
 	return Receipt{Authority: after, Mode: mode, ActivationRevision: revision, CheckedAt: started}, nil
 }
 

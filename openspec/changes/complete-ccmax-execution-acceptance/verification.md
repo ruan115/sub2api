@@ -148,3 +148,12 @@ Review 由两位代理交叉审查非本人模块，主代理集成/复验。发
 - Drain 立即撤销可见 loaded state，不表示强制取消所有在途 Onboard/Commit/执行流；不遵从 context 的依赖仍可能延迟 Drain 返回，持续流撤销属于后续 B3/B4。
 - 真实 MySQL 单语句/时钟偏差/事务死锁与索引性能、Redis、代理连通性、Docker/VM、CLI/gateway、1000连接/24h与 canary 未验。B 总项、B2b2–G 与 PRD §31 仍开放。
 - 无 SSH/生产数据/UI/配置/服务/路由/账号操作；真实模型调用仍为 0。未 push、未部署，未开启 execution_onboarding 或标记 migrated。
+
+## B2b1 提交后复审（用户要求先 review 再继续）
+
+基线 `b3a548a`。重新由两位代理独立审查，主代理复跑全模块 race，发现两项取消边界；不是将已声明的生产接线缺项重新记成代码 bug。
+
+1. **P2：核对完成前漏检取消。** 最后一次活动会话检查之后仍调用 `Now`，该回调期间发生取消时，原实现会返回成功 Receipt。新增 `TestLoadedProofCancellationDuringFinalClockReadIsDenied` 在最后一次时间读取中同步取消父 context，不用 sleep 或不服从 context 的外部依赖；旧实现确定性失败。返回前增加最终 context 检查。
+2. **P2：等待激活串行锁无法及时取消。** 已有激活卡在 commit 时，第二个激活通过前置检查后等待 `sync.Mutex.Lock`；取消第二个请求不能使它返回，直到第一个 commit 结束。这是此前即存在、B2b1 仅验证“取消不发布”而未验证“取消等待及时结束”的缺口。现改为零值可用的 context-aware channel gate，无等待 goroutine；选中获取后复查取消并归还 token。提交回归以包装 context.Done 信号确定已经进入等待，不依赖 sleep、runtime.Stack 或调度符号；第二个请求可在第一个 commit 释放前退出，且不运行 onboarding、不改变第一次发布。Drain 等待在途清理的既定边界不变。
+
+两项均先复现旧实现失败，再修复；两位 reviewer 已交叉复核。主代理修复后完整 `go test -race -count=1 -timeout=120s ./...`、`go vet ./...` 和 worker/workerproof 的 `Test(ActivationWaiter|ActivationGate|ActivationCancelled|DrainHides|HealthSnapshot|LoadedProof)` 定向 race 10 轮通过。命令沿用上述离线依赖/屏蔽外部 DSN 设置，无真实依赖或线上操作。原“review 无发现”仅代表当时范围，本次新增发现与修复按事实补记，不宣称 review 能证明无缺陷。

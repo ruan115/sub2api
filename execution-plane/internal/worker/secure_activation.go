@@ -84,7 +84,7 @@ type SecureActivator struct {
 	onboarder OnboardingEngine
 	committer CredentialCommitter
 
-	operationMu sync.Mutex
+	operationMu activationGate
 	mu          sync.RWMutex
 	draining    bool
 	// Monotonic for successful publications within this worker instance only.
@@ -175,7 +175,9 @@ func (a *SecureActivator) ActivateWithCommitter(ctx context.Context, activation 
 	if credential.ValidateTransportID(activation.CredentialLeaseID) != nil || credential.ValidateTransportID(activation.ProxyLeaseID) != nil || len(activation.EncryptedCredentialBundle) == 0 {
 		return nil, ErrActivationRejected
 	}
-	a.operationMu.Lock()
+	if err := a.operationMu.LockContext(ctx); err != nil {
+		return nil, ErrActivationRejected
+	}
 	defer a.operationMu.Unlock()
 	a.mu.RLock()
 	_, replay := a.seenLeases[activation.CredentialLeaseID]
