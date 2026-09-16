@@ -6,7 +6,7 @@
 
 按用户要求，先处理 [VM 隔离优先计划](vm-isolation-design.md)，暂停后续业务接线；未通过不得用 B2b2a 的局部 PASS 放行整链。
 
-- [ ] VM0a 已发现的 provider 收养/隔离漂移与 worker 环境代理/明文上游缺口修复，独立 review/离线验证。
+- [x] VM0a 已发现的 provider 接纳/隔离漂移与 worker 环境代理/明文上游缺口修复，独立 review、全模块离线 race/vet、关键三包十轮 race 和本地 CONNECT/TLS 测试通过；仅源码前置门槛，不含真实 VM 或每实例证书签发。
 - [ ] VM0b Linux 实际出口防火墙/namespace、宿主/跨槽/metadata/DNS/IPv6 拒绝及失效回收。
 - [ ] VM0c 每实例身份材料、生产 worker mTLS 与换代/重放拒绝；按明确客户端版本验证 TLS 特征。
 - [ ] VM0d 当前组件实际隔离整链，不复用旧 VM/旧凭据或局部 PASS 冒充完成。

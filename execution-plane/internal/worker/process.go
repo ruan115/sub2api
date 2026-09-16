@@ -26,6 +26,7 @@ import (
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/ticket"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker/fixedtransport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,11 +37,14 @@ import (
 const maxWorkerRequestBytes = 2 << 20
 const maxWorkerRPCMessageBytes = maxWorkerRequestBytes + (64 << 10)
 
+var errInvalidProcessURL = errors.New("invalid worker endpoint URL")
+
 type ProcessConfig struct {
 	ListenAddress       string
 	Identity            Identity
 	TicketPublicKey     ed25519.PublicKey
 	UpstreamBaseURL     *url.URL
+	EgressProxyURL      string
 	ImageDigest         string
 	AllowFakeActivation bool
 	Onboarding          OnboardingConfig
@@ -58,12 +62,9 @@ func LoadProcessConfig(getenv func(string) string) (ProcessConfig, error) {
 	if err != nil {
 		return ProcessConfig{}, err
 	}
-	baseURL, err := url.Parse(strings.TrimSpace(getenv("EXECUTION_UPSTREAM_BASE_URL")))
-	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || baseURL.User != nil {
+	baseURL, err := parseProcessURL(getenv("EXECUTION_UPSTREAM_BASE_URL"))
+	if err != nil {
 		return ProcessConfig{}, errors.New("EXECUTION_UPSTREAM_BASE_URL must be a URL origin")
-	}
-	if (baseURL.Path != "" && baseURL.Path != "/") || baseURL.RawQuery != "" || baseURL.Fragment != "" {
-		return ProcessConfig{}, errors.New("EXECUTION_UPSTREAM_BASE_URL must not contain path, query or fragment")
 	}
 	allowFake, err := strconv.ParseBool(strings.TrimSpace(getenv("EXECUTION_ALLOW_FAKE_ACTIVATION")))
 	if err != nil {
@@ -77,7 +78,7 @@ func LoadProcessConfig(getenv func(string) string) (ProcessConfig, error) {
 		"EXECUTION_ONBOARDING_PROFILE_URL":                &onboarding.ProfileURL,
 		"EXECUTION_ONBOARDING_API_KEY_VALIDATION_URL":     &onboarding.APIKeyValidationURL,
 	} {
-		if configured := strings.TrimSpace(getenv(value)); configured != "" {
+		if configured := getenv(value); configured != "" {
 			*target = configured
 		}
 	}
@@ -91,6 +92,7 @@ func LoadProcessConfig(getenv func(string) string) (ProcessConfig, error) {
 		},
 		TicketPublicKey:     publicKey,
 		UpstreamBaseURL:     baseURL,
+		EgressProxyURL:      getenv("EXECUTION_EGRESS_PROXY_URL"),
 		ImageDigest:         strings.TrimSpace(getenv("EXECUTION_IMAGE_DIGEST")),
 		AllowFakeActivation: allowFake,
 		Onboarding:          onboarding,
@@ -115,13 +117,22 @@ func (c ProcessConfig) Validate() error {
 	if len(c.TicketPublicKey) != ed25519.PublicKeySize {
 		return errors.New("worker ticket public key is invalid")
 	}
-	if c.UpstreamBaseURL == nil || c.UpstreamBaseURL.Scheme == "" || c.UpstreamBaseURL.Host == "" {
-		return errors.New("worker upstream base URL is required")
+	if err := fixedtransport.ValidateProxyURL(c.EgressProxyURL); err != nil {
+		return err
+	}
+	if !validProcessURL(c.UpstreamBaseURL, true, c.AllowFakeActivation) {
+		return errors.New("worker upstream base URL must be a secure URL origin (HTTP requires explicit fake activation)")
 	}
 	if c.ImageDigest == "" {
 		return errors.New("worker image digest is required")
 	}
 	if !c.AllowFakeActivation {
+		for _, raw := range []string{c.Onboarding.OrganizationsURL, c.Onboarding.SessionAuthorizeBaseURL, c.Onboarding.TokenURL, c.Onboarding.ProfileURL, c.Onboarding.APIKeyValidationURL} {
+			u, err := parseProcessURL(raw)
+			if err != nil || !validProcessURL(u, false, false) {
+				return errors.New("worker onboarding endpoints must be secure HTTPS URLs")
+			}
+		}
 		if _, err := NewOnboarder(c.Onboarding); err != nil {
 			return fmt.Errorf("worker onboarding configuration: %w", err)
 		}
@@ -253,14 +264,11 @@ func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) 
 	if err != nil {
 		return err
 	}
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
-		IdleConnTimeout:       60 * time.Second,
-		MaxIdleConns:          32,
-		MaxIdleConnsPerHost:   16,
+	transport, err := fixedtransport.New(config.EgressProxyURL)
+	if err != nil {
+		return err
 	}
+	defer transport.CloseIdleConnections()
 	executionClient := &http.Client{Transport: transport}
 	onboardingClient := &http.Client{Transport: transport, Timeout: 60 * time.Second}
 	var lifecycle processLifecycle

@@ -26,6 +26,7 @@ type Engine interface {
 	RemoveNetwork(ctx context.Context, networkID string) error
 	CreateContainer(ctx context.Context, name string, request CreateContainerRequest) (CreateContainerResponse, error)
 	InspectContainer(ctx context.Context, containerID string) (Container, error)
+	InspectImage(ctx context.Context, reference string) (Image, error)
 	StartContainer(ctx context.Context, containerID string) error
 	KillContainer(ctx context.Context, containerID, signal string) error
 	StopContainer(ctx context.Context, containerID string, timeout time.Duration) error
@@ -115,6 +116,14 @@ func (e *HTTPEngine) InspectContainer(ctx context.Context, containerID string) (
 	var container Container
 	err := e.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(containerID)+"/json", nil, &container)
 	return container, err
+}
+
+// InspectImage resolves an immutable image reference without pulling or
+// modifying it. Container.Image is a config ID, not a registry manifest digest.
+func (e *HTTPEngine) InspectImage(ctx context.Context, reference string) (Image, error) {
+	var image Image
+	err := e.do(ctx, http.MethodGet, "/images/"+url.PathEscape(reference)+"/json", nil, &image)
+	return image, err
 }
 
 func (e *HTTPEngine) StartContainer(ctx context.Context, containerID string) error {
@@ -332,11 +341,21 @@ func IsNotModified(err error) bool {
 }
 
 type Network struct {
-	ID       string            `json:"Id"`
-	Name     string            `json:"Name"`
-	Internal bool              `json:"Internal"`
-	Labels   map[string]string `json:"Labels"`
-	IPAM     NetworkIPAM       `json:"IPAM"`
+	ID         string                      `json:"Id"`
+	Name       string                      `json:"Name"`
+	Internal   bool                        `json:"Internal"`
+	Driver     string                      `json:"Driver"`
+	Attachable bool                        `json:"Attachable"`
+	EnableIPv6 bool                        `json:"EnableIPv6"`
+	Labels     map[string]string           `json:"Labels"`
+	IPAM       NetworkIPAM                 `json:"IPAM"`
+	Containers map[string]NetworkContainer `json:"Containers"`
+}
+
+type NetworkContainer struct {
+	Name        string `json:"Name"`
+	IPv4Address string `json:"IPv4Address"`
+	IPv6Address string `json:"IPv6Address"`
 }
 
 type NetworkIPAM struct {
@@ -344,6 +363,7 @@ type NetworkIPAM struct {
 }
 
 type NetworkIPAMConfig struct {
+	Subnet  string `json:"Subnet"`
 	Gateway string `json:"Gateway"`
 }
 
@@ -373,20 +393,35 @@ type CreateContainerRequest struct {
 }
 
 type HostConfig struct {
-	NetworkMode    string                   `json:"NetworkMode"`
-	ReadonlyRootfs bool                     `json:"ReadonlyRootfs"`
-	CapDrop        []string                 `json:"CapDrop"`
-	SecurityOpt    []string                 `json:"SecurityOpt"`
-	PidsLimit      int64                    `json:"PidsLimit"`
-	Memory         int64                    `json:"Memory"`
-	NanoCPUs       int64                    `json:"NanoCpus"`
-	Tmpfs          map[string]string        `json:"Tmpfs"`
-	Init           *bool                    `json:"Init"`
-	RestartPolicy  RestartPolicy            `json:"RestartPolicy"`
-	LogConfig      LogConfig                `json:"LogConfig"`
-	ExtraHosts     []string                 `json:"ExtraHosts"`
-	Binds          []string                 `json:"Binds,omitempty"`
-	PortBindings   map[string][]PortBinding `json:"PortBindings,omitempty"`
+	NetworkMode       string                   `json:"NetworkMode"`
+	ReadonlyRootfs    bool                     `json:"ReadonlyRootfs"`
+	CapDrop           []string                 `json:"CapDrop"`
+	CapAdd            []string                 `json:"CapAdd"`
+	Privileged        bool                     `json:"Privileged"`
+	PidMode           string                   `json:"PidMode"`
+	IpcMode           string                   `json:"IpcMode"`
+	UTSMode           string                   `json:"UTSMode"`
+	UsernsMode        string                   `json:"UsernsMode"`
+	CgroupnsMode      string                   `json:"CgroupnsMode"`
+	Runtime           string                   `json:"Runtime"`
+	SecurityOpt       []string                 `json:"SecurityOpt"`
+	PidsLimit         int64                    `json:"PidsLimit"`
+	Memory            int64                    `json:"Memory"`
+	NanoCPUs          int64                    `json:"NanoCpus"`
+	Tmpfs             map[string]string        `json:"Tmpfs"`
+	Init              *bool                    `json:"Init"`
+	RestartPolicy     RestartPolicy            `json:"RestartPolicy"`
+	LogConfig         LogConfig                `json:"LogConfig"`
+	ExtraHosts        []string                 `json:"ExtraHosts"`
+	Binds             []string                 `json:"Binds,omitempty"`
+	Mounts            []json.RawMessage        `json:"Mounts,omitempty"`
+	VolumesFrom       []string                 `json:"VolumesFrom,omitempty"`
+	Devices           []json.RawMessage        `json:"Devices,omitempty"`
+	DeviceRequests    []json.RawMessage        `json:"DeviceRequests,omitempty"`
+	DeviceCgroupRules []string                 `json:"DeviceCgroupRules,omitempty"`
+	Links             []string                 `json:"Links,omitempty"`
+	PublishAllPorts   bool                     `json:"PublishAllPorts"`
+	PortBindings      map[string][]PortBinding `json:"PortBindings,omitempty"`
 }
 
 type PortBinding struct {
@@ -440,25 +475,41 @@ type Container struct {
 	ID      string `json:"Id"`
 	Name    string `json:"Name"`
 	Created string `json:"Created"`
+	Image   string `json:"Image"`
 	Config  struct {
-		Labels map[string]string `json:"Labels"`
-		User   string            `json:"User"`
-		Env    []string          `json:"Env"`
+		Image    string            `json:"Image"`
+		Hostname string            `json:"Hostname"`
+		Labels   map[string]string `json:"Labels"`
+		User     string            `json:"User"`
+		Env      []string          `json:"Env"`
 	} `json:"Config"`
 	HostConfig      HostConfig `json:"HostConfig"`
 	NetworkSettings struct {
-		Ports    map[string][]PortBinding `json:"Ports"`
-		Networks map[string]struct {
-			IPAddress string `json:"IPAddress"`
-		} `json:"Networks"`
+		Ports    map[string][]PortBinding   `json:"Ports"`
+		Networks map[string]NetworkEndpoint `json:"Networks"`
 	} `json:"NetworkSettings"`
 	AppArmorProfile string `json:"AppArmorProfile"`
 	Mounts          []struct {
 		Type        string `json:"Type"`
 		Source      string `json:"Source"`
 		Destination string `json:"Destination"`
+		Mode        string `json:"Mode"`
+		RW          bool   `json:"RW"`
+		Propagation string `json:"Propagation"`
 	} `json:"Mounts"`
 	State ContainerState `json:"State"`
+}
+
+type NetworkEndpoint struct {
+	NetworkID         string `json:"NetworkID"`
+	IPAddress         string `json:"IPAddress"`
+	Gateway           string `json:"Gateway"`
+	GlobalIPv6Address string `json:"GlobalIPv6Address"`
+}
+
+type Image struct {
+	ID          string   `json:"Id"`
+	RepoDigests []string `json:"RepoDigests"`
 }
 
 type ContainerState struct {

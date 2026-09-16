@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,21 +82,23 @@ func (p NetworkPolicy) Validate() error {
 	if !p.DenyDirectInternet {
 		return errors.New("direct worker internet access must be denied")
 	}
-	if p.EgressProxyEndpoint == "" {
-		return errors.New("egress proxy endpoint is required")
+	return ValidateEgressProxyURL(p.EgressProxyEndpoint)
+}
+
+// ValidateEgressProxyURL is the shared, pure boundary for provider bootstrap
+// and worker fixed transport. The proxy contains no account credentials.
+func ValidateEgressProxyURL(raw string) error {
+	const invalid = "egress proxy endpoint must be a credential-free internal HTTP origin with a canonical port"
+	endpoint, err := url.Parse(raw)
+	if err != nil || endpoint.Scheme != "http" || endpoint.Opaque != "" || endpoint.User != nil ||
+		endpoint.Hostname() != "host-agent.execution.internal" || endpoint.RawQuery != "" || endpoint.ForceQuery ||
+		endpoint.Fragment != "" || endpoint.RawFragment != "" || endpoint.RawPath != "" || (endpoint.Path != "" && endpoint.Path != "/") {
+		return errors.New(invalid)
 	}
-	endpoint, err := url.Parse(p.EgressProxyEndpoint)
-	if err != nil || endpoint.Scheme != "http" || endpoint.Host == "" {
-		return errors.New("egress proxy endpoint must be an internal HTTP URL")
-	}
-	if endpoint.User != nil {
-		return errors.New("egress proxy credentials must remain in host-agent")
-	}
-	if (endpoint.Path != "" && endpoint.Path != "/") || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return errors.New("egress proxy endpoint must be an origin without path, query or fragment")
-	}
-	if endpoint.Hostname() != "host-agent.execution.internal" || endpoint.Port() == "" {
-		return errors.New("egress proxy endpoint must target the internal host-agent port")
+	port, err := strconv.ParseUint(endpoint.Port(), 10, 16)
+	if err != nil || port == 0 || strconv.FormatUint(port, 10) != endpoint.Port() ||
+		endpoint.Host != net.JoinHostPort("host-agent.execution.internal", endpoint.Port()) || endpoint.String() != raw {
+		return errors.New(invalid)
 	}
 	return nil
 }

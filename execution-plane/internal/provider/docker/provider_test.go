@@ -21,6 +21,10 @@ type fakeEngine struct {
 	createNetworkError   error
 	networkRequest       CreateNetworkRequest
 	container            Container
+	image                Image
+	imageInspectError    error
+	imageInspectedRef    string
+	startedID            string
 	inspectError         error
 	inspectErrors        []error
 	createError          error
@@ -54,8 +58,9 @@ func (e *fakeEngine) CreateNetwork(_ context.Context, request CreateNetworkReque
 	e.networkRequest = request
 	if e.createNetworkError == nil {
 		e.network = Network{
-			Name: request.Name, Internal: request.Internal, Labels: request.Labels,
-			IPAM: NetworkIPAM{Config: []NetworkIPAMConfig{{Gateway: "172.31.0.1"}}},
+			ID: strings.Repeat("d", 64), Name: request.Name, Internal: request.Internal, Driver: request.Driver,
+			Attachable: request.Attachable, Labels: request.Labels,
+			IPAM: NetworkIPAM{Config: []NetworkIPAMConfig{{Gateway: "172.31.0.1", Subnet: "172.31.0.0/16"}}},
 		}
 		e.networkInspectError = nil
 	}
@@ -91,8 +96,19 @@ func (e *fakeEngine) InspectContainer(context.Context, string) (Container, error
 	return e.container, e.inspectError
 }
 
-func (e *fakeEngine) StartContainer(context.Context, string) error {
+func (e *fakeEngine) InspectImage(_ context.Context, ref string) (Image, error) {
+	e.record("inspect-image")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.imageInspectedRef = ref
+	return e.image, e.imageInspectError
+}
+
+func (e *fakeEngine) StartContainer(_ context.Context, id string) error {
 	e.record("start")
+	e.mu.Lock()
+	e.startedID = id
+	e.mu.Unlock()
 	return nil
 }
 
@@ -181,6 +197,10 @@ func TestCreateAppliesSandboxAndDoesNotExposeAccountID(t *testing.T) {
 	if len(request.HostConfig.ExtraHosts) != 1 || request.HostConfig.ExtraHosts[0] != "host-agent.execution.internal:172.31.0.1" {
 		t.Fatalf("host-agent route missing: %+v", request.HostConfig.ExtraHosts)
 	}
+	if !contains(request.Env, "EXECUTION_EGRESS_PROXY_URL="+dockerSpec().Network.EgressProxyEndpoint) ||
+		request.HostConfig.Runtime != "runc" || request.HostConfig.IpcMode != "private" || request.HostConfig.CgroupnsMode != "private" {
+		t.Fatal("explicit fixed proxy or isolated namespace/runtime defaults are missing")
+	}
 }
 
 func TestCreateRejectsNonInternalNetwork(t *testing.T) {
@@ -204,32 +224,16 @@ func TestCreateRejectsUnapprovedSecurityProfiles(t *testing.T) {
 	}
 }
 
-func healthyContainer(epoch string) Container {
-	container := Container{ID: "container-id-1", Created: "2033-05-18T03:33:20Z"}
-	container.Config.Labels = map[string]string{
-		labelManaged: "true", labelSlotID: "slot/customer-1", labelEpoch: epoch, labelImageDigest: dockerSpec().ImageDigest,
-	}
-	container.Config.User = "65532:65532"
-	container.HostConfig.ReadonlyRootfs = true
-	container.HostConfig.CapDrop = []string{"ALL"}
-	container.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "seccomp=builtin", "apparmor=docker-default"}
-	container.HostConfig.PidsLimit = 128
-	container.HostConfig.Memory = 512 << 20
-	container.HostConfig.NanoCPUs = 500_000_000
-	container.HostConfig.Tmpfs = map[string]string{"/tmp": "rw", "/run": "rw"}
-	initProcess := true
-	container.HostConfig.Init = &initProcess
-	container.State.Status = "running"
-	container.State.Running = true
-	container.HostConfig.NetworkMode = "execution-net-slot-customer-1-" + hexSuffix("slot/customer-1")
-	container.State.Health = &struct {
-		Status string `json:"Status"`
-	}{Status: "healthy"}
+func healthyContainer(t *testing.T, epoch string) Container {
+	t.Helper()
+	container, _ := sandboxFixture(t)
+	container.Config.Labels[labelEpoch] = epoch
+	container.Config.Env[1] = "EXECUTION_EPOCH=" + epoch
 	return container
 }
 
 func TestInspectRequiresHealthcheckAndMapsHealthy(t *testing.T) {
-	engine := &fakeEngine{container: healthyContainer("11")}
+	engine := sandboxTestEngine(t)
 	provider := newTestProvider(t, engine)
 	status, err := provider.Inspect(context.Background(), "container-id-1")
 	if err != nil {
@@ -250,14 +254,14 @@ func TestInspectRequiresHealthcheckAndMapsHealthy(t *testing.T) {
 }
 
 func TestInspectRejectsUnconfinedOrMountedContainer(t *testing.T) {
-	engine := &fakeEngine{container: healthyContainer("11")}
+	engine := sandboxTestEngine(t)
 	provider := newTestProvider(t, engine)
 	engine.container.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "seccomp=unconfined", "apparmor=docker-default"}
 	if _, err := provider.Inspect(context.Background(), "container-id-1"); err == nil || !strings.Contains(err.Error(), "seccomp") {
 		t.Fatalf("expected unconfined seccomp rejection, got %v", err)
 	}
 
-	engine.container = healthyContainer("11")
+	engine.container = healthyContainer(t, "11")
 	engine.container.HostConfig.Binds = []string{"/var/run/docker.sock:/var/run/docker.sock"}
 	if _, err := provider.Inspect(context.Background(), "container-id-1"); err == nil || !strings.Contains(err.Error(), "mount") {
 		t.Fatalf("expected bind mount rejection, got %v", err)
@@ -265,10 +269,7 @@ func TestInspectRejectsUnconfinedOrMountedContainer(t *testing.T) {
 }
 
 func TestCreateIsIdempotentButEpochFenced(t *testing.T) {
-	engine := &fakeEngine{
-		network:   Network{Internal: true, Labels: map[string]string{labelManaged: "true", labelSlotID: "slot/customer-1"}},
-		container: healthyContainer("11"),
-	}
+	engine := sandboxTestEngine(t)
 	provider := newTestProvider(t, engine)
 	instance, err := provider.Create(context.Background(), dockerSpec())
 	if err != nil || !strings.HasPrefix(instance.ProviderRef, "execution-slot-") {
@@ -278,24 +279,18 @@ func TestCreateIsIdempotentButEpochFenced(t *testing.T) {
 		t.Fatal("idempotent create called Engine create")
 	}
 
-	engine.container = healthyContainer("10")
+	engine.container = healthyContainer(t, "10")
 	if _, err := provider.Create(context.Background(), dockerSpec()); err == nil || !strings.Contains(err.Error(), "epoch 10") {
 		t.Fatalf("expected epoch fence error, got %v", err)
 	}
 }
 
 func TestCreateRecoversFromConcurrentNetworkAndContainerCreate(t *testing.T) {
-	engine := &fakeEngine{
-		network: Network{
-			Internal: true, Labels: map[string]string{labelManaged: "true", labelSlotID: "slot/customer-1"},
-			IPAM: NetworkIPAM{Config: []NetworkIPAMConfig{{Gateway: "172.31.0.1"}}},
-		},
-		networkInspectErrors: []error{notFound()},
-		createNetworkError:   &APIError{StatusCode: http.StatusConflict, Message: "network already exists"},
-		container:            healthyContainer("11"),
-		inspectErrors:        []error{notFound()},
-		createError:          &APIError{StatusCode: http.StatusConflict, Message: "container already exists"},
-	}
+	engine := sandboxTestEngine(t)
+	engine.networkInspectErrors = []error{notFound()}
+	engine.createNetworkError = &APIError{StatusCode: http.StatusConflict, Message: "network already exists"}
+	engine.inspectErrors = []error{notFound()}
+	engine.createError = &APIError{StatusCode: http.StatusConflict, Message: "container already exists"}
 	provider := newTestProvider(t, engine)
 	instance, err := provider.Create(context.Background(), dockerSpec())
 	if err != nil {

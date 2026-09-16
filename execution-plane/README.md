@@ -20,6 +20,15 @@ activation/business signing, proof-driven lease renewal and existing-runtime reg
 still pending. Migration 013 is not
 automatically applied, and historical unscoped observations remain unavailable.
 
+VM isolation now takes priority over further business wiring. The VM0a source
+gate verifies instance adoption against actual Docker image/network/sandbox
+metadata and forces worker HTTP traffic through an explicit proxy with verified
+upstream TLS. It does **not** implement per-instance machine identity or worker
+RPC mTLS, nor prove Linux firewall isolation. See the
+[VM gate plan](../openspec/changes/complete-ccmax-execution-acceptance/vm-isolation-design.md),
+[provider boundary](internal/provider/docker/README.md) and
+[online identity evidence](../recovery/docs/vm-identity-tls-baseline-2026-09-16.md).
+
 - slot lifecycle state machine;
 - validated pilot timing and capacity defaults;
 - Ed25519 execution tickets bound to node/account/slot/epoch;
@@ -97,7 +106,13 @@ gateway/host-agent/CLI assembly. See the
 ## Fixed proxy egress boundary
 
 Workers receive only an internal, credential-free HTTP proxy URL such as
-`http://host-agent.execution.internal:18080`. The host-agent maps the worker's
+`http://host-agent.execution.internal:18080`. The worker process requires
+`EXECUTION_EGRESS_PROXY_URL` before listening; neither environment proxy
+selection nor `NO_PROXY` can bypass it, and proxy failure has no direct fallback.
+Production execution/onboarding endpoints require HTTPS. Each worker transport
+has its own verifying TLS configuration and connection pool. These are not
+per-VM service certificates; see [fixed transport tests and limits](internal/worker/fixedtransport/README.md).
+The host-agent maps the worker's
 private source IP to one slot, execution epoch and proxy lease, then validates
 the current execution lease before dialing the allowed upstream target. Remote
 proxy usernames and passwords remain in the host-agent and all string/JSON
@@ -110,6 +125,14 @@ revalidation closes existing tunnels when the epoch is revoked or the lease
 backend becomes unavailable. The tagged Docker E2E additionally runs a literal
 TCP probe inside the worker: the host-agent proxy path succeeds while a direct
 connection to a listener outside the slot bridge is unreachable.
+
+Those historical Docker tests are not current whole-chain acceptance evidence.
+An internal bridge still permits access to host gateway services; arbitrary
+socket traffic, other host ports, DNS, IPv6, metadata and cross-slot paths need
+the separate Linux VM0b/VM0d gates. Current active-tunnel fencing observes the
+execution lease, not immediate proxy-binding unregister/revoke. Remote plain
+HTTP/SOCKS proxy authentication also requires a separately verified encrypted
+transport before production use. Business wiring remains paused.
 
 ## Worker onboarding boundary
 

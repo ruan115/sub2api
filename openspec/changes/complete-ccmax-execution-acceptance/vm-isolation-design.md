@@ -2,6 +2,8 @@
 
 日期：2026-09-16；基线 `1dac649`。用户要求先确认 VM 链路和防泄漏，再推进后续功能，因此暂停 B2b2b/C 等业务接线，先修复隔离前置条件。只在本地开发、合成测试和提交；不 SSH、不借用账号、不部署、不读取真实凭据。
 
+用户随后明确：需要每 VM 独立机器标识/密钥/证书，不需要 TLS 指纹伪装。已核查的线上静态证据与不能宣称一致的部分见 [身份/TLS 对照](../../../recovery/docs/vm-identity-tls-baseline-2026-09-16.md)。线上脚本的独立 home 证书存放不等于独立密钥生成，不复制真实线上密钥；机器标识来源尚未证实。
+
 ## 已确认事实与未确认边界
 
 - 已保全的线上样本使用 Docker/runc；当前 PRD 的 VM 是每账号 ExecutionSlot，不是独立内核的 KVM/Firecracker。真实 hypervisor provider 属于单独的架构选择，不静默改写成“已经实现”。
@@ -10,6 +12,7 @@
 - [Docker 官方 internal 网络说明](https://docs.docker.com/reference/cli/docker/network/create/#network-internal-mode---internal) 明确允许访问 bridge gateway 上的宿主服务。因此 internal=true 不是宿主端口白名单，不把它认作完整 VM 出口隔离。
 - [Go ProxyFromEnvironment](https://pkg.go.dev/net/http#ProxyFromEnvironment) 使用环境代理/NO_PROXY；[TLS Config](https://pkg.go.dev/crypto/tls#Config) 中证书验证、SNI、会话和 KeyLogWriter 是独立配置。目标站 TLS 和到 HTTPS 代理的 TLS 是两次不同的握手。
 - 本地 Colima 的 default 与 ccmax-cache-probe 当前均 Stopped。旧测试 VM 可能保存恢复制品，不自动启动旧实例/旧容器或沿用任意 Docker context；真实 Linux 网络验收尚未执行。
+- 信任边界是受控宿主、Docker daemon 与宿主内核。容器配置核对不能防止恶意宿主伪造 inspect 或读取进程内存，也不是独立内核隔离；若要把宿主/共享内核排除出信任域，必须单独选择真实 hypervisor 与运维方案，不能以随机机器标识解决。
 
 ## 模块与本轮切片 VM0a
 

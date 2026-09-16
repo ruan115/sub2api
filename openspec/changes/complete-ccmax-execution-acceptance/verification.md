@@ -193,3 +193,46 @@ Review 由两位代理交叉审查非本人模块，主代理集成/复验。发
 - worker RPC 为 bufconn，权威/lease 为 Memory，不是实际数据库/Redis/私网 runtime 通道、真实 Docker/VM、凭据/代理或模型可用性证据；没有把 B2b1、B2a 和本切片的局部测试拼成生产整链通过。
 - B2b2b activation payload/lease 授权、业务票版本/代理/模式约束及使用时复核、B2b2c 双层续租/持续流撤销、B3–G 和 PRD §31 仍开放；本切片只勾选 B2b2a。
 - 当前阶段无 SSH/线上数据/UI/配置/服务/路由/账号操作，真实模型调用仍为0；没有 push、部署、开启 execution_onboarding 或标记 migrated。
+
+## VM0a：实例接纳与固定 TLS 出口前置修补
+
+先提交计划 `3ffc759`，再按用户明确的“每 VM 独立机器标识/密钥/证书”收紧范围。设计：[VM 优先门槛](vm-isolation-design.md)；模块：[Docker sandbox](../../../execution-plane/internal/provider/docker/README.md)、[固定 transport](../../../execution-plane/internal/worker/fixedtransport/README.md)；[线上静态身份对照](../../../recovery/docs/vm-identity-tls-baseline-2026-09-16.md)。仅 VM0a 源码门槛，不是每实例身份签发已完成。
+
+### 已修复与证据层次
+
+| 项目 | 本轮实现及实际验证 |
+| --- | --- |
+| 账号与请求规格一致 | 旧实现会复用同 slot/epoch、不同 account_hash 的实例；现校验 account、image、proxy、UID、资源和指定 seccomp/AppArmor/tmpfs。复用差异只拒绝，不重建或清理线上对象 |
+| 共用接纳门禁 | Create 的旧实例复用、Inspect、InspectSlot、Start、RuntimeEndpoint 共用只读 gate；核对实际 Engine image ID/不可变引用、唯一专属 internal bridge/成员/IP/gateway、namespace、能力、挂载、NNP、profile 与 bootstrap 元数据。Start 使用已检查的 ID，停止态不广告 endpoint |
+| profile 配置防降级 | Config 不再接受空白、畸形、控制字符或 unconfined（包括大小写变体）；保留 builtin/custom 支持，复制允许列表防调用方构造后修改。不能以 allowlist 名义关闭隔离保护 |
+| Docker 合同证据 | 显式 typed JSON fixture 包含旧 decoder 丢弃的危险字段；每个漂移负例先验证同一正例，覆盖五入口拒绝且无变更调用；区分 registry manifest digest 与本地 image config ID，支持 tmpfs 投影/不投影及未首次启动网络形态。这些是合成 Engine 响应，不是真实 Docker 验收 |
+| 启动前配置 | 新 EXECUTION_EGRESS_PROXY_URL 由 SlotSpec 传入；缺失、不规范或含凭据即失败，不先监听。生产执行/上号地址必须 HTTPS，只有显式 fake activation 可用 HTTP。原 HTTP/gRPC 消息合同未改，但旧手动启动配置必须补此内部字段 |
+| 固定路径 | worker 执行与上号共用显式 transport；HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY/localhost 不参与选路，固定代理失败不直接拨目标。共享 provider/worker URL 校验合同，保留两处既有 no-redirect 和进程退出连接池关闭 |
+| 实际 TLS 测试 | TestFixedProxyActualTLSProtectsOriginAndRejectsCertificateFaults 以实际 Go transport 经本地 CONNECT 到临时 TLS server；正常 TLS1.3/SNI 成功，未知 CA、错 SAN、过期和 TLS1.1 均在 HTTP handler 前拒绝。合成认证只在 TLS 内到达目标、不出现在 CONNECT；固定拨号适配器禁止任何其他地址，无目标 DNS/公网请求 |
+| 材料边界 | 临时测试 CA/私钥仅内存生成；线上只读取已保全且经过内容扫描的选定脚本文本，未读真实证书/私钥/账号。独立 home 证书路径不等于独立密钥来源，允许同一发布证书目录的脚本不能证明线上每实例唯一；没有复制真实材料或生成任意 ClientHello 伪装 |
+
+### Review 与回归
+
+- 账号错误复用、缺/多/host 网络和 NNP=false 先取得旧 FAIL；worker 的缺显式 proxy、生产明文 origin、明文 loopback onboarding 三项也先取得旧 FAIL。
+- 独立交叉 review 发现“允许列表内但不符合本次 spec 的 profile/tmpfs 仍能复用”，已补精确比较和八维度 TestSandboxReuseMatchesRequestedSecurityAndResources；reviewer 单独 race 三轮复核关闭。
+- 主代理最终检查新增 Config 允许 unconfined 的问题；先取得14个旧 FAIL，再补构造期拒绝、20个负例、builtin/custom 正例与 slice 别名回归。另一 reviewer 独立只读复核并对三个配置测试执行离线 race 三轮，通过并关闭该项。该项不能由前述 inspect 负例代替。
+- Provider 作者只读复核 worker 实际 process 接线、原 no-redirect 和主代理的 CONNECT/TLS/跨模块 URL 合同测试；worker 作者交叉复核 provider。模块文件独立维护，没有将安全检查堆进业务处理文件。
+
+### 主代理最终验证
+
+工作目录 `execution-plane`。下面全部 Go 命令均使用 `GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local`，并以 `env -u` 显式屏蔽 `EXECUTION_MYSQL_TEST_DSN`、`EXECUTION_REDIS_TEST_URL`、`EXECUTION_CCMAX_MYSQL_TEST_DSN`，没有安装依赖或连接外部数据库：
+
+- 最终完整 `go test -race -count=1 -timeout=120s ./...` 与 `go vet ./...` 通过；包括最后的 Config 防降级修复。
+- `go test -race -count=10 -timeout=120s ./internal/provider/docker ./internal/worker/fixedtransport ./internal/worker` 三个包全部用例通过，不仅选择新测试；此前同包定向十轮也通过。
+- `go test -tags docker_e2e -run '^$' ./internal/hostagent` 仅编译通过，未运行 Docker 测试或访问 Engine socket。
+- `git diff --check`、暂存区 `git diff --cached --check` 及 recoverykit 文本/evidence policy 对本切片22个文件扫描通过；提交只含源码、合成测试和脱敏文档，无私钥、证书制品或真实凭据。
+- web-reverse-master 的本地脚本 selftest 为7/7通过，仅用于核查所用证据工具自身；不是 VM/TLS/生产验收证据。该技能的证据分层使本轮没有把独立存储目录或既有局部 PASS 视为身份唯一/整链通过。
+
+### 当前不能放行的内容
+
+- **VM0b–VM0d 未完成。** 未启动容器或 VM、未运行 make docker-e2e；现有 Colima profile 均停机。旧脚本会沿用 context、代理配置与共享目录，尚不能直接作为本次安全 Linux 验收入口。真实 kernel/Engine 行为、host-port/DNS/IPv6/metadata/跨槽 ACL、规则丢失/daemon 重启与运行中漂移均待验证。
+- 每 VM 稳定机器标识、服务私钥/CSR/证书签发、保护存放/恢复/轮换、旧执行代与跨槽拒绝及 worker RPC 生产 mTLS 仍缺。进程 X25519 接收密钥和本轮目标 HTTPS 都不能替代服务端身份及双向认证。先维持无真实凭据的链路，再交付身份材料。
+- Docker/runc 是共享受信内核；读取实际配置只是一个时点的接纳检查，不防恶意 host/daemon，也不是网络防火墙。库中固定 transport 不能拦截任意程序使用其他 socket API。
+- host egress 在途 tunnel 的现有 fence 只观察 execution lease，proxy binding unregister/ProxyLeaseID 撤销的即时回收、CONNECT 握手取消与 half-close 清理仍待补；远程 HTTP/SOCKS 代理认证的传输保护未验。不得扩大为“没有泄漏风险”。
+- B2b2b/C 等业务接线继续暂停；没有当前控制台→控制面→host-agent→隔离 worker→出口→TLS 假上游的一次实际组合证据。仍无真实 MySQL/Redis、真实凭据/代理/模型、CLI/1000连接/24h/canary 证据。
+- 本轮无 SSH/线上数据/UI/配置/服务/路由/账号操作，真实模型调用为0；不 push、不部署、不启 execution_onboarding、不标 migrated。

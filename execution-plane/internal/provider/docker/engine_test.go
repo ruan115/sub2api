@@ -166,3 +166,48 @@ func TestHTTPEngineRejectsOldOrMalformedVersion(t *testing.T) {
 		})
 	}
 }
+
+type sandboxRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f sandboxRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestHTTPEngineInspectImageIsReadOnlyAndUsesReference(t *testing.T) {
+	reference := dockerSpec().ImageDigest
+	want := sandboxImageFixture()
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	engine := &HTTPEngine{baseURL: "http://docker", apiPrefix: "/v1.43", client: &http.Client{Transport: sandboxRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1.43/images/"+reference+"/json" || r.Body != nil || r.URL.RawQuery != "" {
+			t.Fatal("image verification did not use a single read-only inspect of the immutable reference")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(encoded))}, nil
+	})}}
+	image, err := engine.InspectImage(context.Background(), reference)
+	if err != nil || image.ID != want.ID || len(image.RepoDigests) != 1 || image.RepoDigests[0] != reference || calls != 1 {
+		t.Fatalf("image inspect: %v", err)
+	}
+}
+
+func TestHTTPEngineDecodesActualSandboxSecurityFields(t *testing.T) {
+	raw := `{"Image":"sha256:actual","Config":{"Image":"repo@sha256:manifest","Hostname":"sandbox"},"HostConfig":{"Privileged":true,"CapAdd":["NET_ADMIN"],"PidMode":"host","IpcMode":"host","UTSMode":"host","UsernsMode":"host","CgroupnsMode":"host","Runtime":"custom","Mounts":[{"Type":"bind"}],"Devices":[{"PathOnHost":"/dev/kvm"}],"DeviceRequests":[{"Count":-1}],"DeviceCgroupRules":["a *:* rwm"],"VolumesFrom":["other"],"PublishAllPorts":true},"NetworkSettings":{"Networks":{"outside":{"NetworkID":"network","IPAddress":"172.31.0.2","Gateway":"172.31.0.1","GlobalIPv6Address":"fd00::2"}}},"Mounts":[{"Type":"tmpfs","Source":"","Destination":"/tmp","RW":true}]}`
+	engine := &HTTPEngine{baseURL: "http://docker", apiPrefix: "/v1.43", client: &http.Client{Transport: sandboxRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet {
+			t.Fatal("inspect mutated state")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(raw))}, nil
+	})}}
+	c, err := engine.InspectContainer(context.Background(), "container")
+	if err != nil || !c.HostConfig.Privileged || len(c.HostConfig.CapAdd) != 1 || c.HostConfig.PidMode != "host" || c.HostConfig.IpcMode != "host" ||
+		c.HostConfig.UTSMode != "host" || c.HostConfig.UsernsMode != "host" || c.HostConfig.CgroupnsMode != "host" || c.HostConfig.Runtime != "custom" ||
+		len(c.HostConfig.Mounts) != 1 || len(c.HostConfig.Devices) != 1 || len(c.HostConfig.DeviceRequests) != 1 || len(c.HostConfig.DeviceCgroupRules) != 1 ||
+		len(c.HostConfig.VolumesFrom) != 1 || !c.HostConfig.PublishAllPorts || c.Image != "sha256:actual" || c.Config.Image != "repo@sha256:manifest" ||
+		c.NetworkSettings.Networks["outside"].GlobalIPv6Address != "fd00::2" || len(c.Mounts) != 1 || !c.Mounts[0].RW {
+		t.Fatalf("inspect omitted sandbox evidence: %v", err)
+	}
+}

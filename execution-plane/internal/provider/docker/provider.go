@@ -64,6 +64,9 @@ func (c Config) Validate() error {
 	if len(c.AllowedSeccompProfiles) == 0 || len(c.AllowedAppArmorProfiles) == 0 {
 		return errors.New("Docker seccomp and AppArmor allowlists are required")
 	}
+	if !validSandboxProfileAllowlist(c.AllowedSeccompProfiles) || !validSandboxProfileAllowlist(c.AllowedAppArmorProfiles) {
+		return errors.New("Docker sandbox profile allowlists contain an empty, malformed or disabled profile")
+	}
 	if c.StopTimeout <= 0 {
 		return errors.New("Docker stop timeout must be positive")
 	}
@@ -111,12 +114,18 @@ func New(config Config, engine Engine) (*Provider, error) {
 	if engine == nil {
 		return nil, errors.New("Docker Engine client is required")
 	}
+	// Retain the validated policy, not mutable caller-owned slice storage.
+	config.AllowedSeccompProfiles = append([]string(nil), config.AllowedSeccompProfiles...)
+	config.AllowedAppArmorProfiles = append([]string(nil), config.AllowedAppArmorProfiles...)
 	return &Provider{config: config, engine: engine}, nil
 }
 
 func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instance, error) {
 	if err := spec.Validate(); err != nil {
 		return base.Instance{}, err
+	}
+	if !sandboxImmutableReference(spec.ImageDigest) {
+		return base.Instance{}, errors.New("canonical immutable image reference is required")
 	}
 	if !contains(p.config.AllowedSeccompProfiles, spec.Security.SeccompProfile) {
 		return base.Instance{}, fmt.Errorf("seccomp profile %q is not allowed", spec.Security.SeccompProfile)
@@ -142,18 +151,22 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 	networkName := p.networkName(spec.SlotID)
 	hostAgentGateway, err := p.slotNetworkGateway(ctx, networkName, spec.SlotID)
 	if err != nil {
-		if networkCreated {
-			_ = p.engine.RemoveNetwork(ctx, networkName)
+		// A concurrent creator may have attached the exact instance after our
+		// first lookup. Re-adopt only after the complete read-only gate; never
+		// delete or repair a network whose ownership/shape could not be proven.
+		if existing, inspectErr := p.existingSlot(ctx, name, spec); inspectErr == nil {
+			return existing, nil
 		}
 		return base.Instance{}, err
 	}
 
-	tmpfsBytes := int64(math.Max(float64(spec.Resources.TmpfsBytes/2), float64(1<<20)))
+	tmpfsBytes := sandboxTmpfsBytes(spec.Resources.TmpfsBytes)
 	initProcess := true
 	stopTimeout := int(math.Ceil(p.config.StopTimeout.Seconds()))
 	environment := []string{
 		"EXECUTION_SLOT_ID=" + spec.SlotID,
 		"EXECUTION_EPOCH=" + strconv.FormatUint(spec.Epoch, 10),
+		"EXECUTION_EGRESS_PROXY_URL=" + spec.Network.EgressProxyEndpoint,
 		"HTTP_PROXY=" + spec.Network.EgressProxyEndpoint,
 		"HTTPS_PROXY=" + spec.Network.EgressProxyEndpoint,
 		"NO_PROXY=127.0.0.1,localhost",
@@ -188,6 +201,9 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 		Env:          environment,
 		ExposedPorts: exposedPorts,
 		HostConfig: HostConfig{
+			Runtime:        sandboxRuntime,
+			IpcMode:        "private",
+			CgroupnsMode:   "private",
 			NetworkMode:    networkName,
 			ReadonlyRootfs: true,
 			CapDrop:        []string{"ALL"},
@@ -253,22 +269,12 @@ func (p *Provider) RuntimeEndpoint(ctx context.Context, providerRef string) (str
 	if p.config.WorkerBootstrap == nil {
 		return "", errors.New("worker runtime bootstrap is not configured")
 	}
-	container, err := p.engine.InspectContainer(ctx, providerRef)
+	container, err := p.readSandbox(ctx, providerRef)
 	if err != nil {
 		return "", err
 	}
-	if container.Config.Labels[labelManaged] != "true" || container.Config.Labels[labelSlotID] == "" {
-		return "", errors.New("container is not a managed execution slot")
-	}
-	if err := p.validateSandbox(container); err != nil {
-		return "", err
-	}
-	expectedNetwork := p.networkName(container.Config.Labels[labelSlotID])
-	if container.HostConfig.NetworkMode != expectedNetwork {
-		return "", fmt.Errorf("worker runtime is attached to unexpected Docker network %q", container.HostConfig.NetworkMode)
-	}
-	if _, err := p.slotNetworkGateway(ctx, expectedNetwork, container.Config.Labels[labelSlotID]); err != nil {
-		return "", err
+	if !container.State.Running {
+		return "", errors.New("worker runtime is not running")
 	}
 	network := container.NetworkSettings.Networks[container.HostConfig.NetworkMode]
 	ip := net.ParseIP(network.IPAddress)
@@ -279,7 +285,11 @@ func (p *Provider) RuntimeEndpoint(ctx context.Context, providerRef string) (str
 }
 
 func (p *Provider) existingSlot(ctx context.Context, name string, spec base.SlotSpec) (base.Instance, error) {
-	existing, err := p.inspect(ctx, name)
+	container, err := p.readSandbox(ctx, name)
+	if err != nil {
+		return base.Instance{}, err
+	}
+	existing, err := p.statusFromContainer(container, name)
 	if err != nil {
 		return base.Instance{}, err
 	}
@@ -292,16 +302,19 @@ func (p *Provider) existingSlot(ctx context.Context, name string, spec base.Slot
 	if existing.ImageDigest != spec.ImageDigest {
 		return base.Instance{}, fmt.Errorf("slot %q already exists with a different image digest", spec.SlotID)
 	}
-	container, err := p.engine.InspectContainer(ctx, name)
-	if err != nil {
-		return base.Instance{}, err
+	if container.Config.Labels[labelAccountHash] != base.RuntimeAccountID(spec.AccountID) {
+		return base.Instance{}, errors.New("existing slot belongs to another account")
 	}
-	expectedNetwork := p.networkName(spec.SlotID)
-	if container.HostConfig.NetworkMode != expectedNetwork {
-		return base.Instance{}, fmt.Errorf("slot %q is attached to unexpected Docker network %q", spec.SlotID, container.HostConfig.NetworkMode)
-	}
-	if _, err := p.ensureSlotNetwork(ctx, spec.SlotID); err != nil {
-		return base.Instance{}, err
+	env, err := sandboxEnvironment(container)
+	if err != nil || env["EXECUTION_EGRESS_PROXY_URL"] != spec.Network.EgressProxyEndpoint ||
+		container.Config.User != fmt.Sprintf("%d:%d", spec.Security.RunAsUser, spec.Security.RunAsUser) ||
+		container.HostConfig.Memory != spec.Resources.MemoryBytes || container.HostConfig.PidsLimit != spec.Resources.PIDs ||
+		container.HostConfig.NanoCPUs != spec.Resources.CPUMilli*1_000_000 ||
+		!contains(container.HostConfig.SecurityOpt, "seccomp="+spec.Security.SeccompProfile) ||
+		container.AppArmorProfile != spec.Security.AppArmorProfile ||
+		!sandboxTmpfsSizeMatches(container.HostConfig.Tmpfs["/tmp"], sandboxTmpfsBytes(spec.Resources.TmpfsBytes)) ||
+		!sandboxTmpfsSizeMatches(container.HostConfig.Tmpfs["/run"], sandboxTmpfsBytes(spec.Resources.TmpfsBytes)) {
+		return base.Instance{}, errors.New("existing slot sandbox configuration does not match its specification")
 	}
 	return existing.Instance, nil
 }
@@ -318,7 +331,11 @@ func (p *Provider) InspectSlot(ctx context.Context, slotID string) (base.Status,
 }
 
 func (p *Provider) Start(ctx context.Context, providerRef string) error {
-	err := p.engine.StartContainer(ctx, providerRef)
+	container, err := p.readSandbox(ctx, providerRef)
+	if err != nil {
+		return err
+	}
+	err = p.engine.StartContainer(ctx, container.ID)
 	if IsNotModified(err) {
 		return nil
 	}
@@ -396,16 +413,6 @@ func (p *Provider) ensureSlotNetwork(ctx context.Context, slotID string) (bool, 
 	return true, nil
 }
 
-func validateSlotNetwork(network Network, name, slotID string) error {
-	if !network.Internal {
-		return fmt.Errorf("Docker network %q must have Internal=true", name)
-	}
-	if network.Labels[labelManaged] != "true" || network.Labels[labelSlotID] != slotID {
-		return fmt.Errorf("Docker network %q is not owned by slot %q", name, slotID)
-	}
-	return nil
-}
-
 func (p *Provider) slotNetworkGateway(ctx context.Context, name, slotID string) (string, error) {
 	network, err := p.engine.InspectNetwork(ctx, name)
 	if err != nil {
@@ -414,29 +421,22 @@ func (p *Provider) slotNetworkGateway(ctx context.Context, name, slotID string) 
 	if err := validateSlotNetwork(network, name, slotID); err != nil {
 		return "", err
 	}
-	for _, config := range network.IPAM.Config {
-		gateway := net.ParseIP(config.Gateway)
-		if gateway != nil && (gateway.IsPrivate() || gateway.IsLoopback()) {
-			return gateway.String(), nil
-		}
+	if len(network.Containers) != 0 {
+		return "", errors.New("new container dedicated network already has members")
 	}
-	return "", fmt.Errorf("Docker network %q has no private gateway", name)
+	gateway, _, err := sandboxNetworkGateway(network)
+	return gateway.String(), err
 }
 
 func (p *Provider) inspect(ctx context.Context, providerRef string) (base.Status, error) {
-	container, err := p.engine.InspectContainer(ctx, providerRef)
+	container, err := p.readSandbox(ctx, providerRef)
 	if err != nil {
-		if IsNotFound(err) {
-			return base.Status{}, base.ErrNotFound
-		}
 		return base.Status{}, err
 	}
-	if container.Config.Labels[labelManaged] != "true" || container.Config.Labels[labelSlotID] == "" {
-		return base.Status{}, errors.New("container is not a managed execution slot")
-	}
-	if err := p.validateSandbox(container); err != nil {
-		return base.Status{}, err
-	}
+	return p.statusFromContainer(container, providerRef)
+}
+
+func (p *Provider) statusFromContainer(container Container, providerRef string) (base.Status, error) {
 	epoch, err := strconv.ParseUint(container.Config.Labels[labelEpoch], 10, 64)
 	if err != nil || epoch == 0 {
 		return base.Status{}, errors.New("container has an invalid execution epoch label")
@@ -459,70 +459,6 @@ func (p *Provider) inspect(ctx context.Context, providerRef string) (base.Status
 		Reason:      reason,
 		ImageDigest: container.Config.Labels[labelImageDigest],
 	}, nil
-}
-
-func (p *Provider) validateSandbox(container Container) error {
-	user := strings.SplitN(container.Config.User, ":", 2)[0]
-	if user == "" || user == "0" || strings.EqualFold(user, "root") {
-		return errors.New("container sandbox requires a non-root user")
-	}
-	if !container.HostConfig.ReadonlyRootfs {
-		return errors.New("container sandbox requires a read-only root filesystem")
-	}
-	if !contains(container.HostConfig.CapDrop, "ALL") {
-		return errors.New("container sandbox must drop all capabilities")
-	}
-	if !hasSecurityOption(container.HostConfig.SecurityOpt, "no-new-privileges") {
-		return errors.New("container sandbox security profiles are incomplete")
-	}
-	if !hasAllowedSecurityProfile(container.HostConfig.SecurityOpt, "seccomp=", p.config.AllowedSeccompProfiles) {
-		return errors.New("container sandbox seccomp profile is not allowed")
-	}
-	if !hasAllowedSecurityProfile(container.HostConfig.SecurityOpt, "apparmor=", p.config.AllowedAppArmorProfiles) &&
-		!contains(p.config.AllowedAppArmorProfiles, container.AppArmorProfile) {
-		return errors.New("container sandbox AppArmor profile is not allowed")
-	}
-	if container.HostConfig.PidsLimit <= 0 || container.HostConfig.Memory <= 0 || container.HostConfig.NanoCPUs <= 0 {
-		return errors.New("container sandbox resource limits are incomplete")
-	}
-	if container.HostConfig.Tmpfs["/tmp"] == "" || container.HostConfig.Tmpfs["/run"] == "" {
-		return errors.New("container sandbox tmpfs mounts are incomplete")
-	}
-	if len(container.HostConfig.Binds) != 0 || len(container.Mounts) != 0 {
-		return errors.New("container sandbox must not mount host or named volumes")
-	}
-	if container.HostConfig.Init == nil || !*container.HostConfig.Init {
-		return errors.New("container sandbox must use an init process")
-	}
-	if len(container.HostConfig.PortBindings) != 0 {
-		return errors.New("container sandbox must not publish worker ports")
-	}
-	for _, value := range container.Config.Env {
-		name, _, _ := strings.Cut(value, "=")
-		switch strings.ToUpper(name) {
-		case "ANTHROPIC_API_KEY", "API_KEY", "ACCESS_TOKEN", "REFRESH_TOKEN", "SESSION_KEY", "PASSWORD", "COOKIE", "AUTHORIZATION", "PROXY_PASSWORD":
-			return fmt.Errorf("container environment contains forbidden secret field %q", name)
-		}
-	}
-	return nil
-}
-
-func hasSecurityOption(options []string, expected string) bool {
-	for _, option := range options {
-		if option == expected || strings.HasPrefix(option, expected) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasAllowedSecurityProfile(options []string, prefix string, allowed []string) bool {
-	for _, option := range options {
-		if strings.HasPrefix(option, prefix) && contains(allowed, strings.TrimPrefix(option, prefix)) {
-			return true
-		}
-	}
-	return false
 }
 
 func dockerState(state ContainerState) (slot.State, bool, string) {
