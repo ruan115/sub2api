@@ -17,6 +17,8 @@
   - [ ] B2 主动健康验证/续期及受认证签票，不能由缓存心跳虚报新鲜度。
     - [x] B2a [有界主动宿主 INSPECT](b2a-design.md)：独立探测投影、会话固定、单飞/超时回收、命令命名空间隔离与离线 TLS 闭环，本地 review/race/vet 通过；未启生产，不代表 worker/凭据 ready。
     - [ ] B2b worker 实际加载版本/代理/模式的主动证明、分 scope 受认证签票，以及可信证明驱动的双层续租。
+      - [ ] B2b1 [原子 loaded-state 与控制面核对](b2b1-design.md)：兼容 Health 扩展、secret-free metadata、主动核对与本地合同验证。
+      - [ ] B2b2 受认证 health/activation/业务分 scope 签票、当前版本约束与双层 lease 续期；不能用 B2b1 receipt 直接授权执行。
   - [ ] B3 仅连接现有 runtime 的 registry 与失效清理。
   - [ ] B4 host-agent 控制/数据/出口生产级装配与断连恢复证据。
 - [ ] C CCMAX gateway 新数据面接线、协议/usage/错误/取消闭环，默认关闭。
