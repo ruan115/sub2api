@@ -2,6 +2,8 @@
 
 总计划：[CCMAX execution acceptance v2](../../../docs/plans/ccmax-execution-acceptance-v2.md)。
 
+用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收23%，镜像专项3/15=20%。不再把VM0a–d的完成项数量当作整体进度；本台账与100分门槛交叉引用，不重复计分。
+
 ## 当前优先门槛：VM 隔离与 TLS
 
 按用户要求，先处理 [VM 隔离优先计划](vm-isolation-design.md)，暂停后续业务接线；未通过不得用 B2b2a 的局部 PASS 放行整链。

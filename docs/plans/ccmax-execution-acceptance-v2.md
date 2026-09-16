@@ -2,6 +2,8 @@
 
 日期：2026-09-16。用户要求先规划，再继续完善至验收。本计划以当前 `codex/claude-execution-plane-v1` 为基线，不重写已完成的历史验收。
 
+2026-09-17补充：按用户要求采用 [isthmus容器交付与固定百分比](isthmus-container-delivery-v1.md)。优先完成可复建isthmus-vm-base及其真实依赖、隔离和独立身份，不开发虚拟机内核；该页固定权重，不用原阶段个数估算整体百分比。
+
 ## 范围与停止线
 
 - 维护 CCMAX / execution-plane / isthmus 执行侧；登录、产品权限、计费仍由既有 Sub2API 链路负责。不重启 Portunex 整套业务恢复。
