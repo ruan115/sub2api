@@ -107,6 +107,8 @@ message WorkerRuntimeServiceCountTokensResponse {
 
 message HealthRequest {
   string execution_ticket = 1;
+  // Empty retains compatibility with older clients; otherwise 32 lowercase hex.
+  string challenge = 2;
 }
 
 message ModeHealth {
@@ -121,4 +123,19 @@ message HealthResponse {
   uint64 execution_epoch = 2;
   repeated ModeHealth modes = 3;
   string image_digest = 4;
+  string challenge = 5;
+  // Absent for legacy/fake sources, inactive workers and draining workers.
+  LoadedRuntimeState loaded_state = 6;
+}
+
+// Secret-free metadata from one atomic worker activation snapshot. This is
+// neither an execution authorization nor a hardware attestation.
+message LoadedRuntimeState {
+  string account_binding = 1;
+  string node_id = 2;
+  string credential_version_id = 3;
+  string auth_type = 4;
+  string proxy_lease_id = 5;
+  // Worker-instance-local counter, not the vault credential version number.
+  uint64 activation_revision = 6;
 }

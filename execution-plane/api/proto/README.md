@@ -23,3 +23,12 @@
   intent or returns credential material.
 - Generated Go code is produced with Buf CLI `v1.72.0`, protobuf Go plugin
   `v1.36.11` and gRPC Go plugin `v1.5.1`; generated drift is a required check.
+- Worker Health adds an optional 32-lowercase-hex challenge and loaded-state
+  metadata. Empty challenges retain legacy compatibility; missing loaded_state
+  cannot prove readiness. The worker-local activation_revision is not the
+  credential vault's numeric version. No credential bytes enter this response.
+- For the message-only worker extension, run
+  `sh scripts/worker-proto-offline.sh check` from `execution-plane` (`generate`
+  updates it). This uses pinned, already cached Buf/Go generator sources with
+  downloads disabled, and touches only `worker.pb.go`; it does not clean other
+  generated output, regenerate gRPC methods or invoke remote plugins.

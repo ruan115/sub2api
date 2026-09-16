@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-09-16。A 总规划提交 `c8380da` 先于实现 `fe9c3b8`；B1 细化规划 `e07bb7d` 先于实现 `c3dae96`；B2a 规划 `f32aa47` 先于本切片实现。B 总项（B2–B4）、C–G 与整链/生产门槛仍开放，细分切片结果如下。
+日期：2026-09-16。A 总规划提交 `c8380da` 先于实现 `fe9c3b8`；B1 细化规划 `e07bb7d` 先于实现 `c3dae96`；B2a 规划 `f32aa47` 先于实现 `d6a12a6`；B2b1 规划 `02b0f88` 先于本切片实现。B 总项（B2–B4）、C–G 与整链/生产门槛仍开放，细分切片结果如下。
 
 计划复验：
 
@@ -113,3 +113,38 @@ Review 由两位代理交叉审查非本人模块，主代理集成/复验。发
 - 周期结果仍写 `node_command_results`，生产启用前须补保留/清理或紧凑存储策略。页缓冲/队列有界不等于结果表增长、SQL 索引开销和覆盖周期已验收。
 - 未运行真实 MySQL/Redis/Docker/VM、上游模型、1000连接/24h验收；B1真实事务死锁/提交取消竞态门槛仍有效。
 - 当前修改仅本地；SSH/线上数据/UI/配置/服务/路由/账号均未触碰，真实模型请求仍0，未 push 或部署，未开启 execution_onboarding 或标记 migrated。
+
+## B2b1 实际结果
+
+设计：[B2b1](b2b1-design.md)；模块：[workerproof](../../../execution-plane/internal/workerproof/README.md)。只新增本地库/合同、兼容协议字段和测试，不启用生产入口。
+
+| 验收点 | 证据与限制 |
+| --- | --- |
+| 原子加载状态 | 同一 RLock 返回 modes 与完整 identity/version ID/auth type/proxy lease/local revision；不通过 ActiveCredential 复制秘密。成功 ack 后同锁切换全部字段并递增 revision；失败、取消或空凭据不能产生新 loaded proof |
+| 并发与 Drain | 32 轮并发观察不拼出新旧混合元数据；commit 失败/取消保留此前版本、同 lease 可安全重试。Drain 先隐藏并清空 active，再等待 pending 清理；阻塞 commit 返回后不能复活，revision 不溢出 |
+| Health 兼容 | 仅新增 challenge 和可选 loaded_state，无 RPC 方法变化。空 challenge 保留旧调用；fake/legacy/未激活/Drain 不产生 loaded_state。非法 challenge、跨完整 identity、ctx 取消拒绝；序列化响应无 credential bytes |
+| 持久投影 | 单条只读 SQL / Memory 单锁，沿 account active pointer 取版本，沿当前 slot/epoch 取未撤销 proxy/reservation；保留 B1 current session/image/generation/新鲜观察/live lease 条件。不读 envelope、hint、KMS 或代理地址/密码；SQL 仅 sqlmock 合同 |
+| 主动核对 | 每次新随机 challenge；精确比对身份/镜像/version/auth/proxy/revision/mode，前后两次元数据和活动会话/独立 lease 核验。原 authority 截止时间限制 RPC 及后续 I/O；旧回包、重复模式、缺字段、版本/代理/会话漂移、失效及超时统一拒绝 |
+| 本地 RPC/Vault 组合 | `TestWorkerLoadedProofRealRPCVaultAckRotationAndDrain` 真实经过 SecureActivate、worker 加密凭据返回、rotation recipient 解密、Vault.Rotate/Fake KMS/Memory active pointer 更新、同流 ack、Health RPC、Verifier 双读。ack 前拒绝；ack 后通过；版本轮换未加载、缓存 challenge 重放、核对中再轮换与 Drain 均拒绝；proxy 撤销后投影不可用 |
+| 版本语义 | 同一组合中控制面 version number=3，而 worker 成功 activation revision=2，仍按准确 version ID 对齐；不把两种计数混为一谈 |
+| 结果用途 | Receipt 的 CheckedAt 在 Health 前冻结、revision 回包后立即复制，没有 Ready/有效期/续租接口。它是一次对照记录，不是业务授权或上游可用证明 |
+
+两位代理交叉 review 非本人模块，主代理集成复查；worker 原子发布/Drain/取消、store active pointer/proxy 投影、Verifier 期限/双读和实际组合证据均已审查，没有剩余已知可复现 P1/P2 阻碍本切片提交。review 时明确并保留：取消 ack 不发布、RPC 快照读取后的取消检查、旧响应可变引用不进入 receipt，以及 opaque version ID 与本地 revision 的语义边界。
+
+主代理最终验证（工作目录 `execution-plane`）：
+
+- 全模块 `go test -race -count=1 -timeout=120s ./...` 及 `go vet ./...` 通过。
+- `go test -race -count=10 -timeout=120s ./internal/workerproof ./internal/worker ./internal/runtime/store ./internal/control -run 'Test(LoadedProof|WorkerLoadedProof|Health|DrainHides|ActivationCancelled|InvalidOnboarding|ReadWorkerReadinessBinding)'` 通过，四个包均实际执行用例。独立 reviewer 另行 worker/control 定向 race 三轮通过。
+- 上述 Go 命令均使用 `GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local`，并用 `env -u` 屏蔽 `EXECUTION_MYSQL_TEST_DSN`、`EXECUTION_REDIS_TEST_URL`、`EXECUTION_CCMAX_MYSQL_TEST_DSN`；真实数据库/Redis集成未执行，不记作 PASS。
+- `sh scripts/worker-proto-offline.sh check` 连续两次通过且零 diff，只用本地缓存 buf v1.72.0 / protoc-gen-go v1.36.11；`worker_grpc.pb.go` 与 CCMAX 生成文件无改动。仅新增 worker 消息生成/检查脚本，不运行会访问远端插件的整库生成目标。
+- `go test -tags docker_e2e -run '^$' ./internal/hostagent` 仅编译通过，没有运行 Docker E2E 或启动 VM。
+- `git diff --check` 与 recoverykit 文本/evidence policy 对本切片 20 个文件（包括被全局 scripts 规则忽略、定向纳入的离线生成脚本）扫描通过；只提交源码、合成测试和脱敏文档。
+
+### B2b1 不能代替的门槛
+
+- worker RPC 是 bufconn + 临时测试 Ed25519 票；Control 是实际本地 TLS，但初始 provider observation 在本测试中由合成结果建立，非本切片真实 Inspect。B2a 另有真实 executor/合成 provider 检查，不能把两份证据拼成生产整链。
+- Vault 为实际加密/版本切换库，KMS 和存储为 Fake KMS/Memory；未经过完整生产 rotation handler、host-agent 转发及一次性 credential lease 授权，也没有真实凭据或模型调用。
+- HealthReader 的生产受认证分 scope 签票、私网 existing-only registry 装配仍待 B2b2/B3；没有给宿主签私钥、延长任何 durable/Redis lease 或启用新的业务入口。challenge 不是恶意宿主不可伪造的硬件证明。
+- Drain 立即撤销可见 loaded state，不表示强制取消所有在途 Onboard/Commit/执行流；不遵从 context 的依赖仍可能延迟 Drain 返回，持续流撤销属于后续 B3/B4。
+- 真实 MySQL 单语句/时钟偏差/事务死锁与索引性能、Redis、代理连通性、Docker/VM、CLI/gateway、1000连接/24h与 canary 未验。B 总项、B2b2–G 与 PRD §31 仍开放。
+- 无 SSH/生产数据/UI/配置/服务/路由/账号操作；真实模型调用仍为 0。未 push、未部署，未开启 execution_onboarding 或标记 migrated。

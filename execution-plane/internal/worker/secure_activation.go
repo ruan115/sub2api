@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
@@ -86,9 +87,11 @@ type SecureActivator struct {
 	operationMu sync.Mutex
 	mu          sync.RWMutex
 	draining    bool
-	active      ActiveCredential
-	pending     pendingActivation
-	seenLeases  map[string]struct{}
+	// Monotonic for successful publications within this worker instance only.
+	activationRevision uint64
+	active             ActiveCredential
+	pending            pendingActivation
+	seenLeases         map[string]struct{}
 }
 
 type pendingActivation struct {
@@ -116,6 +119,7 @@ func (p *pendingActivation) Destroy() {
 type ActiveCredential struct {
 	VersionID      string
 	AuthType       string
+	ProxyLeaseID   string
 	CredentialJSON []byte
 }
 
@@ -165,10 +169,10 @@ func (a *SecureActivator) Activate(ctx context.Context, activation Activation) (
 // activation stream. Production uses this method so the worker cannot become
 // ready until that exact stream returns the orchestrator Vault version id.
 func (a *SecureActivator) ActivateWithCommitter(ctx context.Context, activation Activation, committer CredentialCommitter) ([]executionv1.ExecutionMode, error) {
-	if committer == nil {
+	if committer == nil || ctx == nil || ctx.Err() != nil {
 		return nil, ErrActivationRejected
 	}
-	if activation.CredentialLeaseID == "" || activation.ProxyLeaseID == "" || len(activation.EncryptedCredentialBundle) == 0 {
+	if credential.ValidateTransportID(activation.CredentialLeaseID) != nil || credential.ValidateTransportID(activation.ProxyLeaseID) != nil || len(activation.EncryptedCredentialBundle) == 0 {
 		return nil, ErrActivationRejected
 	}
 	a.operationMu.Lock()
@@ -176,8 +180,9 @@ func (a *SecureActivator) ActivateWithCommitter(ctx context.Context, activation 
 	a.mu.RLock()
 	_, replay := a.seenLeases[activation.CredentialLeaseID]
 	draining := a.draining
+	exhausted := a.activationRevision == math.MaxUint64
 	a.mu.RUnlock()
-	if replay || draining {
+	if replay || draining || exhausted || ctx.Err() != nil {
 		return nil, ErrActivationRejected
 	}
 	if len(a.seenLeases) >= maxRememberedActivationLeases {
@@ -211,9 +216,14 @@ func (a *SecureActivator) ActivateWithCommitter(ctx context.Context, activation 
 		defer pkg.Destroy()
 		result, err := a.onboarder.Onboard(ctx, pkg.Input)
 		if err != nil {
+			result.Destroy()
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			return nil, ErrActivationRejected
+		}
+		if !validLoadedAuthType(result.AuthType) || len(result.CredentialJSON) == 0 || len(result.CredentialJSON) > maxCredentialBundleBytes {
+			result.Destroy()
 			return nil, ErrActivationRejected
 		}
 		a.pending = pendingActivation{
@@ -221,6 +231,9 @@ func (a *SecureActivator) ActivateWithCommitter(ctx context.Context, activation 
 			ActivationBundleSHA256: bundleDigest, RotationRecipientKeyID: pkg.RotationRecipientKeyID,
 			RotationRecipientPublicKey: append([]byte(nil), pkg.RotationRecipientPublicKey...), Result: result,
 		}
+	}
+	if ctx.Err() != nil {
+		return nil, ErrActivationRejected
 	}
 	versionID, err := committer.CommitCredential(ctx, CredentialCommitRequest{
 		AccountBinding: a.identity.AccountID, SlotID: a.identity.SlotID, ExecutionEpoch: a.identity.Epoch,
@@ -232,15 +245,23 @@ func (a *SecureActivator) ActivateWithCommitter(ctx context.Context, activation 
 		return nil, ErrActivationRejected
 	}
 	newCredential := ActiveCredential{
-		VersionID: versionID, AuthType: a.pending.Result.AuthType,
+		VersionID: versionID, AuthType: a.pending.Result.AuthType, ProxyLeaseID: activation.ProxyLeaseID,
 		CredentialJSON: append([]byte(nil), a.pending.Result.CredentialJSON...),
+	}
+	a.mu.Lock()
+	// A successful vault ack does not override cancellation or an already
+	// requested drain. Publish all loaded metadata and credential bytes together.
+	if a.draining || ctx.Err() != nil {
+		a.mu.Unlock()
+		newCredential.Destroy()
+		return nil, ErrActivationRejected
 	}
 	completedPending := a.pending
 	a.pending = pendingActivation{}
 	defer completedPending.Destroy()
-	a.mu.Lock()
 	previous := a.active
 	a.active = newCredential
+	a.activationRevision++
 	a.seenLeases[activation.CredentialLeaseID] = struct{}{}
 	a.mu.Unlock()
 	previous.Destroy()
@@ -254,7 +275,7 @@ func (a *SecureActivator) ActiveCredential() (ActiveCredential, error) {
 		return ActiveCredential{}, ErrActivationRejected
 	}
 	return ActiveCredential{
-		VersionID: a.active.VersionID, AuthType: a.active.AuthType,
+		VersionID: a.active.VersionID, AuthType: a.active.AuthType, ProxyLeaseID: a.active.ProxyLeaseID,
 		CredentialJSON: append([]byte(nil), a.active.CredentialJSON...),
 	}, nil
 }
@@ -262,18 +283,21 @@ func (a *SecureActivator) ActiveCredential() (ActiveCredential, error) {
 func (a *SecureActivator) Ready() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return !a.draining && a.active.VersionID != "" && len(a.active.CredentialJSON) != 0
+	return a.readyLocked()
 }
 
 func (a *SecureActivator) Drain() {
-	a.operationMu.Lock()
-	defer a.operationMu.Unlock()
+	// Make future health/readiness reads unavailable immediately, even when an
+	// activation dependency is blocked. Waiting below only cleans pending data;
+	// it does not imply cancellation or termination of an in-flight request.
 	a.mu.Lock()
 	a.draining = true
 	active := a.active
 	a.active = ActiveCredential{}
 	a.mu.Unlock()
 	active.Destroy()
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	a.pending.Destroy()
 	a.pending = pendingActivation{}
 }
@@ -281,16 +305,7 @@ func (a *SecureActivator) Drain() {
 func (a *SecureActivator) ModeHealth(context.Context) []ModeHealth {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	reason := ""
-	if a.draining {
-		reason = "draining"
-	} else if a.active.VersionID == "" {
-		reason = "not_activated"
-	}
-	return []ModeHealth{
-		{Mode: executionv1.ExecutionMode_EXECUTION_MODE_CLI_NATIVE, Healthy: false, ReasonCode: "not_implemented"},
-		{Mode: executionv1.ExecutionMode_EXECUTION_MODE_OAUTH_API, Healthy: reason == "", ReasonCode: reason},
-	}
+	return a.modeHealthLocked()
 }
 
 var _ Activator = (*SecureActivator)(nil)

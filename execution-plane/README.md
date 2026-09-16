@@ -10,10 +10,13 @@ added without changing placement or account lifecycle semantics.
 
 ## Current implementation slice
 
-Acceptance closure now includes actual HTTP-worker streaming (A) and a
-session-bound control-plane snapshot foundation (B1). Neither is a complete
+Acceptance closure now includes actual HTTP-worker streaming (A), a
+session-bound control-plane snapshot foundation (B1), bounded active host
+inspection (B2a), and atomic worker loaded-state comparison (B2b1). None is a complete
 gateway/host/worker production rollout. See the [acceptance ledger](../openspec/changes/complete-ccmax-execution-acceptance/tasks.md)
-and [B1 boundaries](internal/executionauthority/README.md); migration 013 is not
+and [worker proof boundaries](internal/workerproof/README.md); scoped production
+signing, proof-driven lease renewal and existing-runtime registry assembly are
+still pending. Migration 013 is not
 automatically applied, and historical unscoped observations remain unavailable.
 
 - slot lifecycle state machine;

@@ -89,6 +89,12 @@ func (r *MemoryRepository) ReadExecutionBinding(ctx context.Context, slotID stri
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.readExecutionBindingLocked(ctx, slotID, checkedAt, maxAge)
+}
+
+// Caller holds r.mu. Joint metadata projections reuse the same B1 checks
+// without a second lock or assembling independently read authority.
+func (r *MemoryRepository) readExecutionBindingLocked(ctx context.Context, slotID string, checkedAt time.Time, maxAge time.Duration) (ExecutionBinding, error) {
 	if ctx.Err() != nil {
 		return ExecutionBinding{}, ErrExecutionBindingUnavailable
 	}

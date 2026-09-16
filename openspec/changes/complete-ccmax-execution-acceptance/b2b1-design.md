@@ -28,3 +28,10 @@
 - 真实本地 worker gRPC 的 SecureActivate→合成 vault ack→带 challenge Health→控制面 loaded-state 核对；legacy/fake/missing state/跨账号/旧版本/旧代理/错 challenge/不健康模式拒绝。
 - 前后两次 authority 之间的版本/代理/session/epoch/generation/镜像变化与 lease 失效、依赖超时/取消均拒绝；不写数据库、不续租。
 - SQL 只读语句/参数合同、Memory 一致性；离线生成重复无diff、全模块 race/vet、独立交叉review和阶段 Git 提交。sqlmock、Memory和合成票据不替代真实生产依赖证据。
+
+## 实现中的边界细化
+
+- credential version ID 沿用有界 opaque transport ID，而非额外限定 UUID；实际 Vault 通常生成 UUID，worker 合同不另造限制。只接受现有 oauth/setup_token/api_key 三类已归一化 auth type。
+- 原始 authority 的 durable lease、观察及节点时间共同限制 Health 和后续读取的 deadline；后来的心跳不能延长本次核对。Receipt 的时间在 RPC 前冻结，revision 在回包后立即复制，不保留可变响应引用。
+- Health 在入站及快照读取后检查取消；commit ack 失败或取消保留此前有效 active state，Drain 则立即隐藏所有 active state。pending 保留用于同一合成 lease 的安全重试，不使 worker 未经 ack 就加载新版本。
+- 本地组合测试使用实际 Vault.Rotate/Fake KMS 的版本插入和切换，验证控制面 version number 与本地 activation revision 可以不同。临时测试签票器不冒充 B2b2 受认证签票服务；B1 初始宿主健康观察在该测试中是合成结果，不冒充真实 provider 检查。

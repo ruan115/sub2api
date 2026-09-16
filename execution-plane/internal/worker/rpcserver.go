@@ -318,20 +318,53 @@ func executionError(err error) error {
 }
 
 func (s *RuntimeServer) Health(ctx context.Context, request *executionv1.HealthRequest) (*executionv1.HealthResponse, error) {
+	if ctx == nil {
+		return nil, status.Error(codes.InvalidArgument, "health context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "health request is required")
+	}
+	if request.GetChallenge() != "" && !healthChallengePattern.MatchString(request.GetChallenge()) {
+		return nil, status.Error(codes.InvalidArgument, "health challenge is invalid")
 	}
 	if _, err := s.guard.Authorize(request.GetExecutionTicket(), "health"); err != nil {
 		return nil, authorizationError(err)
 	}
-	modeHealth := s.healthSource.ModeHealth(ctx)
+	var snapshot HealthSnapshot
+	if source, ok := s.healthSource.(HealthSnapshotSource); ok {
+		snapshot = source.HealthSnapshot(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
+		if snapshot.LoadedState != nil && !validLoadedState(snapshot.LoadedState, s.identity) {
+			return nil, status.Error(codes.Internal, "worker loaded state is invalid")
+		}
+	} else {
+		// Legacy and deliberately fake sources retain their modes, but cannot
+		// manufacture loaded-state evidence from a boolean health response.
+		snapshot.Modes = s.healthSource.ModeHealth(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	response := &executionv1.HealthResponse{
 		SlotId:         s.identity.SlotID,
 		ExecutionEpoch: s.identity.Epoch,
 		ImageDigest:    s.imageDigest,
-		Modes:          make([]*executionv1.ModeHealth, 0, len(modeHealth)),
+		Challenge:      request.GetChallenge(),
+		Modes:          make([]*executionv1.ModeHealth, 0, len(snapshot.Modes)),
 	}
-	for _, mode := range modeHealth {
+	if state := snapshot.LoadedState; state != nil {
+		response.LoadedState = &executionv1.LoadedRuntimeState{
+			AccountBinding: state.Identity.AccountID, NodeId: state.Identity.NodeID,
+			CredentialVersionId: state.CredentialVersionID, AuthType: state.AuthType,
+			ProxyLeaseId: state.ProxyLeaseID, ActivationRevision: state.ActivationRevision,
+		}
+	}
+	for _, mode := range snapshot.Modes {
 		response.Modes = append(response.Modes, &executionv1.ModeHealth{
 			Mode:          mode.Mode,
 			Healthy:       mode.Healthy,

@@ -974,8 +974,10 @@ func (x *WorkerRuntimeServiceCountTokensResponse) GetResponse() *CountTokensResp
 type HealthRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	ExecutionTicket string                 `protobuf:"bytes,1,opt,name=execution_ticket,json=executionTicket,proto3" json:"execution_ticket,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Empty retains compatibility with older clients; otherwise 32 lowercase hex.
+	Challenge     string `protobuf:"bytes,2,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HealthRequest) Reset() {
@@ -1011,6 +1013,13 @@ func (*HealthRequest) Descriptor() ([]byte, []int) {
 func (x *HealthRequest) GetExecutionTicket() string {
 	if x != nil {
 		return x.ExecutionTicket
+	}
+	return ""
+}
+
+func (x *HealthRequest) GetChallenge() string {
+	if x != nil {
+		return x.Challenge
 	}
 	return ""
 }
@@ -1089,8 +1098,11 @@ type HealthResponse struct {
 	ExecutionEpoch uint64                 `protobuf:"varint,2,opt,name=execution_epoch,json=executionEpoch,proto3" json:"execution_epoch,omitempty"`
 	Modes          []*ModeHealth          `protobuf:"bytes,3,rep,name=modes,proto3" json:"modes,omitempty"`
 	ImageDigest    string                 `protobuf:"bytes,4,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	Challenge      string                 `protobuf:"bytes,5,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	// Absent for legacy/fake sources, inactive workers and draining workers.
+	LoadedState   *LoadedRuntimeState `protobuf:"bytes,6,opt,name=loaded_state,json=loadedState,proto3" json:"loaded_state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -1149,6 +1161,107 @@ func (x *HealthResponse) GetImageDigest() string {
 		return x.ImageDigest
 	}
 	return ""
+}
+
+func (x *HealthResponse) GetChallenge() string {
+	if x != nil {
+		return x.Challenge
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetLoadedState() *LoadedRuntimeState {
+	if x != nil {
+		return x.LoadedState
+	}
+	return nil
+}
+
+// Secret-free metadata from one atomic worker activation snapshot. This is
+// neither an execution authorization nor a hardware attestation.
+type LoadedRuntimeState struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	AccountBinding      string                 `protobuf:"bytes,1,opt,name=account_binding,json=accountBinding,proto3" json:"account_binding,omitempty"`
+	NodeId              string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	CredentialVersionId string                 `protobuf:"bytes,3,opt,name=credential_version_id,json=credentialVersionId,proto3" json:"credential_version_id,omitempty"`
+	AuthType            string                 `protobuf:"bytes,4,opt,name=auth_type,json=authType,proto3" json:"auth_type,omitempty"`
+	ProxyLeaseId        string                 `protobuf:"bytes,5,opt,name=proxy_lease_id,json=proxyLeaseId,proto3" json:"proxy_lease_id,omitempty"`
+	// Worker-instance-local counter, not the vault credential version number.
+	ActivationRevision uint64 `protobuf:"varint,6,opt,name=activation_revision,json=activationRevision,proto3" json:"activation_revision,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *LoadedRuntimeState) Reset() {
+	*x = LoadedRuntimeState{}
+	mi := &file_execution_v1_worker_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoadedRuntimeState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoadedRuntimeState) ProtoMessage() {}
+
+func (x *LoadedRuntimeState) ProtoReflect() protoreflect.Message {
+	mi := &file_execution_v1_worker_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoadedRuntimeState.ProtoReflect.Descriptor instead.
+func (*LoadedRuntimeState) Descriptor() ([]byte, []int) {
+	return file_execution_v1_worker_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *LoadedRuntimeState) GetAccountBinding() string {
+	if x != nil {
+		return x.AccountBinding
+	}
+	return ""
+}
+
+func (x *LoadedRuntimeState) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *LoadedRuntimeState) GetCredentialVersionId() string {
+	if x != nil {
+		return x.CredentialVersionId
+	}
+	return ""
+}
+
+func (x *LoadedRuntimeState) GetAuthType() string {
+	if x != nil {
+		return x.AuthType
+	}
+	return ""
+}
+
+func (x *LoadedRuntimeState) GetProxyLeaseId() string {
+	if x != nil {
+		return x.ProxyLeaseId
+	}
+	return ""
+}
+
+func (x *LoadedRuntimeState) GetActivationRevision() uint64 {
+	if x != nil {
+		return x.ActivationRevision
+	}
+	return 0
 }
 
 var File_execution_v1_worker_proto protoreflect.FileDescriptor
@@ -1215,21 +1328,31 @@ const file_execution_v1_worker_proto_rawDesc = "" +
 	"\x10execution_ticket\x18\x01 \x01(\tR\x0fexecutionTicket\x12:\n" +
 	"\arequest\x18\x02 \x01(\v2 .execution.v1.CountTokensRequestR\arequest\"h\n" +
 	"'WorkerRuntimeServiceCountTokensResponse\x12=\n" +
-	"\bresponse\x18\x01 \x01(\v2!.execution.v1.CountTokensResponseR\bresponse\":\n" +
+	"\bresponse\x18\x01 \x01(\v2!.execution.v1.CountTokensResponseR\bresponse\"X\n" +
 	"\rHealthRequest\x12)\n" +
-	"\x10execution_ticket\x18\x01 \x01(\tR\x0fexecutionTicket\"\x9f\x01\n" +
+	"\x10execution_ticket\x18\x01 \x01(\tR\x0fexecutionTicket\x12\x1c\n" +
+	"\tchallenge\x18\x02 \x01(\tR\tchallenge\"\x9f\x01\n" +
 	"\n" +
 	"ModeHealth\x12/\n" +
 	"\x04mode\x18\x01 \x01(\x0e2\x1b.execution.v1.ExecutionModeR\x04mode\x12\x18\n" +
 	"\ahealthy\x18\x02 \x01(\bR\ahealthy\x12\x1f\n" +
 	"\vreason_code\x18\x03 \x01(\tR\n" +
 	"reasonCode\x12%\n" +
-	"\x0ereason_message\x18\x04 \x01(\tR\rreasonMessage\"\xa5\x01\n" +
+	"\x0ereason_message\x18\x04 \x01(\tR\rreasonMessage\"\x88\x02\n" +
 	"\x0eHealthResponse\x12\x17\n" +
 	"\aslot_id\x18\x01 \x01(\tR\x06slotId\x12'\n" +
 	"\x0fexecution_epoch\x18\x02 \x01(\x04R\x0eexecutionEpoch\x12.\n" +
 	"\x05modes\x18\x03 \x03(\v2\x18.execution.v1.ModeHealthR\x05modes\x12!\n" +
-	"\fimage_digest\x18\x04 \x01(\tR\vimageDigest2\xec\x04\n" +
+	"\fimage_digest\x18\x04 \x01(\tR\vimageDigest\x12\x1c\n" +
+	"\tchallenge\x18\x05 \x01(\tR\tchallenge\x12C\n" +
+	"\floaded_state\x18\x06 \x01(\v2 .execution.v1.LoadedRuntimeStateR\vloadedState\"\xfe\x01\n" +
+	"\x12LoadedRuntimeState\x12'\n" +
+	"\x0faccount_binding\x18\x01 \x01(\tR\x0eaccountBinding\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x122\n" +
+	"\x15credential_version_id\x18\x03 \x01(\tR\x13credentialVersionId\x12\x1b\n" +
+	"\tauth_type\x18\x04 \x01(\tR\bauthType\x12$\n" +
+	"\x0eproxy_lease_id\x18\x05 \x01(\tR\fproxyLeaseId\x12/\n" +
+	"\x13activation_revision\x18\x06 \x01(\x04R\x12activationRevision2\xec\x04\n" +
 	"\x14WorkerRuntimeService\x12s\n" +
 	"\x16CredentialTransportKey\x12+.execution.v1.CredentialTransportKeyRequest\x1a,.execution.v1.CredentialTransportKeyResponse\x12I\n" +
 	"\bActivate\x12\x1d.execution.v1.ActivateRequest\x1a\x1e.execution.v1.ActivateResponse\x12_\n" +
@@ -1250,7 +1373,7 @@ func file_execution_v1_worker_proto_rawDescGZIP() []byte {
 	return file_execution_v1_worker_proto_rawDescData
 }
 
-var file_execution_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_execution_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_execution_v1_worker_proto_goTypes = []any{
 	(*CredentialTransportKeyRequest)(nil),           // 0: execution.v1.CredentialTransportKeyRequest
 	(*CredentialTransportKeyResponse)(nil),          // 1: execution.v1.CredentialTransportKeyResponse
@@ -1270,47 +1393,49 @@ var file_execution_v1_worker_proto_goTypes = []any{
 	(*HealthRequest)(nil),                           // 15: execution.v1.HealthRequest
 	(*ModeHealth)(nil),                              // 16: execution.v1.ModeHealth
 	(*HealthResponse)(nil),                          // 17: execution.v1.HealthResponse
-	(ExecutionMode)(0),                              // 18: execution.v1.ExecutionMode
-	(*BeginExecution)(nil),                          // 19: execution.v1.BeginExecution
-	(*ToolResult)(nil),                              // 20: execution.v1.ToolResult
-	(*CancelExecution)(nil),                         // 21: execution.v1.CancelExecution
-	(*ExecuteResponse)(nil),                         // 22: execution.v1.ExecuteResponse
-	(*CountTokensRequest)(nil),                      // 23: execution.v1.CountTokensRequest
-	(*CountTokensResponse)(nil),                     // 24: execution.v1.CountTokensResponse
+	(*LoadedRuntimeState)(nil),                      // 18: execution.v1.LoadedRuntimeState
+	(ExecutionMode)(0),                              // 19: execution.v1.ExecutionMode
+	(*BeginExecution)(nil),                          // 20: execution.v1.BeginExecution
+	(*ToolResult)(nil),                              // 21: execution.v1.ToolResult
+	(*CancelExecution)(nil),                         // 22: execution.v1.CancelExecution
+	(*ExecuteResponse)(nil),                         // 23: execution.v1.ExecuteResponse
+	(*CountTokensRequest)(nil),                      // 24: execution.v1.CountTokensRequest
+	(*CountTokensResponse)(nil),                     // 25: execution.v1.CountTokensResponse
 }
 var file_execution_v1_worker_proto_depIdxs = []int32{
-	18, // 0: execution.v1.ActivateResponse.healthy_modes:type_name -> execution.v1.ExecutionMode
+	19, // 0: execution.v1.ActivateResponse.healthy_modes:type_name -> execution.v1.ExecutionMode
 	4,  // 1: execution.v1.SecureActivateRequest.begin:type_name -> execution.v1.SecureActivateBegin
 	5,  // 2: execution.v1.SecureActivateRequest.credential_commit_ack:type_name -> execution.v1.CredentialCommitAck
-	18, // 3: execution.v1.SecureActivationCompleted.healthy_modes:type_name -> execution.v1.ExecutionMode
+	19, // 3: execution.v1.SecureActivationCompleted.healthy_modes:type_name -> execution.v1.ExecutionMode
 	7,  // 4: execution.v1.SecureActivateResponse.credential_commit:type_name -> execution.v1.SealedCredentialCommit
 	8,  // 5: execution.v1.SecureActivateResponse.completed:type_name -> execution.v1.SecureActivationCompleted
-	19, // 6: execution.v1.WorkerBeginExecution.request:type_name -> execution.v1.BeginExecution
+	20, // 6: execution.v1.WorkerBeginExecution.request:type_name -> execution.v1.BeginExecution
 	10, // 7: execution.v1.WorkerRuntimeServiceExecuteRequest.begin:type_name -> execution.v1.WorkerBeginExecution
-	20, // 8: execution.v1.WorkerRuntimeServiceExecuteRequest.tool_result:type_name -> execution.v1.ToolResult
-	21, // 9: execution.v1.WorkerRuntimeServiceExecuteRequest.cancel:type_name -> execution.v1.CancelExecution
-	22, // 10: execution.v1.WorkerRuntimeServiceExecuteResponse.response:type_name -> execution.v1.ExecuteResponse
-	23, // 11: execution.v1.WorkerRuntimeServiceCountTokensRequest.request:type_name -> execution.v1.CountTokensRequest
-	24, // 12: execution.v1.WorkerRuntimeServiceCountTokensResponse.response:type_name -> execution.v1.CountTokensResponse
-	18, // 13: execution.v1.ModeHealth.mode:type_name -> execution.v1.ExecutionMode
+	21, // 8: execution.v1.WorkerRuntimeServiceExecuteRequest.tool_result:type_name -> execution.v1.ToolResult
+	22, // 9: execution.v1.WorkerRuntimeServiceExecuteRequest.cancel:type_name -> execution.v1.CancelExecution
+	23, // 10: execution.v1.WorkerRuntimeServiceExecuteResponse.response:type_name -> execution.v1.ExecuteResponse
+	24, // 11: execution.v1.WorkerRuntimeServiceCountTokensRequest.request:type_name -> execution.v1.CountTokensRequest
+	25, // 12: execution.v1.WorkerRuntimeServiceCountTokensResponse.response:type_name -> execution.v1.CountTokensResponse
+	19, // 13: execution.v1.ModeHealth.mode:type_name -> execution.v1.ExecutionMode
 	16, // 14: execution.v1.HealthResponse.modes:type_name -> execution.v1.ModeHealth
-	0,  // 15: execution.v1.WorkerRuntimeService.CredentialTransportKey:input_type -> execution.v1.CredentialTransportKeyRequest
-	2,  // 16: execution.v1.WorkerRuntimeService.Activate:input_type -> execution.v1.ActivateRequest
-	6,  // 17: execution.v1.WorkerRuntimeService.SecureActivate:input_type -> execution.v1.SecureActivateRequest
-	11, // 18: execution.v1.WorkerRuntimeService.Execute:input_type -> execution.v1.WorkerRuntimeServiceExecuteRequest
-	13, // 19: execution.v1.WorkerRuntimeService.CountTokens:input_type -> execution.v1.WorkerRuntimeServiceCountTokensRequest
-	15, // 20: execution.v1.WorkerRuntimeService.Health:input_type -> execution.v1.HealthRequest
-	1,  // 21: execution.v1.WorkerRuntimeService.CredentialTransportKey:output_type -> execution.v1.CredentialTransportKeyResponse
-	3,  // 22: execution.v1.WorkerRuntimeService.Activate:output_type -> execution.v1.ActivateResponse
-	9,  // 23: execution.v1.WorkerRuntimeService.SecureActivate:output_type -> execution.v1.SecureActivateResponse
-	12, // 24: execution.v1.WorkerRuntimeService.Execute:output_type -> execution.v1.WorkerRuntimeServiceExecuteResponse
-	14, // 25: execution.v1.WorkerRuntimeService.CountTokens:output_type -> execution.v1.WorkerRuntimeServiceCountTokensResponse
-	17, // 26: execution.v1.WorkerRuntimeService.Health:output_type -> execution.v1.HealthResponse
-	21, // [21:27] is the sub-list for method output_type
-	15, // [15:21] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	18, // 15: execution.v1.HealthResponse.loaded_state:type_name -> execution.v1.LoadedRuntimeState
+	0,  // 16: execution.v1.WorkerRuntimeService.CredentialTransportKey:input_type -> execution.v1.CredentialTransportKeyRequest
+	2,  // 17: execution.v1.WorkerRuntimeService.Activate:input_type -> execution.v1.ActivateRequest
+	6,  // 18: execution.v1.WorkerRuntimeService.SecureActivate:input_type -> execution.v1.SecureActivateRequest
+	11, // 19: execution.v1.WorkerRuntimeService.Execute:input_type -> execution.v1.WorkerRuntimeServiceExecuteRequest
+	13, // 20: execution.v1.WorkerRuntimeService.CountTokens:input_type -> execution.v1.WorkerRuntimeServiceCountTokensRequest
+	15, // 21: execution.v1.WorkerRuntimeService.Health:input_type -> execution.v1.HealthRequest
+	1,  // 22: execution.v1.WorkerRuntimeService.CredentialTransportKey:output_type -> execution.v1.CredentialTransportKeyResponse
+	3,  // 23: execution.v1.WorkerRuntimeService.Activate:output_type -> execution.v1.ActivateResponse
+	9,  // 24: execution.v1.WorkerRuntimeService.SecureActivate:output_type -> execution.v1.SecureActivateResponse
+	12, // 25: execution.v1.WorkerRuntimeService.Execute:output_type -> execution.v1.WorkerRuntimeServiceExecuteResponse
+	14, // 26: execution.v1.WorkerRuntimeService.CountTokens:output_type -> execution.v1.WorkerRuntimeServiceCountTokensResponse
+	17, // 27: execution.v1.WorkerRuntimeService.Health:output_type -> execution.v1.HealthResponse
+	22, // [22:28] is the sub-list for method output_type
+	16, // [16:22] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_execution_v1_worker_proto_init() }
@@ -1338,7 +1463,7 @@ func file_execution_v1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_execution_v1_worker_proto_rawDesc), len(file_execution_v1_worker_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
