@@ -19,7 +19,7 @@
     - [ ] B2b worker 实际加载版本/代理/模式的主动证明、分 scope 受认证签票，以及可信证明驱动的双层续租。
       - [x] B2b1 [原子 loaded-state 与控制面核对](b2b1-design.md)：兼容 Health 扩展、secret-free metadata、主动核对与真实本地 worker RPC/Vault 合同验证；交叉 review/race/vet/离线生成通过。没有生产签票、续租或真实依赖验收。
       - [ ] B2b2 受认证 health/activation/业务分 scope 签票、当前版本约束与双层 lease 续期；不能用 B2b1 receipt 直接授权执行。
-        - [ ] B2b2a [当前控制命令的只读诊断签票](b2b2a-design.md)：health/credential_key，默认关闭；不包含 activation/业务票或续租。
+        - [x] B2b2a [当前控制命令的只读诊断签票](b2b2a-design.md)：health/credential_key，实际本地 TLS ControlClient/worker RPC 组合、交叉 review/race/vet/离线生成通过；默认关闭，不包含 activation/业务票、续租或生产装配。
         - [ ] B2b2b activation payload/lease 精确授权、业务票版本/代理/模式绑定与使用时复核。
         - [ ] B2b2c 可信证明驱动的双层续租与持续流失效；不以诊断票替代。
   - [ ] B3 仅连接现有 runtime 的 registry 与失效清理。

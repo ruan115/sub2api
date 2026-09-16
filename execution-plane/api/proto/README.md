@@ -32,3 +32,11 @@
   updates it). This uses pinned, already cached Buf/Go generator sources with
   downloads disabled, and touches only `worker.pb.go`; it does not clean other
   generated output, regenerate gRPC methods or invoke remote plugins.
+- NodeControl adds optional diagnostic ticket request/response events under the
+  explicit `probe_tickets` capability. Only `health` and `credential_key` are
+  eligible; `request_id` is fresh correlation, not authority. The response's
+  execution_ticket is a bearer secret and must not be logged. Key commands add
+  desired_generation; legacy commands without it cannot request new tickets.
+- `sh scripts/control-proto-offline.sh check` checks only `control.pb.go` using
+  the same cached tools (`generate` updates it). No gRPC method is added, and
+  `control_grpc.pb.go` is unchanged.

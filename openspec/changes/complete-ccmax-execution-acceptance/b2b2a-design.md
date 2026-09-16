@@ -13,11 +13,13 @@
 
 1. **默认关闭且显式 capability。** 控制面仅在可注入 `ProbeTicketConfig` 完整有效时启用；host-agent 需显式启用并广告 `probe_tickets`。未配置/未协商不得签票或回退到本地 signer；不修改生产 bootstrap 或开启默认监听。
 2. **只签两种只读 scope。** `health` 仅对应 INSPECT SlotCommand；`credential_key` 仅对应 CredentialKeyCommand。拒绝 activate、secure_activate、messages、count_tokens、混合 scope 及未知值。Health/public key 不携带已有凭据明文，但返回的票仍是 bearer secret，不写日志或数据库。
-3. **请求不携带授权身份。** `ControlProbeTicketRequest` 只有 command_id/scope；账号、slot、node、epoch、image、generation 从当前已认证 TLS 控制会话、控制面已派发命令和 ProbeBinding 推导并精确对比。SlotCommand 使用已有严格规范正整数 `metadata.desired_generation`；CredentialKeyCommand 添加 typed desired_generation，来自现有 provisioning generation。旧缺 generation 命令仍按旧合同执行，但不能换新诊断票。
+3. **请求不携带授权身份。** `ControlProbeTicketRequest` 只有 command_id/scope 及纯关联 request_id；账号、slot、node、epoch、image、generation 从当前已认证 TLS 控制会话、控制面已派发命令和 ProbeBinding 推导并精确对比。SlotCommand 使用已有严格规范正整数 `metadata.desired_generation`；CredentialKeyCommand 添加 typed desired_generation，来自现有 provisioning generation。旧缺 generation 命令仍按旧合同执行，但不能换新诊断票。
 4. **pending 不等于已派发。** 记录原 outbound 对象及开始交给 stream.Send 的授权点；只在该点之后允许换票，而非 reserve/queued 时。此点不是接收确认；发送失败与会话结束后不能继续签票。每次 pending 实例/允许的 scope 最多一次签票尝试，前置 claim 用实例指针固定，失败/丢票也不重复签新 nonce，只能由控制面派发新命令重试。无跨命令无限历史/票据缓存。
 5. **双读与当前会话固定。** 单次检查默认2秒且有上限；先固定 session/pending，再核活动 TLS1.3 身份、ProbeBinding/current durable lease 和独立 lease，随后重读并复查。account/slot/node/epoch/generation/image/providerRef/owner/session 变化、过期、取消、依赖失败均拒绝。最终签名/入队仍绑定原 session/pending，不把已签结果送到新会话；出队前再次拒绝失效 attempt、已完成命令和过期票。
 6. **最短期限。** 票默认5秒、最大10秒，受原始命令 deadline、durable lease、节点新鲜度、控制证书有效期及前后读取期限限制；秒精度 exp 向下取整，不为补足一秒越过任一上限。独立 lease 目前只有 Validate、没有原子剩余 TTL：本切片仅证明核对当时仍有效，不宣称票有效期被 Redis PTTL 截断或撤销可即时生效。已发出的诊断票可残留至配置 TTL；因此不能用于业务或续租。
 7. **桥接有界且只使用同一控制流。** 每 session 限制请求队列/等待项，不另开无界 goroutine。取消与断连立即使等待失败；迟到且已经无人等待的合法回包可丢弃，不用无限 tombstone。command scope 不匹配、响应字段矛盾、过大票和无当前 command context 均拒绝。启用命令绑定来源后不得偷偷回退旧 TicketSource 获取其他权限。
+
+实现前接口细化：每次桥请求生成新的32小写hex request_id，响应原样回显；host 等待表按 request_id 索引并另核 command_id/scope，避免相同 command_id 重用时将旧响应交给新等待者。它不放宽服务端每 pending 实例/scope 至多一次的限制，不作为签票身份或无界重放历史。
 
 ## 验收与停止线
 

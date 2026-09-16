@@ -104,6 +104,7 @@ message NodeControlServiceControlRequest {
     NodeHeartbeat heartbeat = 2;
     CommandResult command_result = 3;
     ControlCredentialCommit credential_commit = 4;
+    ControlProbeTicketRequest probe_ticket_request = 5;
   }
 }
 
@@ -142,6 +143,25 @@ message CredentialKeyCommand {
   uint64 execution_epoch = 4;
   string image_digest = 5;
   google.protobuf.Timestamp deadline = 6;
+  uint64 desired_generation = 7;
+}
+
+// Only the current authenticated command may request its read-only scope.
+// Identity and authority are derived by the control plane, not supplied here.
+message ControlProbeTicketRequest {
+  string command_id = 1;
+  string scope = 2;
+  // Correlation only; never an authorization identity.
+  string request_id = 3;
+}
+
+message ControlProbeTicketResponse {
+  string command_id = 1;
+  string scope = 2;
+  string execution_ticket = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  string error_code = 5;
+  string request_id = 6;
 }
 
 message SecureActivationCommand {
@@ -180,5 +200,6 @@ message NodeControlServiceControlResponse {
     CredentialKeyCommand credential_key_command = 3;
     SecureActivationCommand secure_activation_command = 4;
     ControlCredentialCommitAck credential_commit_ack = 5;
+    ControlProbeTicketResponse probe_ticket_response = 6;
   }
 }

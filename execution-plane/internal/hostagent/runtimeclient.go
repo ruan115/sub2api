@@ -418,6 +418,14 @@ func (r *Runtime) Execute(ctx context.Context, requestID string, body []byte, ro
 }
 
 func (r *Runtime) issue(ctx context.Context, scope string) (string, error) {
+	if ctx != nil {
+		if source, ok := ctx.Value(probeCommandContextKey{}).(*probeCommandSource); ok {
+			if source == nil || source.identity != r.identity {
+				return "", ErrProbeTicketUnavailable
+			}
+			return source.request(ctx, scope)
+		}
+	}
 	return r.ticketSource.Issue(ctx, TicketRequest{
 		AccountID: r.identity.AccountID, SlotID: r.identity.SlotID,
 		NodeID: r.identity.NodeID, Epoch: r.identity.Epoch, Scope: scope,

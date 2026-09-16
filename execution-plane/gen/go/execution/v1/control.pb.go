@@ -911,6 +911,7 @@ type NodeControlServiceControlRequest struct {
 	//	*NodeControlServiceControlRequest_Heartbeat
 	//	*NodeControlServiceControlRequest_CommandResult
 	//	*NodeControlServiceControlRequest_CredentialCommit
+	//	*NodeControlServiceControlRequest_ProbeTicketRequest
 	Event         isNodeControlServiceControlRequest_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -989,6 +990,15 @@ func (x *NodeControlServiceControlRequest) GetCredentialCommit() *ControlCredent
 	return nil
 }
 
+func (x *NodeControlServiceControlRequest) GetProbeTicketRequest() *ControlProbeTicketRequest {
+	if x != nil {
+		if x, ok := x.Event.(*NodeControlServiceControlRequest_ProbeTicketRequest); ok {
+			return x.ProbeTicketRequest
+		}
+	}
+	return nil
+}
+
 type isNodeControlServiceControlRequest_Event interface {
 	isNodeControlServiceControlRequest_Event()
 }
@@ -1009,6 +1019,10 @@ type NodeControlServiceControlRequest_CredentialCommit struct {
 	CredentialCommit *ControlCredentialCommit `protobuf:"bytes,4,opt,name=credential_commit,json=credentialCommit,proto3,oneof"`
 }
 
+type NodeControlServiceControlRequest_ProbeTicketRequest struct {
+	ProbeTicketRequest *ControlProbeTicketRequest `protobuf:"bytes,5,opt,name=probe_ticket_request,json=probeTicketRequest,proto3,oneof"`
+}
+
 func (*NodeControlServiceControlRequest_Hello) isNodeControlServiceControlRequest_Event() {}
 
 func (*NodeControlServiceControlRequest_Heartbeat) isNodeControlServiceControlRequest_Event() {}
@@ -1016,6 +1030,9 @@ func (*NodeControlServiceControlRequest_Heartbeat) isNodeControlServiceControlRe
 func (*NodeControlServiceControlRequest_CommandResult) isNodeControlServiceControlRequest_Event() {}
 
 func (*NodeControlServiceControlRequest_CredentialCommit) isNodeControlServiceControlRequest_Event() {
+}
+
+func (*NodeControlServiceControlRequest_ProbeTicketRequest) isNodeControlServiceControlRequest_Event() {
 }
 
 type SlotCommand struct {
@@ -1187,15 +1204,16 @@ func (x *RevokeEpochCommand) GetReason() string {
 }
 
 type CredentialKeyCommand struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	CommandId      string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	SlotId         string                 `protobuf:"bytes,2,opt,name=slot_id,json=slotId,proto3" json:"slot_id,omitempty"`
-	AccountId      string                 `protobuf:"bytes,3,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
-	ExecutionEpoch uint64                 `protobuf:"varint,4,opt,name=execution_epoch,json=executionEpoch,proto3" json:"execution_epoch,omitempty"`
-	ImageDigest    string                 `protobuf:"bytes,5,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
-	Deadline       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=deadline,proto3" json:"deadline,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	CommandId         string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	SlotId            string                 `protobuf:"bytes,2,opt,name=slot_id,json=slotId,proto3" json:"slot_id,omitempty"`
+	AccountId         string                 `protobuf:"bytes,3,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	ExecutionEpoch    uint64                 `protobuf:"varint,4,opt,name=execution_epoch,json=executionEpoch,proto3" json:"execution_epoch,omitempty"`
+	ImageDigest       string                 `protobuf:"bytes,5,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
+	Deadline          *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=deadline,proto3" json:"deadline,omitempty"`
+	DesiredGeneration uint64                 `protobuf:"varint,7,opt,name=desired_generation,json=desiredGeneration,proto3" json:"desired_generation,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CredentialKeyCommand) Reset() {
@@ -1270,6 +1288,160 @@ func (x *CredentialKeyCommand) GetDeadline() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *CredentialKeyCommand) GetDesiredGeneration() uint64 {
+	if x != nil {
+		return x.DesiredGeneration
+	}
+	return 0
+}
+
+// Only the current authenticated command may request its read-only scope.
+// Identity and authority are derived by the control plane, not supplied here.
+type ControlProbeTicketRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	CommandId string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Scope     string                 `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
+	// Correlation only; never an authorization identity.
+	RequestId     string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ControlProbeTicketRequest) Reset() {
+	*x = ControlProbeTicketRequest{}
+	mi := &file_execution_v1_control_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ControlProbeTicketRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ControlProbeTicketRequest) ProtoMessage() {}
+
+func (x *ControlProbeTicketRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_execution_v1_control_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ControlProbeTicketRequest.ProtoReflect.Descriptor instead.
+func (*ControlProbeTicketRequest) Descriptor() ([]byte, []int) {
+	return file_execution_v1_control_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ControlProbeTicketRequest) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *ControlProbeTicketRequest) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *ControlProbeTicketRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+type ControlProbeTicketResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	CommandId       string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Scope           string                 `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
+	ExecutionTicket string                 `protobuf:"bytes,3,opt,name=execution_ticket,json=executionTicket,proto3" json:"execution_ticket,omitempty"`
+	ExpiresAt       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ErrorCode       string                 `protobuf:"bytes,5,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	RequestId       string                 `protobuf:"bytes,6,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ControlProbeTicketResponse) Reset() {
+	*x = ControlProbeTicketResponse{}
+	mi := &file_execution_v1_control_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ControlProbeTicketResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ControlProbeTicketResponse) ProtoMessage() {}
+
+func (x *ControlProbeTicketResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_execution_v1_control_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ControlProbeTicketResponse.ProtoReflect.Descriptor instead.
+func (*ControlProbeTicketResponse) Descriptor() ([]byte, []int) {
+	return file_execution_v1_control_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ControlProbeTicketResponse) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *ControlProbeTicketResponse) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *ControlProbeTicketResponse) GetExecutionTicket() string {
+	if x != nil {
+		return x.ExecutionTicket
+	}
+	return ""
+}
+
+func (x *ControlProbeTicketResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *ControlProbeTicketResponse) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *ControlProbeTicketResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
 type SecureActivationCommand struct {
 	state                     protoimpl.MessageState `protogen:"open.v1"`
 	CommandId                 string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
@@ -1287,7 +1459,7 @@ type SecureActivationCommand struct {
 
 func (x *SecureActivationCommand) Reset() {
 	*x = SecureActivationCommand{}
-	mi := &file_execution_v1_control_proto_msgTypes[15]
+	mi := &file_execution_v1_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1299,7 +1471,7 @@ func (x *SecureActivationCommand) String() string {
 func (*SecureActivationCommand) ProtoMessage() {}
 
 func (x *SecureActivationCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_execution_v1_control_proto_msgTypes[15]
+	mi := &file_execution_v1_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1312,7 +1484,7 @@ func (x *SecureActivationCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecureActivationCommand.ProtoReflect.Descriptor instead.
 func (*SecureActivationCommand) Descriptor() ([]byte, []int) {
-	return file_execution_v1_control_proto_rawDescGZIP(), []int{15}
+	return file_execution_v1_control_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SecureActivationCommand) GetCommandId() string {
@@ -1393,7 +1565,7 @@ type ControlCredentialCommit struct {
 
 func (x *ControlCredentialCommit) Reset() {
 	*x = ControlCredentialCommit{}
-	mi := &file_execution_v1_control_proto_msgTypes[16]
+	mi := &file_execution_v1_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1405,7 +1577,7 @@ func (x *ControlCredentialCommit) String() string {
 func (*ControlCredentialCommit) ProtoMessage() {}
 
 func (x *ControlCredentialCommit) ProtoReflect() protoreflect.Message {
-	mi := &file_execution_v1_control_proto_msgTypes[16]
+	mi := &file_execution_v1_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1418,7 +1590,7 @@ func (x *ControlCredentialCommit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlCredentialCommit.ProtoReflect.Descriptor instead.
 func (*ControlCredentialCommit) Descriptor() ([]byte, []int) {
-	return file_execution_v1_control_proto_rawDescGZIP(), []int{16}
+	return file_execution_v1_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ControlCredentialCommit) GetCommandId() string {
@@ -1482,7 +1654,7 @@ type ControlCredentialCommitAck struct {
 
 func (x *ControlCredentialCommitAck) Reset() {
 	*x = ControlCredentialCommitAck{}
-	mi := &file_execution_v1_control_proto_msgTypes[17]
+	mi := &file_execution_v1_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1494,7 +1666,7 @@ func (x *ControlCredentialCommitAck) String() string {
 func (*ControlCredentialCommitAck) ProtoMessage() {}
 
 func (x *ControlCredentialCommitAck) ProtoReflect() protoreflect.Message {
-	mi := &file_execution_v1_control_proto_msgTypes[17]
+	mi := &file_execution_v1_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1507,7 +1679,7 @@ func (x *ControlCredentialCommitAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlCredentialCommitAck.ProtoReflect.Descriptor instead.
 func (*ControlCredentialCommitAck) Descriptor() ([]byte, []int) {
-	return file_execution_v1_control_proto_rawDescGZIP(), []int{17}
+	return file_execution_v1_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ControlCredentialCommitAck) GetCommandId() string {
@@ -1547,6 +1719,7 @@ type NodeControlServiceControlResponse struct {
 	//	*NodeControlServiceControlResponse_CredentialKeyCommand
 	//	*NodeControlServiceControlResponse_SecureActivationCommand
 	//	*NodeControlServiceControlResponse_CredentialCommitAck
+	//	*NodeControlServiceControlResponse_ProbeTicketResponse
 	Event         isNodeControlServiceControlResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1554,7 +1727,7 @@ type NodeControlServiceControlResponse struct {
 
 func (x *NodeControlServiceControlResponse) Reset() {
 	*x = NodeControlServiceControlResponse{}
-	mi := &file_execution_v1_control_proto_msgTypes[18]
+	mi := &file_execution_v1_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1566,7 +1739,7 @@ func (x *NodeControlServiceControlResponse) String() string {
 func (*NodeControlServiceControlResponse) ProtoMessage() {}
 
 func (x *NodeControlServiceControlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_execution_v1_control_proto_msgTypes[18]
+	mi := &file_execution_v1_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1579,7 +1752,7 @@ func (x *NodeControlServiceControlResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use NodeControlServiceControlResponse.ProtoReflect.Descriptor instead.
 func (*NodeControlServiceControlResponse) Descriptor() ([]byte, []int) {
-	return file_execution_v1_control_proto_rawDescGZIP(), []int{18}
+	return file_execution_v1_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *NodeControlServiceControlResponse) GetEvent() isNodeControlServiceControlResponse_Event {
@@ -1634,6 +1807,15 @@ func (x *NodeControlServiceControlResponse) GetCredentialCommitAck() *ControlCre
 	return nil
 }
 
+func (x *NodeControlServiceControlResponse) GetProbeTicketResponse() *ControlProbeTicketResponse {
+	if x != nil {
+		if x, ok := x.Event.(*NodeControlServiceControlResponse_ProbeTicketResponse); ok {
+			return x.ProbeTicketResponse
+		}
+	}
+	return nil
+}
+
 type isNodeControlServiceControlResponse_Event interface {
 	isNodeControlServiceControlResponse_Event()
 }
@@ -1658,6 +1840,10 @@ type NodeControlServiceControlResponse_CredentialCommitAck struct {
 	CredentialCommitAck *ControlCredentialCommitAck `protobuf:"bytes,5,opt,name=credential_commit_ack,json=credentialCommitAck,proto3,oneof"`
 }
 
+type NodeControlServiceControlResponse_ProbeTicketResponse struct {
+	ProbeTicketResponse *ControlProbeTicketResponse `protobuf:"bytes,6,opt,name=probe_ticket_response,json=probeTicketResponse,proto3,oneof"`
+}
+
 func (*NodeControlServiceControlResponse_SlotCommand) isNodeControlServiceControlResponse_Event() {}
 
 func (*NodeControlServiceControlResponse_RevokeEpoch) isNodeControlServiceControlResponse_Event() {}
@@ -1669,6 +1855,9 @@ func (*NodeControlServiceControlResponse_SecureActivationCommand) isNodeControlS
 }
 
 func (*NodeControlServiceControlResponse_CredentialCommitAck) isNodeControlServiceControlResponse_Event() {
+}
+
+func (*NodeControlServiceControlResponse_ProbeTicketResponse) isNodeControlServiceControlResponse_Event() {
 }
 
 var File_execution_v1_control_proto protoreflect.FileDescriptor
@@ -1751,12 +1940,13 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"\x1cCredentialTransportKeyOutput\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x02 \x01(\fR\tpublicKey\"\xb5\x02\n" +
+	"public_key\x18\x02 \x01(\fR\tpublicKey\"\x92\x03\n" +
 	" NodeControlServiceControlRequest\x12/\n" +
 	"\x05hello\x18\x01 \x01(\v2\x17.execution.v1.NodeHelloH\x00R\x05hello\x12;\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x1b.execution.v1.NodeHeartbeatH\x00R\theartbeat\x12D\n" +
 	"\x0ecommand_result\x18\x03 \x01(\v2\x1b.execution.v1.CommandResultH\x00R\rcommandResult\x12T\n" +
-	"\x11credential_commit\x18\x04 \x01(\v2%.execution.v1.ControlCredentialCommitH\x00R\x10credentialCommitB\a\n" +
+	"\x11credential_commit\x18\x04 \x01(\v2%.execution.v1.ControlCredentialCommitH\x00R\x10credentialCommit\x12[\n" +
+	"\x14probe_ticket_request\x18\x05 \x01(\v2'.execution.v1.ControlProbeTicketRequestH\x00R\x12probeTicketRequestB\a\n" +
 	"\x05event\"\xa3\x03\n" +
 	"\vSlotCommand\x12\x1d\n" +
 	"\n" +
@@ -1777,7 +1967,7 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x17\n" +
 	"\aslot_id\x18\x02 \x01(\tR\x06slotId\x12'\n" +
 	"\x0fexecution_epoch\x18\x03 \x01(\x04R\x0eexecutionEpoch\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xf1\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xa0\x02\n" +
 	"\x14CredentialKeyCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x17\n" +
@@ -1786,7 +1976,25 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"account_id\x18\x03 \x01(\tR\taccountId\x12'\n" +
 	"\x0fexecution_epoch\x18\x04 \x01(\x04R\x0eexecutionEpoch\x12!\n" +
 	"\fimage_digest\x18\x05 \x01(\tR\vimageDigest\x126\n" +
-	"\bdeadline\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\"\x8a\x03\n" +
+	"\bdeadline\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\x12-\n" +
+	"\x12desired_generation\x18\a \x01(\x04R\x11desiredGeneration\"o\n" +
+	"\x19ControlProbeTicketRequest\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x14\n" +
+	"\x05scope\x18\x02 \x01(\tR\x05scope\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\"\xf5\x01\n" +
+	"\x1aControlProbeTicketResponse\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x14\n" +
+	"\x05scope\x18\x02 \x01(\tR\x05scope\x12)\n" +
+	"\x10execution_ticket\x18\x03 \x01(\tR\x0fexecutionTicket\x129\n" +
+	"\n" +
+	"expires_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\x05 \x01(\tR\terrorCode\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x06 \x01(\tR\trequestId\"\x8a\x03\n" +
 	"\x17SecureActivationCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x17\n" +
@@ -1815,13 +2023,14 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"version_id\x18\x03 \x01(\tR\tversionId\x12\x1d\n" +
 	"\n" +
-	"error_code\x18\x04 \x01(\tR\terrorCode\"\xd4\x03\n" +
+	"error_code\x18\x04 \x01(\tR\terrorCode\"\xb4\x04\n" +
 	"!NodeControlServiceControlResponse\x12>\n" +
 	"\fslot_command\x18\x01 \x01(\v2\x19.execution.v1.SlotCommandH\x00R\vslotCommand\x12E\n" +
 	"\frevoke_epoch\x18\x02 \x01(\v2 .execution.v1.RevokeEpochCommandH\x00R\vrevokeEpoch\x12Z\n" +
 	"\x16credential_key_command\x18\x03 \x01(\v2\".execution.v1.CredentialKeyCommandH\x00R\x14credentialKeyCommand\x12c\n" +
 	"\x19secure_activation_command\x18\x04 \x01(\v2%.execution.v1.SecureActivationCommandH\x00R\x17secureActivationCommand\x12^\n" +
-	"\x15credential_commit_ack\x18\x05 \x01(\v2(.execution.v1.ControlCredentialCommitAckH\x00R\x13credentialCommitAckB\a\n" +
+	"\x15credential_commit_ack\x18\x05 \x01(\v2(.execution.v1.ControlCredentialCommitAckH\x00R\x13credentialCommitAck\x12^\n" +
+	"\x15probe_ticket_response\x18\x06 \x01(\v2(.execution.v1.ControlProbeTicketResponseH\x00R\x13probeTicketResponseB\a\n" +
 	"\x05event*\xf6\x01\n" +
 	"\x11SlotCommandAction\x12#\n" +
 	"\x1fSLOT_COMMAND_ACTION_UNSPECIFIED\x10\x00\x12\x1e\n" +
@@ -1850,7 +2059,7 @@ func file_execution_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_execution_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_execution_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_execution_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_execution_v1_control_proto_goTypes = []any{
 	(SlotCommandAction)(0),                    // 0: execution.v1.SlotCommandAction
 	(*ProtocolVersion)(nil),                   // 1: execution.v1.ProtocolVersion
@@ -1868,52 +2077,57 @@ var file_execution_v1_control_proto_goTypes = []any{
 	(*SlotCommand)(nil),                       // 13: execution.v1.SlotCommand
 	(*RevokeEpochCommand)(nil),                // 14: execution.v1.RevokeEpochCommand
 	(*CredentialKeyCommand)(nil),              // 15: execution.v1.CredentialKeyCommand
-	(*SecureActivationCommand)(nil),           // 16: execution.v1.SecureActivationCommand
-	(*ControlCredentialCommit)(nil),           // 17: execution.v1.ControlCredentialCommit
-	(*ControlCredentialCommitAck)(nil),        // 18: execution.v1.ControlCredentialCommitAck
-	(*NodeControlServiceControlResponse)(nil), // 19: execution.v1.NodeControlServiceControlResponse
-	nil,                           // 20: execution.v1.EnrollNodeRequest.LabelsEntry
-	nil,                           // 21: execution.v1.NodeHello.LabelsEntry
-	nil,                           // 22: execution.v1.SlotCommand.MetadataEntry
-	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
+	(*ControlProbeTicketRequest)(nil),         // 16: execution.v1.ControlProbeTicketRequest
+	(*ControlProbeTicketResponse)(nil),        // 17: execution.v1.ControlProbeTicketResponse
+	(*SecureActivationCommand)(nil),           // 18: execution.v1.SecureActivationCommand
+	(*ControlCredentialCommit)(nil),           // 19: execution.v1.ControlCredentialCommit
+	(*ControlCredentialCommitAck)(nil),        // 20: execution.v1.ControlCredentialCommitAck
+	(*NodeControlServiceControlResponse)(nil), // 21: execution.v1.NodeControlServiceControlResponse
+	nil,                           // 22: execution.v1.EnrollNodeRequest.LabelsEntry
+	nil,                           // 23: execution.v1.NodeHello.LabelsEntry
+	nil,                           // 24: execution.v1.SlotCommand.MetadataEntry
+	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
 }
 var file_execution_v1_control_proto_depIdxs = []int32{
-	20, // 0: execution.v1.EnrollNodeRequest.labels:type_name -> execution.v1.EnrollNodeRequest.LabelsEntry
+	22, // 0: execution.v1.EnrollNodeRequest.labels:type_name -> execution.v1.EnrollNodeRequest.LabelsEntry
 	1,  // 1: execution.v1.EnrollNodeRequest.protocol_version:type_name -> execution.v1.ProtocolVersion
-	23, // 2: execution.v1.EnrollNodeResponse.certificate_expires_at:type_name -> google.protobuf.Timestamp
-	23, // 3: execution.v1.RenewNodeCertificateResponse.certificate_expires_at:type_name -> google.protobuf.Timestamp
+	25, // 2: execution.v1.EnrollNodeResponse.certificate_expires_at:type_name -> google.protobuf.Timestamp
+	25, // 3: execution.v1.RenewNodeCertificateResponse.certificate_expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: execution.v1.NodeHello.protocol_version:type_name -> execution.v1.ProtocolVersion
 	2,  // 5: execution.v1.NodeHello.capacity:type_name -> execution.v1.Capacity
-	21, // 6: execution.v1.NodeHello.labels:type_name -> execution.v1.NodeHello.LabelsEntry
-	23, // 7: execution.v1.NodeHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 6: execution.v1.NodeHello.labels:type_name -> execution.v1.NodeHello.LabelsEntry
+	25, // 7: execution.v1.NodeHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	8,  // 8: execution.v1.NodeHeartbeat.slots:type_name -> execution.v1.SlotObservation
 	8,  // 9: execution.v1.CommandResult.slot:type_name -> execution.v1.SlotObservation
 	11, // 10: execution.v1.CommandResult.credential_transport_key:type_name -> execution.v1.CredentialTransportKeyOutput
 	7,  // 11: execution.v1.NodeControlServiceControlRequest.hello:type_name -> execution.v1.NodeHello
 	9,  // 12: execution.v1.NodeControlServiceControlRequest.heartbeat:type_name -> execution.v1.NodeHeartbeat
 	10, // 13: execution.v1.NodeControlServiceControlRequest.command_result:type_name -> execution.v1.CommandResult
-	17, // 14: execution.v1.NodeControlServiceControlRequest.credential_commit:type_name -> execution.v1.ControlCredentialCommit
-	0,  // 15: execution.v1.SlotCommand.action:type_name -> execution.v1.SlotCommandAction
-	23, // 16: execution.v1.SlotCommand.deadline:type_name -> google.protobuf.Timestamp
-	22, // 17: execution.v1.SlotCommand.metadata:type_name -> execution.v1.SlotCommand.MetadataEntry
-	23, // 18: execution.v1.CredentialKeyCommand.deadline:type_name -> google.protobuf.Timestamp
-	23, // 19: execution.v1.SecureActivationCommand.deadline:type_name -> google.protobuf.Timestamp
-	13, // 20: execution.v1.NodeControlServiceControlResponse.slot_command:type_name -> execution.v1.SlotCommand
-	14, // 21: execution.v1.NodeControlServiceControlResponse.revoke_epoch:type_name -> execution.v1.RevokeEpochCommand
-	15, // 22: execution.v1.NodeControlServiceControlResponse.credential_key_command:type_name -> execution.v1.CredentialKeyCommand
-	16, // 23: execution.v1.NodeControlServiceControlResponse.secure_activation_command:type_name -> execution.v1.SecureActivationCommand
-	18, // 24: execution.v1.NodeControlServiceControlResponse.credential_commit_ack:type_name -> execution.v1.ControlCredentialCommitAck
-	3,  // 25: execution.v1.NodeControlService.EnrollNode:input_type -> execution.v1.EnrollNodeRequest
-	5,  // 26: execution.v1.NodeControlService.RenewNodeCertificate:input_type -> execution.v1.RenewNodeCertificateRequest
-	12, // 27: execution.v1.NodeControlService.Control:input_type -> execution.v1.NodeControlServiceControlRequest
-	4,  // 28: execution.v1.NodeControlService.EnrollNode:output_type -> execution.v1.EnrollNodeResponse
-	6,  // 29: execution.v1.NodeControlService.RenewNodeCertificate:output_type -> execution.v1.RenewNodeCertificateResponse
-	19, // 30: execution.v1.NodeControlService.Control:output_type -> execution.v1.NodeControlServiceControlResponse
-	28, // [28:31] is the sub-list for method output_type
-	25, // [25:28] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	19, // 14: execution.v1.NodeControlServiceControlRequest.credential_commit:type_name -> execution.v1.ControlCredentialCommit
+	16, // 15: execution.v1.NodeControlServiceControlRequest.probe_ticket_request:type_name -> execution.v1.ControlProbeTicketRequest
+	0,  // 16: execution.v1.SlotCommand.action:type_name -> execution.v1.SlotCommandAction
+	25, // 17: execution.v1.SlotCommand.deadline:type_name -> google.protobuf.Timestamp
+	24, // 18: execution.v1.SlotCommand.metadata:type_name -> execution.v1.SlotCommand.MetadataEntry
+	25, // 19: execution.v1.CredentialKeyCommand.deadline:type_name -> google.protobuf.Timestamp
+	25, // 20: execution.v1.ControlProbeTicketResponse.expires_at:type_name -> google.protobuf.Timestamp
+	25, // 21: execution.v1.SecureActivationCommand.deadline:type_name -> google.protobuf.Timestamp
+	13, // 22: execution.v1.NodeControlServiceControlResponse.slot_command:type_name -> execution.v1.SlotCommand
+	14, // 23: execution.v1.NodeControlServiceControlResponse.revoke_epoch:type_name -> execution.v1.RevokeEpochCommand
+	15, // 24: execution.v1.NodeControlServiceControlResponse.credential_key_command:type_name -> execution.v1.CredentialKeyCommand
+	18, // 25: execution.v1.NodeControlServiceControlResponse.secure_activation_command:type_name -> execution.v1.SecureActivationCommand
+	20, // 26: execution.v1.NodeControlServiceControlResponse.credential_commit_ack:type_name -> execution.v1.ControlCredentialCommitAck
+	17, // 27: execution.v1.NodeControlServiceControlResponse.probe_ticket_response:type_name -> execution.v1.ControlProbeTicketResponse
+	3,  // 28: execution.v1.NodeControlService.EnrollNode:input_type -> execution.v1.EnrollNodeRequest
+	5,  // 29: execution.v1.NodeControlService.RenewNodeCertificate:input_type -> execution.v1.RenewNodeCertificateRequest
+	12, // 30: execution.v1.NodeControlService.Control:input_type -> execution.v1.NodeControlServiceControlRequest
+	4,  // 31: execution.v1.NodeControlService.EnrollNode:output_type -> execution.v1.EnrollNodeResponse
+	6,  // 32: execution.v1.NodeControlService.RenewNodeCertificate:output_type -> execution.v1.RenewNodeCertificateResponse
+	21, // 33: execution.v1.NodeControlService.Control:output_type -> execution.v1.NodeControlServiceControlResponse
+	31, // [31:34] is the sub-list for method output_type
+	28, // [28:31] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_execution_v1_control_proto_init() }
@@ -1926,13 +2140,15 @@ func file_execution_v1_control_proto_init() {
 		(*NodeControlServiceControlRequest_Heartbeat)(nil),
 		(*NodeControlServiceControlRequest_CommandResult)(nil),
 		(*NodeControlServiceControlRequest_CredentialCommit)(nil),
+		(*NodeControlServiceControlRequest_ProbeTicketRequest)(nil),
 	}
-	file_execution_v1_control_proto_msgTypes[18].OneofWrappers = []any{
+	file_execution_v1_control_proto_msgTypes[20].OneofWrappers = []any{
 		(*NodeControlServiceControlResponse_SlotCommand)(nil),
 		(*NodeControlServiceControlResponse_RevokeEpoch)(nil),
 		(*NodeControlServiceControlResponse_CredentialKeyCommand)(nil),
 		(*NodeControlServiceControlResponse_SecureActivationCommand)(nil),
 		(*NodeControlServiceControlResponse_CredentialCommitAck)(nil),
+		(*NodeControlServiceControlResponse_ProbeTicketResponse)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1940,7 +2156,7 @@ func file_execution_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_execution_v1_control_proto_rawDesc), len(file_execution_v1_control_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   22,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

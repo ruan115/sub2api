@@ -134,6 +134,7 @@ func (s *nodeSession) queuedProbeIDLocked(commandID string) bool {
 func (s *nodeSession) reapProbesLocked(now time.Time) {
 	for id, pending := range s.pendingCommands {
 		if pending.probe != nil && (pending.probe.ctx.Err() != nil || !pending.deadline.After(now)) {
+			pending.cancelTicket()
 			pending.probe.cancel()
 			delete(s.pendingCommands, id)
 		}
@@ -146,14 +147,30 @@ func (s *nodeSession) reapProbesLocked(now time.Time) {
 func (s *nodeSession) prepareOutbound(response *executionv1.NodeControlServiceControlResponse, now time.Time) bool {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
-	probe, marked := s.queuedProbes[response]
-	if !marked {
-		return true
+	if response.GetProbeTicketResponse() != nil {
+		return s.prepareProbeTicketLocked(response, now)
 	}
-	delete(s.queuedProbes, response)
-	s.reapProbesLocked(now)
-	pending, exists := s.pendingCommands[controlCommandID(response)]
-	return exists && pending.probe == probe && probe.ctx.Err() == nil
+	probe, marked := s.queuedProbes[response]
+	if marked {
+		delete(s.queuedProbes, response)
+		s.reapProbesLocked(now)
+		pending, exists := s.pendingCommands[controlCommandID(response)]
+		if !exists || pending.probe != probe || probe.ctx.Err() != nil {
+			return false
+		}
+	}
+	if id := controlCommandID(response); response.GetCredentialKeyCommand() != nil ||
+		response.GetSlotCommand().GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_INSPECT {
+		pending, exists := s.pendingCommands[id]
+		if !exists || pending.outbound != response {
+			return false
+		}
+		// The authorization point is handing this exact object to stream.Send,
+		// not reserving/queueing it and not a claim of remote delivery.
+		pending.sending = true
+		s.pendingCommands[id] = pending
+	}
+	return true
 }
 
 func (s *nodeSession) probeCurrent(commandID string, probe *pendingProbe, now time.Time) bool {
@@ -177,6 +194,7 @@ func (s *nodeSession) releaseProbe(commandID string, probe *pendingProbe) {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 	if pending, exists := s.pendingCommands[commandID]; exists && pending.probe == probe {
+		pending.cancelTicket()
 		probe.cancel()
 		delete(s.pendingCommands, commandID)
 	}
@@ -186,6 +204,7 @@ func (s *nodeSession) cancelProbes() {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 	for id, pending := range s.pendingCommands {
+		pending.cancelTicket()
 		if pending.probe != nil {
 			pending.probe.cancel()
 			delete(s.pendingCommands, id)

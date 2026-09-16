@@ -55,6 +55,7 @@ type Config struct {
 	OutboundQueue     int
 	CredentialSink    worker.SealedCredentialSink
 	CommandObserver   CommandObserver
+	ProbeTickets      *ProbeTicketConfig
 	Now               func() time.Time
 }
 
@@ -102,6 +103,7 @@ type nodeSession struct {
 	pendingCommands    map[string]pendingCommand
 	maxPendingCommands int
 	queuedProbes       map[*executionv1.NodeControlServiceControlResponse]*pendingProbe
+	queuedTickets      map[*executionv1.NodeControlServiceControlResponse]*probeTicketAttempt
 }
 
 type pendingCommand struct {
@@ -115,6 +117,11 @@ type pendingCommand struct {
 	deadline          time.Time
 	commitStarted     bool
 	probe             *pendingProbe
+	action            executionv1.SlotCommandAction
+	desiredGeneration uint64
+	outbound          *executionv1.NodeControlServiceControlResponse
+	sending           bool
+	ticketAttempt     *probeTicketAttempt
 }
 
 type pendingCommandKind uint8
@@ -137,6 +144,11 @@ func NewServer(repository store.NodeRepository, authority *pki.Authority, config
 	}
 	if config.Now == nil {
 		config.Now = time.Now
+	}
+	var err error
+	config.ProbeTickets, err = normalizeProbeTicketConfig(config.ProbeTickets)
+	if err != nil {
+		return nil, err
 	}
 	return &Server{repository: repository, authority: authority, config: config, sessions: make(map[string]*nodeSession)}, nil
 }
@@ -352,6 +364,10 @@ func (s *Server) Control(stream executionv1.NodeControlService_ControlServer) er
 				}
 			} else if credentialCommit := result.request.GetCredentialCommit(); credentialCommit != nil {
 				if err := s.recordCredentialCommit(stream.Context(), session, credentialCommit); err != nil {
+					return err
+				}
+			} else if probeTicket := result.request.GetProbeTicketRequest(); probeTicket != nil {
+				if err := s.recordProbeTicketRequest(stream.Context(), identity.nodeID, session, probeTicket); err != nil {
 					return err
 				}
 			} else {
@@ -699,6 +715,7 @@ func (s *nodeSession) reserveCommand(commandID string, command pendingCommand, n
 	// capacity so the probes cannot block the command that supersedes them.
 	for id, pending := range s.pendingCommands {
 		if pending.probe != nil && pending.slotID == command.slotID {
+			pending.cancelTicket()
 			pending.probe.cancel()
 			delete(s.pendingCommands, id)
 		}
@@ -720,6 +737,7 @@ func (s *nodeSession) command(commandID string) (pendingCommand, bool) {
 func (s *nodeSession) releaseCommand(commandID string) {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
+	s.pendingCommands[commandID].cancelTicket()
 	if pending := s.pendingCommands[commandID]; pending.probe != nil {
 		pending.probe.cancel()
 	}
@@ -897,8 +915,14 @@ func controlCommandID(response *executionv1.NodeControlServiceControlResponse) s
 
 func pendingFromResponse(response *executionv1.NodeControlServiceControlResponse) pendingCommand {
 	if command := response.GetSlotCommand(); command != nil {
+		var diagnosticOutbound *executionv1.NodeControlServiceControlResponse
+		if command.GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_INSPECT {
+			diagnosticOutbound = response
+		}
 		return pendingCommand{kind: pendingSlotCommand, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch(),
-			imageDigest: command.GetImageDigest(), deadline: command.GetDeadline().AsTime()}
+			imageDigest: command.GetImageDigest(), deadline: command.GetDeadline().AsTime(), outbound: diagnosticOutbound,
+			action: command.GetAction(), accountBinding: provider.RuntimeAccountID(command.GetAccountId()),
+			desiredGeneration: probeTicketGeneration(command.GetMetadata()["desired_generation"])}
 	}
 	if revoke := response.GetRevokeEpoch(); revoke != nil {
 		return pendingCommand{kind: pendingEpochRevocation, slotID: revoke.GetSlotId(), executionEpoch: revoke.GetExecutionEpoch()}
@@ -906,7 +930,8 @@ func pendingFromResponse(response *executionv1.NodeControlServiceControlResponse
 	if command := response.GetCredentialKeyCommand(); command != nil {
 		return pendingCommand{
 			kind: pendingCredentialKey, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch(), imageDigest: command.GetImageDigest(),
-			deadline: command.GetDeadline().AsTime(),
+			deadline:       command.GetDeadline().AsTime(),
+			accountBinding: provider.RuntimeAccountID(command.GetAccountId()), desiredGeneration: command.GetDesiredGeneration(), outbound: response,
 		}
 	}
 	if command := response.GetSecureActivationCommand(); command != nil {

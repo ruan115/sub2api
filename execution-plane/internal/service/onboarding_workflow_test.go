@@ -120,6 +120,37 @@ func TestSecureOnboardingWorkflowRejectsKeyResultBeforeIntentExposure(t *testing
 	}
 }
 
+func TestDiagnosticKeyCommandUsesWorkflowGeneration(t *testing.T) {
+	now := time.Now().UTC()
+	recipient, err := credential.NewRecipient(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recipient.Destroy()
+	builder, err := NewSecureOnboardingCommandBuilder(recipient, rand.Reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow, err := NewSecureOnboardingWorkflow(&recordingIntentVault{}, builder, &recordingActivationAuthority{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := SecureOnboardingPlan{IntentID: "intent-diagnostic", Owner: "owner-diagnostic", DesiredGeneration: 7, Binding: testSecureOnboardingBinding(now)}
+	first, err := workflow.CredentialKeyCommand(plan)
+	if err != nil || first.GetCredentialKeyCommand().GetDesiredGeneration() != 7 {
+		t.Fatal("diagnostic key command lost the workflow generation")
+	}
+	plan.DesiredGeneration = 8
+	second, err := workflow.CredentialKeyCommand(plan)
+	if err != nil || second.GetCredentialKeyCommand().GetDesiredGeneration() != 8 || first.GetCredentialKeyCommand().GetDesiredGeneration() != 7 {
+		t.Fatal("generation changed through an alias or used another authority")
+	}
+	plan.DesiredGeneration = 0
+	if response, err := workflow.CredentialKeyCommand(plan); err != ErrSecureOnboardingWorkflow || response != nil {
+		t.Fatal("missing workflow generation was accepted")
+	}
+}
+
 func TestSecureOnboardingWorkflowRevalidatesAuthorityBeforeIntentClaim(t *testing.T) {
 	for _, failAt := range []int{1, 2} {
 		intent := &recordingIntentVault{}

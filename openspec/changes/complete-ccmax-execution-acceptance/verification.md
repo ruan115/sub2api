@@ -157,3 +157,39 @@ Review 由两位代理交叉审查非本人模块，主代理集成/复验。发
 2. **P2：等待激活串行锁无法及时取消。** 已有激活卡在 commit 时，第二个激活通过前置检查后等待 `sync.Mutex.Lock`；取消第二个请求不能使它返回，直到第一个 commit 结束。这是此前即存在、B2b1 仅验证“取消不发布”而未验证“取消等待及时结束”的缺口。现改为零值可用的 context-aware channel gate，无等待 goroutine；选中获取后复查取消并归还 token。提交回归以包装 context.Done 信号确定已经进入等待，不依赖 sleep、runtime.Stack 或调度符号；第二个请求可在第一个 commit 释放前退出，且不运行 onboarding、不改变第一次发布。Drain 等待在途清理的既定边界不变。
 
 两项均先复现旧实现失败，再修复；两位 reviewer 已交叉复核。主代理修复后完整 `go test -race -count=1 -timeout=120s ./...`、`go vet ./...` 和 worker/workerproof 的 `Test(ActivationWaiter|ActivationGate|ActivationCancelled|DrainHides|HealthSnapshot|LoadedProof)` 定向 race 10 轮通过。命令沿用上述离线依赖/屏蔽外部 DSN 设置，无真实依赖或线上操作。原“review 无发现”仅代表当时范围，本次新增发现与修复按事实补记，不宣称 review 能证明无缺陷。
+
+## B2b2a 实际结果
+
+先提交上述 review 修复 `18d5f52`，再提交规划 `46b2d3f`，随后实现本切片。设计：[B2b2a](b2b2a-design.md)；模块边界：[只读诊断签票](../../../execution-plane/internal/control/probe_tickets.md)。生产 bootstrap、默认配置及监听均未改变。
+
+| 验收点 | 证据与限制 |
+| --- | --- |
+| 协议兼容与代数来源 | 既有 TLS Control 流新增诊断票请求/响应 oneof，无新 gRPC 方法；CredentialKeyCommand 新增 desired_generation，由已有 SecureOnboardingPlan 单一来源填入。缺代数的旧命令不能换新票，原执行路径保留 |
+| 显式开启与最小权限 | 控制面必须注入完整 ProbeTicketConfig，宿主必须同时设置 EnableProbeTickets 和 probe_tickets capability；仅 INSPECT→health、CredentialKey→credential_key。未配置、错 scope、无 command context、仅排队或无 pending 均拒绝；启用的 command context 不回退旧签票源 |
+| 权威与会话固定 | 请求不提供授权身份/地址；控制面从当前已认证会话及已交给 stream.Send 的原命令推导身份，前后各读一次 ProbeBinding、核独立 lease/活动会话；account/slot/node/epoch/generation/image/providerRef/owner/session 必须一致。发送交接点不是节点收讫证明 |
+| 一次尝试与关联隔离 | pending 实例固定且只有一次尝试；失败/丢票需要新命令。每次宿主请求新随机 request_id，仅作关联；与 command_id/scope 一起核对，覆盖相同命令 ID 重用时的旧回包 ABA，不建立无限历史表 |
+| 期限与取消 | 默认 TTL 5秒、最大10秒，授权检查默认2秒、最大5秒；向下截到原命令、证书、前后 durable lease/节点新鲜度期限。后读的延长期限不能放大第一次上限。取消、元数据/lease 超时、会话替换、完成/过期、最终时钟回调取消均有拒绝回归 |
+| 队列与秘密边界 | 宿主每会话请求队列/等待项各最多64，等待不超过10秒/命令期限；复用单一 stream.Send 循环，取消/断连回收，合法迟到关联 ID 丢弃；控制面出队复核命令实例/期限。签私钥仅在控制面，票不写日志/DB；非诊断 pending 不保留大密文 |
+| 实际本地组合 | TestProbeTicketTLSControlClientToActualWorker 经过实际 TLS ControlServer/ControlClient、控制面真实 Ed25519 签票、实际 worker Guard 及 Health/公钥 RPC；使用 Memory 权威/lease、临时测试密钥及 bufconn worker。默认关闭分支拒绝，显式开启分支成功 |
+| 权限负例 | 同一组合拒绝跨账号、scope 升级、重复换票、nonce 重放、独立 lease 不可用；用诊断票调用实际 CountTokens 在执行器之前 PermissionDenied。worker 未激活，Health 不伪造 loaded_state，模型执行计数始终0 |
+
+两位代理交叉 review 非本人模块，主代理复核集成。实现中复审发现原 outbound 指针如果无差别保留，会让 secure activation pending 在任务结束前一直持有最大2MiB密文，并扩大普通命令的出队语义变更；已缩小到 INSPECT/公钥两种诊断命令，其他命令不保留响应指针，增加 TestProbeTicketsDoNotRetainNonDiagnosticControlPayloads。request_id 关联同时明确防止宿主等待表的命令 ID 重用误投递。最终交叉 review 无剩余已知 P1/P2 阻碍本切片提交，未将此结论扩大为生产整链无缺陷。
+
+### B2b2a 验证与一次既有测试失败
+
+主代理最终验证工作目录为 `execution-plane`。所有 Go 测试/vet 均使用 `GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local`，并以 `env -u` 屏蔽 `EXECUTION_MYSQL_TEST_DSN`、`EXECUTION_REDIS_TEST_URL`、`EXECUTION_CCMAX_MYSQL_TEST_DSN`：
+
+- 最终完整 `go test -race -count=1 -timeout=120s ./...` 与 `go vet ./...` 通过；此前主代理多轮完整 race 也通过。
+- `go test -race -count=10 -timeout=120s ./internal/control ./internal/hostagent ./internal/service -run 'Test(ProbeTicket|RuntimeProbeSource|DiagnosticKeyCommand|ControlClient.*Probe)'` 通过。控制面作者对最后新增证书、第一次 lease/node 期限上限及实际 TLS 等用例另执行 race 5轮通过；两位 reviewer 独立相关 race/vet 通过。
+- `sh scripts/control-proto-offline.sh check` 连续两次零 diff，`sh scripts/worker-proto-offline.sh check` 通过；均仅使用缓存的固定版本工具。生成修改仅 control.pb.go；control_grpc.pb.go、worker 及 CCMAX 生成文件未改。
+- `git diff --check` 与 recoverykit 文本/evidence policy 对本切片22个文件扫描通过，包含精确纳入的离线生成脚本；提交仅含源码、合成测试与脱敏文档，不含票据、凭据或构建制品。
+- `go test -tags docker_e2e -run '^$' ./internal/hostagent` 仅编译通过，未运行 Docker E2E、未启动容器/VM。真实 MySQL/Redis 集成未执行，不记为 PASS。
+- reviewer 的一次全 hostagent race 中，既有 TestDataPlaneWorkerLoopbackDoesNotAggregateResponse 在13块后以 `FailedPrecondition: execution binding is no longer active` 失败；该 fixture 将 FenceInterval 设为10ms，watchFence 同时把它用作单次 Validate 硬超时，存在调度预算风险。相关 fixture/stream 文件本轮未修改，也未使用 ControlClient/新诊断来源。随后 reviewer 单独 race 10轮、主代理单独 race 20轮及最终全模块复跑通过。**未在旧提交独立复现，所以不宣称已证明是基线偶发问题**；未放宽超时、未隐去失败，数据面稳定性保留为 B4/F 门槛。
+
+### B2b2a 不能代替的门槛
+
+- 独立 lease.Validate 不返回 Redis 原子剩余 PTTL；已发诊断票在 lease 撤销后可能直到配置 TTL 才失效。本切片没有即时撤销保证，也不产生 activation/业务/续租权限。
+- ProbeBinding 需要已有 providerRef；本地组合的 diagnostic executor 是显式合成实现，默认 INSPECT 仍只检查 provider，未完成首次实例 onboarding、生产 worker 诊断装配或 B3 existing-only registry。
+- worker RPC 为 bufconn，权威/lease 为 Memory，不是实际数据库/Redis/私网 runtime 通道、真实 Docker/VM、凭据/代理或模型可用性证据；没有把 B2b1、B2a 和本切片的局部测试拼成生产整链通过。
+- B2b2b activation payload/lease 授权、业务票版本/代理/模式约束及使用时复核、B2b2c 双层续租/持续流撤销、B3–G 和 PRD §31 仍开放；本切片只勾选 B2b2a。
+- 当前阶段无 SSH/线上数据/UI/配置/服务/路由/账号操作，真实模型调用仍为0；没有 push、部署、开启 execution_onboarding 或标记 migrated。

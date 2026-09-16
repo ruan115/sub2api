@@ -41,6 +41,7 @@ type ControlClientConfig struct {
 	Client                executionv1.NodeControlServiceClient
 	Executor              ControlCommandExecutor
 	ActivationExecutor    ActivationCommandExecutor
+	EnableProbeTickets    bool
 	NodeID                string
 	Labels                map[string]string
 	DataplaneEndpoint     string
@@ -58,6 +59,7 @@ type ControlClient struct {
 	client                executionv1.NodeControlServiceClient
 	executor              ControlCommandExecutor
 	activationExecutor    ActivationCommandExecutor
+	enableProbeTickets    bool
 	nodeID                string
 	labels                map[string]string
 	capabilities          []string
@@ -117,12 +119,17 @@ func NewControlClient(config ControlClientConfig) (*ControlClient, error) {
 	if secureCapability != (config.ActivationExecutor != nil) {
 		return nil, errors.New("secure activation capability and executor must be configured together")
 	}
+	_, probeCapability := stringSet(capabilities)[controlProbeTicketsCapability]
+	if probeCapability != config.EnableProbeTickets {
+		return nil, errors.New("probe ticket capability and opt-in must be configured together")
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
 	return &ControlClient{
 		client: config.Client, executor: config.Executor, activationExecutor: config.ActivationExecutor,
-		nodeID: config.NodeID, labels: labels, capabilities: capabilities,
+		enableProbeTickets: config.EnableProbeTickets,
+		nodeID:             config.NodeID, labels: labels, capabilities: capabilities,
 		capacity: cloneCapacity(config.Capacity), heartbeatInterval: config.HeartbeatInterval,
 		reconnectMin: config.ReconnectMin, reconnectMax: config.ReconnectMax,
 		maxConcurrentCommands: config.MaxConcurrentCommands, commandQueue: config.CommandQueue, now: config.Now,
@@ -193,8 +200,15 @@ func (c *ControlClient) runSession(ctx context.Context) error {
 	results := make(chan *executionv1.CommandResult, c.commandQueue+c.maxConcurrentCommands)
 	commitForwards := make(chan credentialCommitForward, c.commandQueue)
 	pendingCommitAcks := make(map[string]chan credentialCommitResult)
+	var probeBroker *probeTicketBroker
+	var probeRequests <-chan *probeTicketWaiter
+	if c.enableProbeTickets {
+		probeBroker = newProbeTicketBroker(sessionContext, c.now)
+		defer probeBroker.close()
+		probeRequests = probeBroker.queue
+	}
 	for index := 0; index < c.maxConcurrentCommands; index++ {
-		go c.runCommandWorker(sessionContext, commands, results, commitForwards)
+		go c.runCommandWorker(sessionContext, commands, results, commitForwards, probeBroker)
 	}
 
 	if err := stream.Send(c.heartbeatEvent()); err != nil {
@@ -209,6 +223,12 @@ func (c *ControlClient) runSession(ctx context.Context) error {
 		case <-ticker.C:
 			if err := stream.Send(c.heartbeatEvent()); err != nil {
 				return err
+			}
+		case pending := <-probeRequests:
+			if request := probeBroker.outbound(pending); request != nil {
+				if err := stream.Send(request); err != nil {
+					return err
+				}
 			}
 		case result := <-results:
 			if result == nil {
@@ -251,6 +271,12 @@ func (c *ControlClient) runSession(ctx context.Context) error {
 			if event.response == nil {
 				return errors.New("orchestrator returned an empty control event")
 			}
+			if response := event.response.GetProbeTicketResponse(); response != nil {
+				if probeBroker == nil || probeBroker.deliver(response) != nil {
+					return status.Error(codes.InvalidArgument, "orchestrator returned an invalid probe ticket response")
+				}
+				continue
+			}
 			if ack := event.response.GetCredentialCommitAck(); ack != nil {
 				waiter, exists := pendingCommitAcks[ack.GetCommandId()]
 				if !exists || !validCredentialCommitAck(ack) {
@@ -288,25 +314,32 @@ func (c *ControlClient) runCommandWorker(
 	commands <-chan controlCommandEnvelope,
 	results chan<- *executionv1.CommandResult,
 	commitForwards chan<- credentialCommitForward,
+	probeBroker *probeTicketBroker,
 ) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case command := <-commands:
+			commandCtx := ctx
+			cancelCommand := func() {}
+			if probeBroker != nil {
+				commandCtx, cancelCommand = probeBroker.commandContext(ctx, c.nodeID, command)
+			}
 			var result *executionv1.CommandResult
 			if command.slot != nil {
-				result = c.executor.ExecuteSlotCommand(ctx, command.slot)
+				result = c.executor.ExecuteSlotCommand(commandCtx, command.slot)
 			} else if command.revoke != nil {
-				result = c.executor.RevokeEpoch(ctx, command.revoke)
+				result = c.executor.RevokeEpoch(commandCtx, command.revoke)
 			} else if command.key != nil && c.activationExecutor != nil {
-				result = c.activationExecutor.CredentialTransportKey(ctx, command.key)
+				result = c.activationExecutor.CredentialTransportKey(commandCtx, command.key)
 			} else if command.activation != nil && c.activationExecutor != nil {
-				sink := controlCredentialSink{ctx: ctx, commandID: command.activation.GetCommandId(), forwards: commitForwards}
-				result = c.activationExecutor.SecureActivate(ctx, command.activation, sink)
+				sink := controlCredentialSink{ctx: commandCtx, commandID: command.activation.GetCommandId(), forwards: commitForwards}
+				result = c.activationExecutor.SecureActivate(commandCtx, command.activation, sink)
 			} else {
 				result = unsupportedActivationCommandResult(command)
 			}
+			cancelCommand()
 			select {
 			case results <- result:
 			case <-ctx.Done():

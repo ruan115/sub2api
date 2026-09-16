@@ -54,6 +54,9 @@ func (w *SecureOnboardingWorkflow) CredentialKeyCommand(plan SecureOnboardingPla
 	if err != nil {
 		return nil, ErrSecureOnboardingWorkflow
 	}
+	// Diagnostic ticket authority must use the workflow's existing generation,
+	// not a second independently editable copy in the worker identity binding.
+	response.GetCredentialKeyCommand().DesiredGeneration = plan.DesiredGeneration
 	return response, nil
 }
 

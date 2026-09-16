@@ -14,7 +14,7 @@
 
 DP1 的真实回环 RPC / mTLS / fencing / 中继已通过，Docker 基础网络隔离有历史 fake E2E；但 gateway 新路由、host-agent 生产装配/签票/可信快照、真实 CLI/MCP、刷新、完整故障与容量验收仍缺。实际 HTTP worker 只支持 oauth_api，先聚合最多 2 MiB 响应后发送，不能把中继测试当作真实流式闭环。
 
-实施进度：A 已改为实际 HTTP 增量转发，B1 已补会话绑定快照；B2a 已补本地有界主动 INSPECT 库与 TLS 合成闭环；B2b1 已补 worker 原子加载状态、兼容 Health 扩展及控制面主动核对合同。它们尚未组成生产链路，B2b2 的受认证分 scope 签票/可信续租以及 B3–G 仍未完成；B2b1 receipt 不直接授权执行，详见下方台账。
+实施进度：A 已改为实际 HTTP 增量转发，B1 已补会话绑定快照；B2a 已补本地有界主动 INSPECT 库与 TLS 合成闭环；B2b1 已补 worker 原子加载状态、兼容 Health 扩展及控制面主动核对合同，提交后 review 又关闭两个取消边界。B2b2a 新增当前命令绑定的只读诊断票，本地默认关闭。它们尚未组成生产链路，B2b2b/c 的激活/业务签票与可信续租以及 B3–G 仍未完成；B2b1 receipt 和诊断票都不直接授权执行，详见下方台账。
 
 ## 模块与开发顺序
 

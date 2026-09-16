@@ -12,10 +12,11 @@ added without changing placement or account lifecycle semantics.
 
 Acceptance closure now includes actual HTTP-worker streaming (A), a
 session-bound control-plane snapshot foundation (B1), bounded active host
-inspection (B2a), and atomic worker loaded-state comparison (B2b1). None is a complete
+inspection (B2a), atomic worker loaded-state comparison (B2b1), and opt-in
+command-bound read-only diagnostic tickets (B2b2a). None is a complete
 gateway/host/worker production rollout. See the [acceptance ledger](../openspec/changes/complete-ccmax-execution-acceptance/tasks.md)
-and [worker proof boundaries](internal/workerproof/README.md); scoped production
-signing, proof-driven lease renewal and existing-runtime registry assembly are
+and [diagnostic ticket boundaries](internal/control/probe_tickets.md); version-bound
+activation/business signing, proof-driven lease renewal and existing-runtime registry assembly are
 still pending. Migration 013 is not
 automatically applied, and historical unscoped observations remain unavailable.
 
