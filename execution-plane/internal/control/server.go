@@ -101,6 +101,7 @@ type nodeSession struct {
 	commandMu          sync.Mutex
 	pendingCommands    map[string]pendingCommand
 	maxPendingCommands int
+	queuedProbes       map[*executionv1.NodeControlServiceControlResponse]*pendingProbe
 }
 
 type pendingCommand struct {
@@ -113,6 +114,7 @@ type pendingCommand struct {
 	imageDigest       string
 	deadline          time.Time
 	commitStarted     bool
+	probe             *pendingProbe
 }
 
 type pendingCommandKind uint8
@@ -313,6 +315,9 @@ func (s *Server) Control(stream executionv1.NodeControlService_ControlServer) er
 		case <-timer.C:
 			return status.Error(codes.DeadlineExceeded, "node heartbeat timeout")
 		case response := <-outbound:
+			if !session.prepareOutbound(response, s.config.Now().UTC()) {
+				continue
+			}
 			result := make(chan error, 1)
 			sendDone = result
 			outbound = nil
@@ -375,6 +380,9 @@ func (s *Server) Dispatch(ctx context.Context, nodeID string, response *executio
 		return errors.New("control command deadline has expired")
 	}
 	commandID := controlCommandID(cloned)
+	if strings.HasPrefix(commandID, "probe-") {
+		return errors.New("control command id uses a reserved namespace")
+	}
 	s.mu.RLock()
 	session := s.sessions[nodeID]
 	s.mu.RUnlock()
@@ -400,7 +408,7 @@ func (s *Server) Dispatch(ctx context.Context, nodeID string, response *executio
 			return errors.New("node does not support secure activation control commands")
 		}
 	}
-	if !session.reserveCommand(commandID, pendingFromResponse(cloned)) {
+	if !session.reserveCommand(commandID, pendingFromResponse(cloned), s.config.Now().UTC()) {
 		return errors.New("control command is duplicate or node command capacity is full")
 	}
 	queued := false
@@ -477,6 +485,7 @@ func (s *Server) detach(nodeID, sessionID string) {
 	if current := s.sessions[nodeID]; current != nil && current.id == sessionID {
 		delete(s.sessions, nodeID)
 		close(current.done)
+		current.cancelProbes()
 	}
 }
 
@@ -538,6 +547,15 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	if !issued {
 		return status.Error(codes.PermissionDenied, "command result was not issued to this node session")
 	}
+	if pending.probe != nil {
+		var cancel context.CancelFunc
+		var valid bool
+		ctx, cancel, valid = session.probeResultContext(ctx, result.GetCommandId(), pending.probe, s.config.Now().UTC())
+		if !valid {
+			return status.Error(codes.PermissionDenied, "probe result is no longer authorized")
+		}
+		defer cancel()
+	}
 	if result.GetSlot() == nil || result.GetSlot().GetSlotId() != pending.slotID || result.GetSlot().GetExecutionEpoch() != pending.executionEpoch {
 		return status.Error(codes.InvalidArgument, "command result does not match its issued slot and epoch")
 	}
@@ -591,6 +609,9 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	if healthyResult && (ctx.Err() != nil || !pending.deadline.After(s.config.Now().UTC())) {
 		return status.Error(codes.DeadlineExceeded, "healthy observation command expired")
 	}
+	if pending.probe != nil && !session.probeCurrent(result.GetCommandId(), pending.probe, s.config.Now().UTC()) {
+		return status.Error(codes.PermissionDenied, "probe result is no longer authorized")
+	}
 	errorCode := result.GetErrorCode()
 	if !result.GetSucceeded() && errorCode == "" {
 		errorCode = "node_command_failed"
@@ -609,7 +630,11 @@ func (s *Server) recordCommandResult(ctx context.Context, nodeID string, session
 	}); err != nil {
 		return status.Error(codes.Internal, "record command result failed")
 	}
-	session.releaseCommand(result.GetCommandId())
+	if pending.probe != nil {
+		session.releaseProbe(result.GetCommandId(), pending.probe)
+	} else {
+		session.releaseCommand(result.GetCommandId())
+	}
 	return nil
 }
 
@@ -657,13 +682,28 @@ func (s *Server) recordCredentialCommit(ctx context.Context, session *nodeSessio
 	return nil
 }
 
-func (s *nodeSession) reserveCommand(commandID string, command pendingCommand) bool {
+func (s *nodeSession) reserveCommand(commandID string, command pendingCommand, now time.Time) bool {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
-	if len(s.pendingCommands) >= s.maxPendingCommands {
+	// Reject an ID collision before invalidating probes: replacing a pending
+	// probe under its own ID would reclassify its late result as non-probe.
+	if _, exists := s.pendingCommands[commandID]; exists {
 		return false
 	}
-	if _, exists := s.pendingCommands[commandID]; exists {
+	if s.queuedProbeIDLocked(commandID) {
+		return false
+	}
+	s.reapProbesLocked(now)
+	// A mutation supersedes every older observation of this slot, including
+	// probes still queued or already awaiting storage. Do this before checking
+	// capacity so the probes cannot block the command that supersedes them.
+	for id, pending := range s.pendingCommands {
+		if pending.probe != nil && pending.slotID == command.slotID {
+			pending.probe.cancel()
+			delete(s.pendingCommands, id)
+		}
+	}
+	if len(s.pendingCommands) >= s.maxPendingCommands {
 		return false
 	}
 	s.pendingCommands[commandID] = command
@@ -680,6 +720,9 @@ func (s *nodeSession) command(commandID string) (pendingCommand, bool) {
 func (s *nodeSession) releaseCommand(commandID string) {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
+	if pending := s.pendingCommands[commandID]; pending.probe != nil {
+		pending.probe.cancel()
+	}
 	delete(s.pendingCommands, commandID)
 }
 

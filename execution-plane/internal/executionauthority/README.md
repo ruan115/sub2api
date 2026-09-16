@@ -33,7 +33,8 @@ the receipt timestamp; its command deadline also bounds storage work.
   recovered. A new Hello or heartbeat does not confirm old assignments.
 - No observation is refreshed by heartbeat, query time or an unavailable
   dependency. Without a new controlled runtime confirmation, it expires in at
-  most 45 seconds. Active verification scheduling remains B2 work.
+  most 45 seconds. B2a adds an opt-in `runtimeprobe` INSPECT runner; production
+  wiring, worker health/version proof and renewal remain later B2/B4 work.
 - An orchestrator without the node's current live stream denies the request.
   Multi-orchestrator RPC routing/ownership is not implemented here.
 - `Snapshot.Ready` means a current scheduling candidate, **not** that mode,

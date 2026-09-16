@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-09-16。A 总规划提交 `c8380da` 先于实现 `fe9c3b8`；B1 细化规划 `e07bb7d` 先于其实现。A 与 B1 的本地库/合同验收通过；B 总项（B2–B4）、C–G 与整链/生产门槛仍开放。
+日期：2026-09-16。A 总规划提交 `c8380da` 先于实现 `fe9c3b8`；B1 细化规划 `e07bb7d` 先于实现 `c3dae96`；B2a 规划 `f32aa47` 先于本切片实现。B 总项（B2–B4）、C–G 与整链/生产门槛仍开放，细分切片结果如下。
 
 计划复验：
 
@@ -75,8 +75,41 @@ Reviewer已复核关闭上述两项，未发现其他阻碍A提交的问题。�
 ### B1 不能代替的门槛
 
 - 没有实际MySQL迁移/并发事务/死锁或索引性能证据；013脚本只进入Git，不自动应用。新结果事务node→assignment锁顺序与现有release顺序可能形成死锁，需隔离数据库验证失败/重试行为，当前不可据此批准生产。
-- 尚无主动fresh Inspect/Health调度；超过45秒后拒绝是预期安全行为，不得拿缓存心跳维持Ready。
+- B1 本身没有主动fresh Inspect/Health调度；下述 B2a 新增 opt-in INSPECT 库，但未接生产入口，worker Health/版本证明仍缺。超过45秒后拒绝是预期安全行为，不得拿缓存心跳维持Ready。
 - Source只在持有对应活动控制流的orchestrator内有效；其受认证RPC、跨控制面实例访问、签票、runtime registry和进程接线仍在B2–B4。
 - `Snapshot.Ready`仅代表分配/会话/租约候选，不是worker模式、active credential/proxy版本或业务授权已经核完。
 - Lookup会话比较不是已经打开的stream的原始session绑定；快速断连再确认可能发生在周期检查之间。持续流原会话撤销、连接回收仍待B3/B4，不能宣称即时中断已验收。
 - 无真实模型调用（累计仍0）、无SSH/生产数据库/配置/UI/进程/路由操作，未push、未部署、未启迁移开关。整链Docker、CLI/gateway、刷新、1000连接与24小时稳定性、真实canary均不能由本阶段PASS替代。
+
+## B2a 实际结果
+
+设计：[B2a](b2a-design.md)；模块：[runtimeprobe](../../../execution-plane/internal/runtimeprobe/README.md)。只增加本地库及测试，没有启用生产 runner、新增服务 listener 或修改 wire proto。
+
+| 验收点 | 证据与限制 |
+| --- | --- |
+| 探测与业务分权 | 新 ProbeBinding 不读凭据/route cache，不要求已有健康 proof，允许重连后的首次探测；ReadExecutionBinding 仍拒绝这些未证明状态。核对 current slot/assignment/image/generation/node/session/durable lease |
+| 有界分页 | SQL 单一致性 JOIN + 二进制 keyset + LIMIT ≤100；格式过滤掉整页时也返回扫描游标。Memory 单锁、最多100行页缓冲；读/分页观察时间深拷贝，取消/错误无部分返回。SQL 是 sqlmock 合同，不是真实 MySQL 验收 |
+| 探测授权 | Runner 双读取精确绑定、两次独立 lease 验证、I/O 后复核时间；不续租、不重新 Grant。每次授权默认2秒，命令≤10秒且不超过 durable lease 期限 |
+| 固定会话 | DispatchToSession 仅 INSPECT，验证活动 TLS1.3/证书/current durable session 后仍固定原 session 指针；认证 I/O 中替换、断连、取消或过期时拒绝 |
+| 容量与失效 | 每 slot/epoch/session 单飞，probe 使用 pending/queue 至多一半并保留普通队列位置；非阻塞入队；过期/被同 slot 控制命令取代的 probe 取消并回收，出队跳过失效项，不误清 credential commit。队列标记只存到出队，无无限 tombstone |
+| 真实 TLS 组合 | `TestRuntimeProbeTLSInspectRefreshReconnectAndUnhealthy`：真实 TLS NodeControl + Runner + Memory 仓库/lease + 实际 hostagent SlotCommandExecutor + 仅实现 InspectSlot 的合成 provider + B1 Source。初始无 proof 可探测；心跳/重连不能恢复；新的实际 Inspect 才恢复；provider 不健康覆盖仍健康的宿主缓存并撤销 proof |
+| 负例层次 | 控制侧容量、命令碰撞、迟到健康/失败结果与 Apply 期间 mutation/detach/stream cancel 是直接控制方法/合成 repository 检查；不是实际 MySQL 锁或所有实际 wire 故障已验收 |
+| 调度与错误 | 一页一步、无常驻 slot map、并发 Step 拒绝；坏节点不阻塞后续页，连续扫描失败有限重试，取消退出；错误不透传依赖原文。未证明大规模45秒覆盖或长时间稳定性 |
+
+Review 由两位代理交叉审查非本人模块，主代理集成/复验。发现一个 P2：旧 probe command ID 可被普通命令重新分类；仅提前检查当前 pending 不足以覆盖已 reap 的历史 ID。修复方案为专用 `probe-` + 32小写hex命名空间，普通 Dispatch 禁止任何 `probe-` 前缀，并保留活动 ID 碰撞拒绝。内部可信 Runner 每轮随机新 ID；节点没有命令派发权限，不通过无界历史表防重复。
+
+独立 reviewer 已复核关闭上述 P2，并独立通过 namespace/已回收 ID/格式拒绝/真实 TLS/32并发单飞五轮 race；另一 reviewer 对 store/runner 未发现新增阻碍。主代理最终复验：
+
+- 完整 execution-plane：`go test -race -count=1 -timeout=120s ./...` 和 `go vet ./...` 通过。
+- 定向重复：`go test -race -count=10 -timeout=120s ./internal/runtimeprobe ./internal/runtime/store ./internal/control -run 'Test(Probe|RuntimeProbe|Ordinary|ExpiredOrInvalidated|Reaped)'` 通过，包含最终 namespace 修复。
+- `go test -tags docker_e2e -run '^$' ./internal/hostagent` 仅编译通过，没有运行 Docker 测试。
+- 上述命令使用 `GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local`，并通过 `env -u` 显式移除 `EXECUTION_MYSQL_TEST_DSN`、`EXECUTION_REDIS_TEST_URL`、`EXECUTION_CCMAX_MYSQL_TEST_DSN`，不让环境中的外部数据库地址进入测试路径。真实依赖集成属于未执行项，而非 PASS。
+- `git diff --check` 与 recoverykit 文本/evidence policy 扫描通过；仅源码、合成测试与脱敏文档提交，无凭据或制品。
+
+### B2a 不能代替的门槛
+
+- 没有 worker 实际加载 credential version/proxy lease/mode 的证明；provider 健康不等于模型 ready。没有签 health/activation/messages 票，没有延长 durable/Redis lease。
+- 没有生产接线、跨 orchestrator 路由、B3 existing-only registry 或已打开流的原会话撤销。
+- 周期结果仍写 `node_command_results`，生产启用前须补保留/清理或紧凑存储策略。页缓冲/队列有界不等于结果表增长、SQL 索引开销和覆盖周期已验收。
+- 未运行真实 MySQL/Redis/Docker/VM、上游模型、1000连接/24h验收；B1真实事务死锁/提交取消竞态门槛仍有效。
+- 当前修改仅本地；SSH/线上数据/UI/配置/服务/路由/账号均未触碰，真实模型请求仍0，未 push 或部署，未开启 execution_onboarding 或标记 migrated。
