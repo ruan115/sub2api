@@ -22,6 +22,14 @@ def build_parser():
     contracts = commands.add_parser("contracts", help="Validate discovery catalog structure")
     contracts.add_argument("--root", required=True, help="Contract catalog directory")
 
+    lab = commands.add_parser("lab", help="Read-only explicit local Docker endpoint checks; never execution approval", allow_abbrev=False)
+    lab_ops = lab.add_subparsers(dest="operation", required=True)
+    inspect = lab_ops.add_parser("inspect", allow_abbrev=False)
+    inspect.add_argument("--socket", required=True, help="Absolute socket in a user-private dedicated lab directory")
+    inspect.add_argument("--expected-engine-id", required=True, help="Previously confirmed ID; not auto-discovered")
+    inspect.add_argument("--expected-engine-name", required=True)
+    inspect.add_argument("--expected-architecture", required=True, choices=("amd64", "arm64"))
+
     wire = commands.add_parser("wire", help="Anchor reviewed static observations to source bytes", allow_abbrev=False)
     wire_ops = wire.add_subparsers(dest="operation", required=True)
     wire_verify = wire_ops.add_parser("verify", allow_abbrev=False)

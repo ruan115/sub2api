@@ -9,6 +9,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=recovery/tooling python3 -m recoverykit con
 
 模块独立：`evidence/` 管理文本证据，`workspace/` 管理 WIP 快照，`contracts/` 管理发现清单，`wire/` 校验人工观察与源码的关联，`cli/` 只负责参数、组合调用和安全摘要。错误返回码为 2，仅输出错误类型，不输出文件内容、补丁或敏感参数。
 
+`lab/` 提供显式 opt-in 的[专用本地 Docker 端点只读预检](recoverykit/lab/README.md)。它不沿用默认context，不启动/构建/删除资源，成功也不代表可以执行工作负载；普通 `check` 只跑合成测试，不检查实际Docker。镜像与执行链的固定百分比见[交付台账](../../docs/plans/isthmus-container-delivery-v1.md)。
+
 ## 文本证据
 
 先在 manifest 中显式登记相对路径、来源、大小、SHA-256；不支持通配符、目录打包或自动发现。以下 `/absolute/...` 都是需替换的明确本地路径，不是默认目录。

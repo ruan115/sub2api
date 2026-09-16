@@ -236,3 +236,37 @@ Review 由两位代理交叉审查非本人模块，主代理集成/复验。发
 - host egress 在途 tunnel 的现有 fence 只观察 execution lease，proxy binding unregister/ProxyLeaseID 撤销的即时回收、CONNECT 握手取消与 half-close 清理仍待补；远程 HTTP/SOCKS 代理认证的传输保护未验。不得扩大为“没有泄漏风险”。
 - B2b2b/C 等业务接线继续暂停；没有当前控制台→控制面→host-agent→隔离 worker→出口→TLS 假上游的一次实际组合证据。仍无真实 MySQL/Redis、真实凭据/代理/模型、CLI/1000连接/24h/canary 证据。
 - 本轮无 SSH/线上数据/UI/配置/服务/路由/账号操作，真实模型调用为0；不 push、不部署、不启 execution_onboarding、不标 migrated。
+
+## N3前置：专用实验端点只读预检
+
+2026-09-17，先提交固定计分计划和设计 `db92daa`、`74c8491`，再实现独立 `recoverykit/lab` 模块及CLI接线；未运行旧 `docker-e2e.sh`。本切片属于N3前置工具，不是完成的Linux实验环境或镜像；总体23/100，镜像3/15，均未增加。
+
+### 实际实现
+
+- 只接受预先确认的Engine ID/name/架构及显式本地Unix socket；拒绝远程/默认端点、环境Docker context/proxy/SSH agent，不读取Docker客户端配置或调用Docker/Colima/SSH/shell。
+- 逐级无symlink/可信所有权检查、直接父目录0700、socket当前用户所有；每次请求前后及结束时复核inode等身份。信任本机用户/OS/daemon，不声称能抵御同UID恶意替换或伪造元数据。
+- 固定Engine API1.43，验证服务器显式min/max版本后仅五次GET；精确身份/架构、Linux/runc/AppArmor/seccomp、无Swarm/daemon代理、空容器/卷、三默认网络白名单。版本缺字段和未知能力失败关闭。
+- 单请求3秒/总12秒预算，shutdown计时器处理header/body slow-drip；每body上限2MiB，严格HTTP framing与JSON重复键/数字/类型检查。CPU解析不会被计时器强制抢占，但解析跨过期限绝不返回成功；stdlib固定header行数/行长上限保留。
+- CLI只输出固定字段或错误类型；成功仍为 `docker_endpoint_checked`、`isolation_verified=false`、`execution_permitted=false`、`created_resources=0`，不自动授权旧脚本/构建/清理或后续运行。
+
+### Review 与验证
+
+独立review确定性复现两项P2：connect跨过单次期限仍发GET，以及JSON解析跨过期限仍返回成功。主代理新增回归先确认两项FAIL，再统一在connect/headers/解析之后检查期限，修复后reviewer复核关闭。reviewer交叉审元数据策略、CLI、Unix传输与新测试，未发现其他可复现P1/P2；该结论不扩展为真实隔离通过。
+
+以下全部只用合成文档和当前测试创建的临时本地Unix HTTP server，无Docker daemon/VM/线上账号：
+
+```sh
+cd recovery
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tooling:.. python3 -m unittest discover -s tests/lab -t . -v
+# 45项通过；reviewer独立同范围也45项通过
+make test contracts
+# 全部236项Python测试通过；14份manifest、116条entry结构校验通过
+```
+
+主代理另将上述四个lab测试模块完整重复10轮，450次测试通过，未只挑选超时两例。合同检查仍明确 `business_verification=false`，不是在线接口兼容验收。git diff检查与文本/evidence内容检查通过，仅提交源码、合成测试、脱敏文档。
+
+### 仍缺与禁止扩大结论
+
+N3/VM0b尚未关闭：实际外层VM的共享目录/端口转发、防火墙安装及仅本任务资源清理、当前镜像/卷、N4/N5网络矩阵均未运行。此工具没有检查image/build cache，也不批准使用旧缓存。Docker元数据不能证明外层宿主隔离或以后不会漂移。
+
+I2–I5镜像构建/固定制品/home初始化/空白冷启动、K1–K5独立身份与mTLS、真实CLI、控制台完整调用及最终验收仍开放。本轮无SSH/线上数据/UI/配置/服务/路由/账号操作，真实模型调用为0；不push、不部署、不开启功能标志。

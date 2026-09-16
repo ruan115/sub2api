@@ -10,6 +10,7 @@
 
 - [x] VM0a 已发现的 provider 接纳/隔离漂移与 worker 环境代理/明文上游缺口修复，独立 review、全模块离线 race/vet、关键三包十轮 race 和本地 CONNECT/TLS 测试通过；仅源码前置门槛，不含真实 VM 或每实例证书签发。
 - [ ] VM0b Linux 实际出口防火墙/namespace、宿主/跨槽/metadata/DNS/IPv6 拒绝及失效回收。
+  - 局部前置：`recoverykit lab inspect` 只读专用端点检查已实现并 review；45项合成用例/十轮重复及236项完整Python回归通过。没有连接实际Docker、启动VM或验证防火墙，不勾选VM0b/N3、不增加23%分数。见 [预检结果](verification.md#n3前置专用实验端点只读预检)。
 - [ ] VM0c 每实例身份材料、生产 worker mTLS 与换代/重放拒绝；按明确客户端版本验证 TLS 特征。
 - [ ] VM0d 当前组件实际隔离整链，不复用旧 VM/旧凭据或局部 PASS 冒充完成。
 

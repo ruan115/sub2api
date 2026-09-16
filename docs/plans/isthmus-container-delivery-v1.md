@@ -117,3 +117,9 @@ execution-plane/internal/worker/           只装配实际执行器；按需独�
 ```
 
 本轮第一切片见 [专用实验环境只读预检](../../openspec/changes/complete-ccmax-execution-acceptance/vm-lab-preflight-design.md)。预检成功不自动运行镜像/改防火墙，也不自动增加N3的4分。
+
+### 2026-09-17 切片记录：N3 前置工具
+
+`recoverykit lab inspect` 已实现；模块、参数、策略与测试分别放入上述独立目录。只允许显式本地Unix socket的五个只读GET，检查预期身份/架构/能力和空白资源；成功仍输出 `isolation_verified=false`、`execution_permitted=false`。两处超时边界已先复现再修复并获独立review关闭。
+
+45项lab合成测试及十轮重复通过；完整236项Python回归与116条合同清单结构检查通过，后者仍为 `business_verification=false`。[具体证据与边界](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#n3前置专用实验端点只读预检)。未启动真实Docker/VM、构建镜像或安装规则，所以总体仍 **23%**，镜像仍 **20%**。下一实现切片为I2/I3镜像构建/依赖固定，不跳过Linux实际验收，也不恢复暂停的业务接线。

@@ -6,12 +6,17 @@ import sys
 from ..contracts import validate_catalog
 from ..evidence import load_manifest, preserve_manifest, verify_manifest, verify_preserved
 from ..evidence.policy import check_content
+from ..lab import inspect_lab
+from ..lab.config import LabConfig
 from ..workspace import snapshot_workspace, verify_snapshot
 from ..wire import validate_observations
 from .parser import build_parser
 
 
 def dispatch(args):
+    if args.command == "lab":
+        return inspect_lab(LabConfig(Path(args.socket), args.expected_engine_id,
+                                    args.expected_engine_name, args.expected_architecture))
     if args.command == "contracts":
         return validate_catalog(Path(args.root))
     if args.command == "wire":
@@ -35,6 +40,8 @@ def summarize(result):
         "status", "valid", "manifest_id", "file_count", "total_bytes", "head", "branch",
         "counts", "manifest_count", "entry_count", "owners", "statuses",
         "business_verification", "tracked_count", "untracked_count",
+        "isolation_verified", "execution_permitted", "created_resources",
+        "container_count", "volume_count", "network_count",
     }
     return {key: value for key, value in result.items() if key in allowed}
 
