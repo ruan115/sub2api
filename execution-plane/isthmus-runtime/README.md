@@ -7,6 +7,11 @@ recovery foundation, **not the recovered production isthmus service**. Every
 application-handler response is marked `x-isthmus-runtime: fake`. There are no
 third-party dependencies and no install step.
 
+The separate [image module](image/README.md) provides a base-only Dockerfile
+template and offline reviewed-input staging. It is not a built image or a
+production service entrypoint; app/Bun/CLI integration and cold-start gates
+remain open.
+
 ## Run the offline tests
 
 The tested and pinned toolchain is Bun 1.3.9. From this directory:

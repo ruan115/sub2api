@@ -6,7 +6,7 @@
 
 调用方 → Sub2既有认证/价格/倍率/结算 → CCMAX既有协议与调度 → control/host-agent → 隔离isthmus/CLI → 固定出口 → 上游。
 
-执行侧只提供协议事件及准确usage（含缓存分类），不能计算用户价格、扣费、复制用户倍率或建立第二套产品登录。桥接仍必须处理分发、取消、usage归属、凭据刷新、租约撤销及重建/恢复；已有模板不能自动补齐这些接线。功能兼容与安全验收通过后才可称本地执行路径达到目标；静态源码和合成上游不证明真实账号/生产部署与线上完全一致。
+执行侧只提供协议事件及准确usage（含缓存分类），不能计算用户价格、扣费、复制用户倍率或建立第二套产品登录。现有CCMAX也有quota/balance扣减路径；S5必须区分Sub2终端用户账和CCMAX既有服务账户/成本账，不擅自删除现有逻辑，也不对同一用户请求重复结算。桥接仍必须处理分发、取消、usage归属、凭据刷新、租约撤销及重建/恢复；已有模板不能自动补齐这些接线。功能兼容与安全验收通过后才可称本地执行路径达到目标；静态源码和合成上游不证明真实账号/生产部署与线上完全一致。
 
 ## 阶段和验收映射
 
@@ -20,6 +20,8 @@
 | S6 整体验收 | 当前组件整链、真实本地依赖、容量/稳定性、恢复 | E1–E5 | 对应运行证据，不以多份局部PASS拼接 |
 
 阶段内允许小切片提交，每次明确“子切片完成”还是“整个阶段完成”；没有完整关闭原门槛不得加分。阶段汇报包含总体/镜像百分比、已完成/未完成、review发现与处理、实际测试、Git提交和下一切片。不创建后台自动任务，不承诺在没有运行证据时已完成。
+
+阶段总进度包含此前验收的基础（上表列的是待关闭门槛）：S1=I为20%，S2=N为40%，S3=K为0%，S4=R为40%，S5=H+C+L为4/30=13.3%，S6=E为0%；合计仍为23/100，不是把六个百分比做简单平均。
 
 ## S1a 本轮实现：基础镜像配方与离线构建上下文
 
@@ -39,7 +41,7 @@ execution-plane/isthmus-runtime/image/
 - 本轮最小核心包为 `ca-certificates`、`passwd`、`procps`、`util-linux`。锁必须同时列齐基底外的依赖；工具不自动解析APT依赖或获取任何字节。真实固定发布锁仍需官方索引来源和实际构建证据，不能提交虚构的版本/hash冒称已锁定。
 - 仅复制显式文件到新建仓库外0700目录，普通文件0600；不遍历复制仓库、账号home或共享卷。不接受symlink/FIFO/硬链接，前后核文件身份/大小/hash。复用recoverykit安全文件helper，保持现有文本证据政策不变。合成包只验证字节流/清单逻辑，不是可安装Debian包。
 - 模板不使用动态installer、APT网络、`COPY .`、secret/SSH mount、SYS_ADMIN/setcap或自动volume。所有RUN固定 `--network=none`，检查包哈希后离线dpkg安装，依赖未闭合即失败；创建UID1000的私有空home。默认 `/bin/false`，不默认启动shell或fake listener；无业务服务启动声明。
-- 生成的Dockerfile、包校验文件和构建上下文都可单独复核；receipt最后写、成功仍声明 `image_built=false`、`execution_permitted=false`。缺文件或篡改不得产生成功receipt。工具不提供自动build/run/cleanup接口。
+- 生成的Dockerfile、包校验文件和构建上下文都可单独复核；receipt最后写、成功仍声明 `image_built=false`、`execution_permitted=false`。预检/复制失败不发布receipt；最后写入或复核失败可能保留receipt文件但不得返回成功，文件存在不能替代独立verify。工具不提供自动build/run/cleanup接口。
 - 官方Docker文档说明RUN网络范围及构建context；`--network=none`不能替代专用宿主准入，也不能保证FROM阶段不拉取。实际builder必须在后续N3门槛中固定并检查，当前lab预检结果不能直接授权构建。
 
 ### S1a 验证
@@ -49,3 +51,13 @@ execution-plane/isthmus-runtime/image/
 S1a本身**不关闭I2/I3/I5，不增加23%/20%**。下一切片收集并核官方固定base及包依赖、专用Linux实际构建，再补Bun/CLI/app制品；不让一个只能生成上下文的工具取代镜像交付。
 
 参考：[Dockerfile](https://docs.docker.com/reference/dockerfile/)、[build context](https://docs.docker.com/build/concepts/context/)。
+
+## 本轮桥接只读审计：复用业务，不省略接线
+
+- Sub2的模型价格解析和用户/分组倍率已有实现：[价格解析](../../../backend/internal/service/model_pricing_resolver.go)、[usage与倍率](../../../backend/internal/service/gateway_usage_billing.go)；已有API-key账号的base_url可以接Anthropic兼容网关，不新增另一套Sub2计价入口。
+- CCMAX的`chooseExecutionDispatch`只有定义/测试，gateway候选SQL目前仍筛legacy；migrated是被排除，不是已经接到新执行面。S5需增加无明文的候选/预留及运行元数据投影，在旧token刷新/认证头构造前分流，保留失败关闭。不能只添加一条HTTP转发。
+- execution_client已有Execute/CountTokens/Cancel，但未由gateway消费；worker只实现OAUTH_API，Models数据面仍Unimplemented。实际CLI、三种transport、模型列表与工具续接仍需R/C门槛。
+- CCMAX的`recordUsage`目前同时更新quota/balance，见[现有账务实现](../../../ccmax-manager/main.go)。S5明确终端用户账/服务账户账归属，防止response片段与Completed重复入账；输入/输出、缓存读写、5m/1h分类与部分失败计量须经原路径处理。
+- 旧`ensureGatewayAccountToken`读写CredentialsJSON，只保留服务legacy；migrated仍需Vault原子换版和独立刷新/撤销。HTTP断连还需传到gRPC/CLI并释放原并发与调度资源。
+
+本次只读审计未改Sub2/CCMAX业务源码、价格、余额或网关配置；源码引用不是整链运行证据。

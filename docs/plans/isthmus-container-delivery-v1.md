@@ -135,3 +135,11 @@ execution-plane/internal/worker/           只装配实际执行器；按需独�
 - **Bun/CLI**：已有[CLI 2.1.258双架构摘要与有限运行证据](../../recovery/docs/local-cli-cache-stub-2026-09-15.md)；amd64原生及整链仍缺。Bun 1.4.2仅有[macOS候选验证](../../execution-plane/isthmus-runtime/docs/bun-stop-fix-validation.md)，不能当Linux通过，也不能擅自替换现行版本；两Linux架构制品及停机验证待补。
 - **应用与构建内容**：当前TS模块仍为fake，Go worker不是原镜像替代品。image模块只接显式锁定且审查的程序/源码，禁止复制整个仓库、旧bundle、账号home、证书或宿主配置。独立home属于I4，身份生成属于K，不能打进共享镜像。
 - **实现与验收顺序**：`image/` 内先闭合制品清单与最小构建上下文，再交付可实际构建的Dockerfile和显式专用宿主入口。检查失败/版本或架构不符/代理和秘密注入负例后，在真正专用Linux环境验证构建与冷启动。仅staging/静态Dockerfile不关闭I2/I3/I5；`--network=none`本身也不能证明FROM阶段不会拉取镜像。
+
+### 2026-09-17 S1a 子切片记录
+
+按 [S1–S6阶段计划](../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md) 完成base-only Dockerfile模板、严格锁合同、离线私有上下文生成/复核、摘要CLI与独立测试模块。沿用Sub2计价/倍率，并记录CCMAX实际桥接断点与两层账务归属，不改业务代码。完整基础镜像阶段仍未完成。
+
+最终 `make -C recovery check`：236项恢复工具Python、111项Bun1.3.9、37项镜像工程测试均通过；37项镜像测试另完整十轮370次通过。两位代理交叉review；自审/复审发现并关闭锁关联窗口、私有父目录配方及URL空分隔符问题。[完整证据](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1a基础镜像配方与离线构建上下文)。仅为合成输入测试，非Docker构建证据。
+
+当前没有完整官方发布锁、实际Linux构建或冷启动，因此不勾选I2/I3/I5，总体仍23%、镜像仍20%。下一切片S1b：取得并验证官方base/package索引及依赖闭包，在通过实际宿主准入的专用Linux里构建base；然后固定Bun/CLI/app，不把上下文工具当成镜像交付。

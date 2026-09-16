@@ -59,3 +59,5 @@ make -C recovery check
 ```
 
 包含 Python 单元测试、仓库合同清单验证和 Bun 协议测试。全部使用合成 fixture，不访问生产服务。GitHub Actions 使用相同入口；工具链安装由官方 [setup-python](https://github.com/actions/setup-python) 和 [setup-bun](https://github.com/oven-sh/setup-bun) action 完成，测试本身不下载或执行线上材料。
+
+`check` 也包括独立 [isthmus基础镜像工程](../../execution-plane/isthmus-runtime/image/README.md) 的离线上下文测试；可单独运行 `make -C recovery image`。测试不会构建或启动镜像，不能当作实际Docker验收。

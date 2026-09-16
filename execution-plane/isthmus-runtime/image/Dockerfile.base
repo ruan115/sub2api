@@ -1,0 +1,34 @@
+# Template only: stage.py replaces both tokens using a strict reviewed lock.
+# No external Dockerfile frontend is selected or downloaded by this recipe.
+FROM --platform=@@PLATFORM@@ @@BASE_IMAGE@@
+
+LABEL org.sub2api.isthmus.role="base-only" org.sub2api.isthmus.schema="1"
+
+COPY packages/ /tmp/isthmus-base-packages/
+COPY packages.sha256 /tmp/isthmus-base-packages/SHA256SUMS
+
+# There is no apt/download fallback. The lock must include dependency closure.
+RUN --network=none cd /tmp/isthmus-base-packages \
+    && sha256sum --check SHA256SUMS \
+    && DEBIAN_FRONTEND=noninteractive dpkg --install ./*.deb \
+    && rm -f ./*.deb ./SHA256SUMS \
+    && cd / \
+    && rmdir /tmp/isthmus-base-packages
+
+# A conflicting pre-existing UID/name fails the build; do not delete users.
+# No standing SYS_ADMIN file capability or shared credential material.
+RUN --network=none groupadd --gid 1000 claude \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash claude \
+    && chmod 0700 /home/claude \
+    && install -d -o 1000 -g 1000 -m 0700 \
+       /home/claude/.claude /home/claude/.cache /home/claude/.cache/isthmus \
+       /home/claude/.local /home/claude/.local/bin \
+    && truncate -s 0 /etc/machine-id \
+    && rm -f /var/lib/dbus/machine-id
+
+ENV HOME=/home/claude USER=claude LOGNAME=claude
+WORKDIR /home/claude
+USER 1000:1000
+
+# Base-only: no default shell, fake service, account, key or network listener.
+CMD ["/bin/false"]

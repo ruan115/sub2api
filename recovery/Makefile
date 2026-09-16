@@ -4,7 +4,7 @@ PYTHON ?= python3
 BUN ?= bun
 NPM ?= npm
 
-.PHONY: check test contracts protocol help
+.PHONY: check test contracts protocol image help
 
 .PHONY: check-demo backend-demo web-demo runtime-smoke runtime-shutdown-gate postgres-integration
 
@@ -32,7 +32,10 @@ web-demo:
 	cd ../portunex-web && $(NPM) test
 	cd ../portunex-web && $(NPM) run build
 
-check: test contracts protocol
+check: test contracts protocol image
+
+image:
+	cd .. && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=recovery/tooling:execution-plane/isthmus-runtime/image $(PYTHON) -m unittest discover -s execution-plane/isthmus-runtime/image/test -t execution-plane/isthmus-runtime/image -v
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tooling:.. $(PYTHON) -m unittest discover -s tests -t . -v

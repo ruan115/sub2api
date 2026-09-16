@@ -270,3 +270,41 @@ make test contracts
 N3/VM0b尚未关闭：实际外层VM的共享目录/端口转发、防火墙安装及仅本任务资源清理、当前镜像/卷、N4/N5网络矩阵均未运行。此工具没有检查image/build cache，也不批准使用旧缓存。Docker元数据不能证明外层宿主隔离或以后不会漂移。
 
 I2–I5镜像构建/固定制品/home初始化/空白冷启动、K1–K5独立身份与mTLS、真实CLI、控制台完整调用及最终验收仍开放。本轮无SSH/线上数据/UI/配置/服务/路由/账号操作，真实模型调用为0；不push、不部署、不开启功能标志。
+
+## S1a：基础镜像配方与离线构建上下文
+
+2026-09-17。先提交聚焦阶段规划 `21d77ee`，保留Sub2价格/用户倍率/产品业务以及CCMAX模板；随后实现 [image模块](../../../execution-plane/isthmus-runtime/image/README.md)。当前只完成S1a子切片，不是S1整个阶段，固定百分比仍23%、镜像20%。
+
+### 实际交付
+
+- base-only Dockerfile模板由精确platform和OCI digest渲染，拒绝浮动tag；只有显式包目录和SHA清单被COPY，无仓库根/账号home/旧bundle。离线dpkg安装没有网络修复兜底，固定非交互；UID/GID1000，home和必要子目录0700，不恢复SYS_ADMIN文件能力，默认/bin/false而非伪装成已启动服务。
+- 独立锁schema固定来源、文件名、包名/版本/架构、大小/hash，限制数量/字节和核心包；拒绝未知字段、重复、路径/命令字符、非官方来源、URL认证/query/fragment和架构混用。来源URL只记录，不访问。
+- staging只复制清单中的普通无硬链接文件，1MiB分块hash/写，前后核大小/inode/元数据/当前路径；输出为仓库外新目录0700、文件0600，不覆盖。独立verify核精确文件/目录、私有权限、锁/配方/checksum/receipt及最初请求的绑定。
+- CLI只输出固定计数和 `image_built=false`、`execution_permitted=false`；没有download/build/run/cleanup接口，也不读取Docker环境。CLI整链测试在存在合成代理/DOCKER_HOST时mock禁止socket与subprocess，仍完成本地生成/复核，无外联。
+- receipt在复制和初次复核后写入；最后写入/复核可能失败并留文件，但命令必须失败。新增确定性最终IO错误测试，要求后续独立verify，不把receipt存在当完成标志，不自动删除失败产物。
+
+### Review 与先失败后修复
+
+作者自身检查取得两个初版FAIL：解析锁后到inventory之间替换文件可逃逸、复制后改成另一套自洽lock/recipe可脱离原始请求。修复分别固定读取前身份和前后receipt与原始输入的比较，交叉reviewer复核通过。
+
+另一交叉review指出模板没有显式设置.cache/.local中间目录权限，以及URL尾裸?/#与禁止query/fragment合同不一致。主代理先新增回归取得三项断言FAIL，再明确所有目录owner/mode并在解析前拒绝分隔符；reviewer独立37项通过并关闭。目录用例仅核配方，不宣称已经在Linux核验实际所有权。
+
+主代理还检查真实CCMAX账务代码，修正规划中“一个计费权威”的业务边界为Sub2终端用户账；CCMAX已有服务账户/成本扣减路径不能误删。此次没有修改计费/网关源码。
+
+### 最终验证
+
+```sh
+make -C recovery check
+# 236项恢复工具Python通过；14份合同/116条entry结构校验通过（business_verification=false）
+# Bun 1.3.9：111 pass、0 fail；镜像工程Python：37项通过
+make -C recovery image
+# 37项通过；reviewer独立同范围通过
+```
+
+主代理对image全部4个测试模块最终重复10轮，370次通过。`git diff --check`及文本/evidence内容扫描通过；安全扫描曾拒绝测试中直写的合成userinfo URL，已改为运行时组装明确合成字段，保留拒绝测试且没有放宽政策。初次make image遇到测试package尚无__init__.py的导入失败，补齐后最终全套通过；未把该中间失败隐去或当环境验收通过。
+
+### 仍缺与停止线
+
+没有完整官方base/package发布锁，没有校验本轮真实APT签名/包control metadata/依赖闭包/Pre-Depends顺序、目标架构匹配，没有Docker构建或Linux冷启动。合成ar头不是可安装软件包；hash只绑定审阅输入，不认证发布者。RUN无网络不证明FROM/builder无外联。实际builder准入、I2/I3/I4/I5、N3–N5、K/R/H/C/L/E原门槛仍开放。
+
+本轮仅联网查阅官方Docker语法说明；无SSH/生产数据/UI/配置/服务/路由/账号操作，不读真实home/密钥，不下载或执行线上二进制，不启动VM，不改本机/项目Bun1.3.9。真实模型调用0次；无push、部署、execution_onboarding或migrated变更。下一切片是官方依赖固定与专用Linux实际构建，不再用增加静态工具代替这项运行证据。
