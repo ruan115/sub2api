@@ -1,5 +1,77 @@
 # 验证记录
 
+## S2a：双实例本地身份与CSR
+
+2026-09-17，规划`d55d0cd`及账号hash对齐`224114b`先于实现。
+只关闭K2（+2分）：**总体32%、身份2/10=20%、运行服务60%、镜像40%**。
+使用170测试机，43仅SSH中转；不连接216生产，不用真实账号/模型、不改Sub2或UI。
+
+### 实现与边界
+
+- `internal/runtimeidentity/`：绑定与CSR、私有状态分别成文件；账号hash沿用现有
+  `provider.RuntimeAccountID`的32位hex，不新增账号身份算法。独立P256私钥和逻辑
+  机器标识在实例内由OS安全随机源生成，0700独占目录、0600文件、文件锁及no-replace
+  原子发布。唯一公开出口为身份摘要/CSR，无私钥导入或导出命令。
+- `cmd/instance-identity/`：仅Linux UID1000，绑定从有界stdin传入，拒重复/额外字段；
+  固定错误。相同绑定重开保留；五字段任何不符均拒绝，不静默覆盖或轮换。
+  损坏/未知文件、初始化半成品、软硬链接、FIFO、错误权限/所有者和超限均拒绝。
+- `pki.Authority.IssueRuntime`复用现有CA，只接准确URI、有效签名的P256 CSR；用途
+  仅serverAuth，并检查CA生效/到期。调用方仍需在外层认证并授权绑定。
+  这里只完成签发库及测试，没有向实际容器安装证书或接通worker/host-agent mTLS。
+- 应用逻辑机器标识不等于OS `/etc/machine-id` 或线上CLI内部device-id；其兼容性仍
+  未证实。临时home销毁后身份销毁；没有持久卷recreate/restore、轮换/撤销或防回滚
+  证据。信任宿主/内核和同UID文件所有者，权限不是抵御恶意宿主的安全边界。
+
+### 最终双容器原生验证
+
+两容器同时创建/启动，使用同一S1b固定base和同一代码/Bun1.4.2/CLI2.1.258，
+home各自独立tmpfs。UID1000、只读根、cap0、NNP、networknone/仅lo，无hostbind/
+端口/新网络/卷。每实例1GiB、swap0、1CPU、pids128，内核读回与inspect均匹配。
+预检约4.29GiB可用，启动门槛3GiB以保留业务余量；未放宽权限或资源使测试通过。
+旧单实例默认2GiB不变；root仅运行系统tar上传，所有新二进制/CLI均UID1000。
+
+| 验收点 | 实际结果 |
+| --- | --- |
+| 本地生成 | 两个逻辑机器标识和公钥SHA256均不同，未传入任何私钥 |
+| 相同绑定 | init/init/show/request分别启动新身份进程，公开标识与公钥保持一致 |
+| 错绑定 | account hash、slot、node、epoch、generation共5类×2实例全部拒绝；之后show仍等于原件 |
+| 文件隔离 | 各实例有自己的home标记，看不到对方标记；不是完整网络拒绝矩阵 |
+| CSR | 仅导出公开CSR，本机OpenSSL独立验签，两份SPKI SHA256与实例报告分别匹配 |
+| 实际CLI | 两实例分别JSON、SSE、取消、超时、上游503全通过；4.85秒/4.82秒，真实模型调用0 |
+| 清理 | 两确切CID均删除，原4业务容器ID/image/StartedAt/restarts/mount元数据一致；unresolved_create=false |
+
+最终容器ID为`2d7dd5c0ef399780fd3e33161ad908944358989f028499ea80637ecdbe7329af`、
+`bc772b1fc14a22a10edbc8364ec3ba828faa666a7af037a6cb0507894adbc7fd`；临时home及
+其中新生成的测试私钥随容器移除。没有导出私有状态，只有公开CSR/摘要与固定测试日志。
+按CCMAX测试规范用回环随机路径和合成凭据/usage，不把1/1 fixture当推理或计费结果。
+
+### Review、回归与证据保全
+
+独立review关闭两项P2：初始化半成品被忽略后生成另一身份；Docker创建成功但客户端
+未收到CID时误报完整清理。前者严格检查独占目录、不覆盖/删除残留；后者在发起create
+前置unresolved标记，只有合法完整CID入清单后解除，不确定时明确cleanup_complete=false。
+模拟“daemon已创建后超时”和“非法ID响应”均不再误报成功，也不按前缀扩大删除范围。
+两轮原生运行均成功；最后一轮在上述最终修复后重新全跑，不用早期PASS替代最终源码。
+
+全execution-plane离线`go test -race -count=1 -timeout=120s ./...`和`go vet ./...`通过；
+三个真实DB/Redis测试变量明确移除。identity/command/pki定向race再5轮通过；独立
+reviewer另跑并发/半成品25轮、CLI race及identity/toolchain最终25项mock通过。
+`make -C recovery check`：236 recovery Python、150 Bun/1027断言、173 image通过；
+最后新增创建不确定性负例后image全量174项及29项定向测试再次通过。
+14份/116条合同结构检查仍business_verification=false。
+
+新助手二进制由当前3源码+go.mod/go.sum、Go1.26.0、CGO0、Linuxamd64、trimpath/
+buildvcs=false生成；5,756,637字节，SHA256
+`9ffc0b47921e1dd588f100c5c4447b74f94204293fc13d469c7386897d523326`。
+最终远端根`/var/tmp/isthmus-s1b.mLeicj3w`，两轮公开证据备份在仓库外0700目录
+`/Users/ruanyang/My-project/api/z/isthmus-identity-artifacts.7QKZpqSH`；不含实例私钥。
+最终32项输入源码/锁/助手清单SHA256为
+`46d3992b50eb54cf429e4d45f0c65de0686f9cd964f4a825b439544a3ae8de70`，下载后逐项
+大小/摘要与工作区一致；二进制及其构建清单保留，不进入Git。
+
+I4/I5、K1/K3–K5、N3–N5及完整调用链继续开放；S2a不是已完成VM/TLS/出口防泄漏验收。
+下一项是S2b受认证签发、安装与实际TLS，再验证可用出口；不借此启用生产新执行面。
+
 ## R3：单实例真实CLI双向stream-json闭环
 
 2026-09-17；先提交收敛规划`dad891e`，暂停S1d构建WIP，再实现真实执行器。

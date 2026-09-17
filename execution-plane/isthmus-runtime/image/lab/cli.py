@@ -58,6 +58,43 @@ def inputs(lab):
     return entries
 
 
+def probe_script(entries, *, require_empty_home=True, smoke=True, memory_bytes=2147483648):
+    """Shared UID1000 isolation/hash gates; identity probes retain a nonempty home."""
+    if type(memory_bytes) is not int or memory_bytes not in (1024**3, 2 * 1024**3):
+        raise ValueError("cli_probe_memory_rejected")
+    script = """set -eu
+test "$(id -u):$(id -g)" = 1000:1000
+test "$(ls /sys/class/net)" = lo
+test "$(ulimit -c)" = 0
+test "$(cat /sys/fs/cgroup/memory.max)" = MEMORY_BYTES
+test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0
+test "$(cat /sys/fs/cgroup/cpu.max)" = '100000 100000'
+test "$(cat /sys/fs/cgroup/pids.max)" = 128
+awk '/^CapEff:/ {if ($2 != "0000000000000000") exit 1; cap=1} /^NoNewPrivs:/ {if ($2 != 1) exit 1; nnp=1} END {if (!cap || !nnp) exit 1}' /proc/self/status
+test "$(stat -c '%u:%g:%a' /home/claude)" = 1000:1000:700
+test -z "$(find /opt/isthmus-probe -writable -print -quit)"
+awk '$2=="/" {n++; if ($4 !~ /(^|,)ro(,|$)/) exit 1} END {if (n != 1) exit 1}' /proc/mounts
+awk '$2=="/home/claude" || $2=="/tmp" {n++; if ($3 != "tmpfs" || $4 !~ /(^|,)noexec(,|$)/) exit 1} END {if (n != 2) exit 1}' /proc/mounts
+cd /opt/isthmus-probe
+""".replace("MEMORY_BYTES", str(memory_bytes))
+    if require_empty_home:
+        script += 'test -z "$(find /home/claude -mindepth 1 -print -quit)"\n'
+    # Paths come solely from SOURCE_FILES and the checked-in binary lock (or
+    # the identity harness's one explicitly checked helper binary).
+    allowed = {"app/" + path for path in SOURCE_FILES} | {"bin/claude", "bin/bun-1.4.2", "bin/instance-identity"}
+    for _, name, record, _ in entries:
+        if name not in allowed or not isinstance(record.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", record["sha256"]):
+            raise ValueError("cli_script_input_rejected")
+        script += "test \"$(sha256sum " + name + " | cut -d ' ' -f 1)\" = " + record["sha256"] + "\n"
+    script += """test "$(bin/claude --version)" = '2.1.258 (Claude Code)'
+test "$(bin/bun-1.4.2 --version)" = 1.4.2
+echo cli-image-inputs-and-isolation-pass
+"""
+    if smoke:
+        script += "exec bin/bun-1.4.2 app/test/cli/roundtrip.smoke.ts\n"
+    return script
+
+
 def probe(lab):
     if "avx2" not in Path("/proc/cpuinfo").read_text():
         raise ValueError("cli_host_cpu_mismatch")
@@ -93,30 +130,7 @@ def probe(lab):
         if result.returncode or result.stdout != "root-upload-capless-pass\n":
             raise ValueError("cli_upload_failed")
         validate_probe(lab.owned(cid), lab.name)
-        script = """set -eu
-test "$(id -u):$(id -g)" = 1000:1000
-test "$(ls /sys/class/net)" = lo
-test "$(ulimit -c)" = 0
-test "$(cat /sys/fs/cgroup/memory.max)" = 2147483648
-test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0
-test "$(cat /sys/fs/cgroup/cpu.max)" = '100000 100000'
-test "$(cat /sys/fs/cgroup/pids.max)" = 128
-awk '/^CapEff:/ {if ($2 != "0000000000000000") exit 1; cap=1} /^NoNewPrivs:/ {if ($2 != 1) exit 1; nnp=1} END {if (!cap || !nnp) exit 1}' /proc/self/status
-test -z "$(find /home/claude -mindepth 1 -print -quit)"
-test "$(stat -c '%u:%g:%a' /home/claude)" = 1000:1000:700
-test -z "$(find /opt/isthmus-probe -writable -print -quit)"
-awk '$2=="/" {n++; if ($4 !~ /(^|,)ro(,|$)/) exit 1} END {if (n != 1) exit 1}' /proc/mounts
-awk '$2=="/home/claude" || $2=="/tmp" {n++; if ($3 != "tmpfs" || $4 !~ /(^|,)noexec(,|$)/) exit 1} END {if (n != 2) exit 1}' /proc/mounts
-cd /opt/isthmus-probe
-"""
-        # Paths come solely from SOURCE_FILES and the checked-in binary lock.
-        for _, name, record, _ in entries:
-            script += "test \"$(sha256sum " + name + " | cut -d ' ' -f 1)\" = " + record["sha256"] + "\n"
-        script += """test "$(bin/claude --version)" = '2.1.258 (Claude Code)'
-test "$(bin/bun-1.4.2 --version)" = 1.4.2
-echo cli-image-inputs-and-isolation-pass
-exec bin/bun-1.4.2 app/test/cli/roundtrip.smoke.ts
-"""
+        script = probe_script(entries)
         lab.logged("cli-roundtrip", ["exec", cid, "/usr/bin/timeout", "--kill-after=5", "150",
                                    "/bin/sh", "-ec", script], timeout=170, stop_on_abort=cid)
         value = lab.owned(cid)

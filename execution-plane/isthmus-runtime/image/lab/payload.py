@@ -17,14 +17,23 @@ from lab.toolchain import TESTS, checksums
 COMMIT = "e2715b6e7f968e638c2f4fd68467c56fa0151c72"
 PREFIX = "execution-plane/isthmus-runtime/"
 LOCKS = Path(__file__).resolve().parents[1] / "locks"
-ROOT_UPLOAD = """set -eu
+_ROOT_UPLOAD_TEMPLATE = """set -eu
 test "$(id -u):$(id -g)" = 0:0
 test "$(ls /sys/class/net)" = lo
-test "$(cat /sys/fs/cgroup/memory.max)" = 2147483648
+test "$(cat /sys/fs/cgroup/memory.max)" = MEMORY_BYTES
 awk '/^CapEff:/ {if ($2 != "0000000000000000") exit 1; cap=1} /^NoNewPrivs:/ {if ($2 != 1) exit 1; nnp=1} END {if (!cap || !nnp) exit 1}' /proc/self/status
 echo root-upload-capless-pass
 exec /bin/tar --no-same-owner --no-same-permissions -xf - -C /opt/isthmus-probe
 """
+
+
+def root_upload(memory_bytes=2147483648):
+    if type(memory_bytes) is not int or memory_bytes not in (1024**3, 2 * 1024**3):
+        raise ValueError("probe_upload_memory_rejected")
+    return _ROOT_UPLOAD_TEMPLATE.replace("MEMORY_BYTES", str(memory_bytes))
+
+
+ROOT_UPLOAD = root_upload()
 
 
 def expected_records():

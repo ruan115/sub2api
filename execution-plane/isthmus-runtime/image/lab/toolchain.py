@@ -27,10 +27,12 @@ TMPFS = {"/tmp": "rw,noexec,nosuid,nodev,size=64m,mode=1777",
          "/opt/isthmus-probe": "rw,exec,nosuid,nodev,size=512m,mode=0755,uid=0,gid=0"}
 
 
-def probe_args(name):
+def probe_args(name, memory_gib=2):
+    if type(memory_gib) is not int or memory_gib not in (1, 2):
+        raise ValueError("toolchain_probe_memory_rejected")
     args = ["create", "--name", name + "-toolchain", "--label", LABEL + "=" + name,
             "--network", "none", "--read-only", "--user", "1000:1000", "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges", "--memory", "2g", "--memory-swap", "2g",
+            "--security-opt", "no-new-privileges", "--memory", str(memory_gib) + "g", "--memory-swap", str(memory_gib) + "g",
             "--cpus", "1", "--pids-limit", "128", "--ulimit", "core=0:0",
             "--ipc", "private", "--cgroupns", "private", "--restart", "no",
             "--log-driver", "local", "--log-opt", "max-size=5m", "--log-opt", "max-file=2",
@@ -42,7 +44,9 @@ def probe_args(name):
     return args + [BASE_ID, "--kill-after=5", "240", "/bin/sleep", "240"]
 
 
-def validate_probe(value, name):
+def validate_probe(value, name, memory_gib=2):
+    if type(memory_gib) is not int or memory_gib not in (1, 2):
+        raise ValueError("toolchain_probe_memory_rejected")
     h, c = value["HostConfig"], value["Config"]
     if (value["Image"] != BASE_ID or c["User"] != "1000:1000"
             or c.get("Labels", {}).get(LABEL) != name or sorted(c["Env"]) != sorted(ENVS)
@@ -51,7 +55,7 @@ def validate_probe(value, name):
             or c["Cmd"] != ["--kill-after=5", "240", "/bin/sleep", "240"]):
         raise ValueError("toolchain_probe_identity_mismatch")
     if (h["Privileged"] or not h["ReadonlyRootfs"] or h["NetworkMode"] != "none"
-            or h["Memory"] != 2147483648 or h["MemorySwap"] != 2147483648
+            or h["Memory"] != memory_gib * 1024**3 or h["MemorySwap"] != memory_gib * 1024**3
             or h["NanoCpus"] != 1000000000 or h["PidsLimit"] != 128
             or h.get("CapAdd") or h["CapDrop"] != ["ALL"]
             or h["SecurityOpt"] != ["no-new-privileges"] or h.get("Binds")
