@@ -2,7 +2,7 @@
 
 总计划：[CCMAX execution acceptance v2](../../../docs/plans/ccmax-execution-acceptance-v2.md)。
 
-用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收32%，镜像专项6/15=40%、运行服务12/20=60%、身份2/10=20%。R3和K2已关闭；S2b2组件闭环及双实例真实Docker证书管理通道通过，但正式host-agent装配、跨容器mTLS及K3/K4完整门槛仍开放，不提前加分。
+用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收32%，镜像专项6/15=40%、运行服务12/20=60%、身份2/10=20%。R3和K2已关闭；双实例真实Docker证书管理通道、严格START与S2b4默认关闭服务入口通过限定测试，但完整业务host-agent装配、权威lease writer、跨容器mTLS及K3/K4门槛仍开放，不提前加分。
 
 沿用Sub2计价/倍率/产品权限，按 [S1–S6聚焦阶段](isthmus-focused-stages.md) 交付。S1a后，S1b已用真实9包锁、原生Linux构建和新context/空builder-cache重跑关闭I2；[实证](verification.md#s1b原生linux基础镜像构建)。后续C/L仍是桥接usage/执行生命周期，不重做用户计费。
 
@@ -21,6 +21,7 @@
     - [x] S2b2-live：双实例真实Docker CSR/证书投递，独立key、交叉/错CA精确拒绝、幂等安装、lease撤销后拒绝签发；清理后原4业务容器不变；[实证](verification.md#s2b2-live双实例真实docker证书管理通道)。
     - [ ] 剩余：生产host-agent/provider装配、真实SQL幂等并发、双实例mTLS连接及lease失效整链；当前不宣称CLI整链/生产可用。
   - [x] S2b3组件：严格START经准确物理CID核验→认证bootstrap→实际mTLS，失败/漂移不被普通INSPECT复活；真实ControlClient/Dispatch与worker回环组合通过；[实证](verification.md#s2b3正式start命令的已有实例认证装配)。仅组件装配，host-agent二进制与orchestrator签发入口仍未启用。
+  - [x] S2b4入口：cmd/host-agent 默认关闭生命周期服务，专属node身份/控制TLS、退出收敛、业务placement排除；orchestrator显式SQL receipt + 独立Redis lease校验装配；[实证](verification.md#s2b4默认关闭的服务入口与持久化签发装配)。只接生命周期，不启业务/出口，缺权威lease writer时签发拒绝；K3/K4/H5保持开放。
 - [ ] VM0d 当前组件实际隔离整链，不复用旧 VM/旧凭据或局部 PASS 冒充完成。
 
 ## A：HTTP worker 增量转发

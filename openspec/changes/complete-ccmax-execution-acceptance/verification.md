@@ -1,5 +1,64 @@
 # 验证记录
 
+## S2b4：默认关闭的服务入口与持久化签发装配
+
+2026-09-18，规划 `4e3826b`，持久化签发装配 `67e3b77`，host-agent 入口
+`4a540f9`。本轮补上 S2b3 的两个实际入口断点；不是镜像新版本或业务整链上线。
+
+### 已交付
+
+- `cmd/host-agent` 明确注入 `daemon.SelectRunner`；关闭时仅读开关，保留旧健康
+  服务，不加载节点文件/连接 Docker/控制端。错误不回退。共享 service 不反向依赖
+  host-agent，避免原 secure_activation 组件测试的依赖循环。
+- 独立 `hostagent/daemon/` 目录按 entry/config/identity/composition/executor/run/
+  health 分文件。预签发专属 node 证书由物理路径安全加载，逐级 no-follow、所有者/
+  权限/大小/硬链接/读后替换核验；严格 exact node SPIFFE/P-256/keypair/CA/EKU。
+  控制连接保留 Go 标准主机名与链验证，TLS1.3，仅拨配置私网/回环 literal IP，
+  不使用环境代理。宿主不生成 CA、不持有票据签名私钥、不复制实例私钥。
+- 同一真实 Docker HTTP adapter/provider 接 RPC enrollment→lifecycle.New→严格
+  START；固定安全策略和每实例 CA pin。无 activation、业务/Health票据、runtime
+  registry 或出口代理服务。Hello 仅生命周期模式，placement 对其标签或能力显式
+  拒绝，包括无约束、sticky 和主动要求 lifecycle marker 的业务请求。
+- 回环健康接口 `/readyz` 始终 503/production_ready=false。过期结束本次运行；
+  停机先封闭命令、取消控制流、有界等待，再关闭连接。跨重连旧排队命令不能落到
+  provider；不响应 context 的已进入操作超时为 ErrShutdown/非零退出，不声称强停。
+- 独立 `service/runtimeenrollment/`：显式默认关闭、SQL receipts/assignment store、
+  单独 Redis lease validator 与固定 `execution:lease:v1:` 前缀；只读 PING，完整
+  失败/退出清理；不应用迁移、不自动授租、不使用 Memory fallback。启用时证书
+  TTL 与 Authority 对齐，短 TTL 缩小续期窗口，关闭时保留原配置行为。
+
+### 验证与 review
+
+实际 `prepare`→ControlClient 使用合成专属节点证书、真实 loopback mTLS NodeControl
+和 Unix socket HTTP Docker **夹具**（非真实 Docker）。收到 lifecycle-only Hello，
+下发缺失实例 START 得到失败，至少执行 PING/version/实例检查且 Docker writes=0；
+错 node 在 Docker 前拒绝，错控制主机名无法建立 Control stream。该测试不代表
+真实 provider 容器创建/网络/跨容器 mTLS；已有 S2b3 worker 组合测试保持独立证据。
+
+Redis 用真实 go-redis 客户端连接本地 RESP 夹具：只见 HELLO/PING 和只读 GET Lua
+EVAL，固定前缀，空库不能授权；并非真实 Redis 集群或 MySQL 持久化并发验收。
+
+三个代理交叉 review；修复默认 ControlConfig 覆盖签发配置、启用时短 TTL 不匹配、
+启动日志期间取消被随机归类为运行故障，新增回归。额外修正全量测试发现的入口
+循环依赖。最终本轮范围未发现未处理 P1/P2；不是整个仓库/隔离方案的安全认证。
+
+最终全 execution-plane 离线 `go test -race -count=1 -timeout=120s ./...` 与
+`go vet ./...` 通过；Linux/amd64、CGO=0 的 `go build ./cmd/...` 通过（只编译不运行）。
+daemon/config/service/placement 定向 race 三遍，真实入口 TLS/拒绝/取消回归十遍，
+executor 跨会话/封闭竞态定向二十遍通过。恢复回归两次通过：236 Python、150 Bun /
+1027 断言、186 镜像 Python。未 SSH、部署、push、真实模型请求或读取账号凭据，
+216/170 的业务容器、UI、数据均未操作；暂停 build.py/runtimekit WIP 未纳入提交。
+
+### 剩余项与分数
+
+**生产 execution lease writer 尚未实现**：Redis 能连接不代表 slot 有租约；缺租约
+签发必拒绝。完整 host-agent 数据/出口服务、existing-only runtime registry、真实
+SQL 并发、独立 Internal 网络双实例 mTLS、MemorySwap/ACL、在途 lease 失效与 CLI
+桥接仍开放。两个入口默认关闭，不能启用生产 onboarding 或把账号标记 migrated。
+K3/K4/H5 未完整关闭，总体仍 **32%**（镜像40%、运行服务60%、身份20%、宿主40%）。
+下一切片应聚焦真实 provider 双实例管理/mTLS 与 swap/网络门禁，随后补权威租约
+写入/续租并接现有 CLI，不再另起无关构建工具或扩展 Sub2 业务模块。
+
 ## S2b3：正式START命令的已有实例认证装配
 
 2026-09-18，先规划`3b41be9`；物理实例锁定`277406d`，认证START组件与控制流

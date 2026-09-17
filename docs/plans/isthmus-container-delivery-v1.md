@@ -67,8 +67,11 @@
 已通过实际Docker CSR导出/公开证书安装、交叉/错CA拒绝和lease撤销后拒绝签发。
 后续[S2b3正式START组件](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b3正式start命令的已有实例认证装配)
 接上物理CID只读核验、认证bootstrap和mTLS，实际ControlClient/Dispatch→worker回环
-组合通过；失败/漂移后INSPECT不得复活健康。尚未接入host-agent二进制或生产签发入口。
-SQL仍为mock而非真实MySQL并发；仍缺生产host-agent/provider装配、跨容器mTLS和在途lease失效组合，
+组合通过；失败/漂移后INSPECT不得复活健康。
+后续[S2b4服务入口](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b4默认关闭的服务入口与持久化签发装配)
+已接默认关闭的生命周期host-agent二进制与SQL/独立Redis签发依赖，但不广告业务能力，
+没有生产execution lease writer，缺租约必拒绝。SQL仍为mock而非真实MySQL并发；
+仍缺完整host-agent数据/出口装配、真实provider跨容器mTLS和在途lease失效组合，
 因此K3/K4不提前勾选，总体仍32%。这不是代码无进展，而是完整验收门槛尚未关闭。
 
 - [ ] K1 稳定机器/逻辑实例标识生命周期，重启/升级/恢复/换账号的保留与换代规则。
