@@ -20,7 +20,8 @@ S2a模块分开：`internal/runtimeidentity/`为绑定、私有存储、CSR；`i
 
 ## 身份合同
 
-- 绑定仅含账号hash（64位小写hex）、slot/node受限标识、正整数epoch/generation；
+- 绑定沿用`provider.RuntimeAccountID`的账号hash（SHA256前16字节，32位小写hex），
+  以及slot/node受限标识、正整数epoch/generation；
   不接受原始账号/密码/token。URI为`spiffe://sub2api.execution/runtime/<node>/<slot>/<hash>/<epoch>/<generation>`。
 - 私钥由实例本地安全随机数生成；不接受导入密钥参数。单个0600私有状态文件包含
   绑定、逻辑机器标识与PKCS8密钥，受0700目录保护；原子发布、并发初始化互斥。
