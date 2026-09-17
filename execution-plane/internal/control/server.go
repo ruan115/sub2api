@@ -870,7 +870,7 @@ func validateControlResponse(response *executionv1.NodeControlServiceControlResp
 	if command := response.GetCredentialKeyCommand(); command != nil {
 		if err := validateSecureCommandBinding(
 			command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(), command.GetDeadline(),
-		); err != nil {
+		); err != nil || command.GetDesiredGeneration() == 0 {
 			return errors.New("credential-key command is invalid")
 		}
 		return nil
@@ -878,7 +878,7 @@ func validateControlResponse(response *executionv1.NodeControlServiceControlResp
 	if command := response.GetSecureActivationCommand(); command != nil {
 		if err := validateSecureCommandBinding(
 			command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(), command.GetDeadline(),
-		); err != nil || credential.ValidateTransportID(command.GetCredentialLeaseId()) != nil ||
+		); err != nil || command.GetDesiredGeneration() == 0 || credential.ValidateTransportID(command.GetCredentialLeaseId()) != nil ||
 			credential.ValidateTransportID(command.GetProxyLeaseId()) != nil || len(command.GetEncryptedCredentialBundle()) == 0 ||
 			len(command.GetEncryptedCredentialBundle()) > maxCredentialBundleBytes {
 			return errors.New("secure activation command is invalid")
@@ -939,6 +939,7 @@ func pendingFromResponse(response *executionv1.NodeControlServiceControlResponse
 			kind: pendingSecureActivation, slotID: command.GetSlotId(), executionEpoch: command.GetExecutionEpoch(),
 			accountBinding: provider.RuntimeAccountID(command.GetAccountId()), credentialLeaseID: command.GetCredentialLeaseId(),
 			proxyLeaseID: command.GetProxyLeaseId(), imageDigest: command.GetImageDigest(), deadline: command.GetDeadline().AsTime(),
+			desiredGeneration: command.GetDesiredGeneration(),
 		}
 	}
 	return pendingCommand{}

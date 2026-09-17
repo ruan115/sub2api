@@ -41,6 +41,7 @@ func (s *scriptedNodeControlServer) Control(stream grpc.BidiStreamingServer[exec
 		CommandId: "cmd-control-create", Action: executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE,
 		SlotId: "slot-control", AccountId: "account-control", ExecutionEpoch: 4,
 		ImageDigest: "sha256:" + strings.Repeat("b", 64), Deadline: timestamppb.New(s.now.Add(time.Minute)),
+		Metadata: map[string]string{"desired_generation": "3", "target_runtime_generation": "3"},
 	}}}); err != nil {
 		return err
 	}
@@ -151,7 +152,8 @@ func (s *scriptedSecureControlServer) Control(stream grpc.BidiStreamingServer[ex
 	if err := stream.Send(&executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_CredentialKeyCommand{CredentialKeyCommand: &executionv1.CredentialKeyCommand{
 			CommandId: "cmd-key-control", SlotId: "slot-control", AccountId: "account-control", ExecutionEpoch: 4,
-			ImageDigest: "sha256:" + strings.Repeat("b", 64), Deadline: timestamppb.New(s.now.Add(time.Minute)),
+			DesiredGeneration: 3,
+			ImageDigest:       "sha256:" + strings.Repeat("b", 64), Deadline: timestamppb.New(s.now.Add(time.Minute)),
 		}},
 	}); err != nil {
 		return err
@@ -169,7 +171,8 @@ func (s *scriptedSecureControlServer) Control(stream grpc.BidiStreamingServer[ex
 	if err := stream.Send(&executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
 			CommandId: "cmd-activate-control", SlotId: "slot-control", AccountId: "account-control", ExecutionEpoch: 4,
-			ImageDigest: "sha256:" + strings.Repeat("b", 64), CredentialLeaseId: "lease-control", ProxyLeaseId: "proxy-control",
+			DesiredGeneration: 3,
+			ImageDigest:       "sha256:" + strings.Repeat("b", 64), CredentialLeaseId: "lease-control", ProxyLeaseId: "proxy-control",
 			EncryptedCredentialBundle: []byte("worker-ciphertext"), Deadline: timestamppb.New(s.now.Add(time.Minute)),
 		}},
 	}); err != nil {

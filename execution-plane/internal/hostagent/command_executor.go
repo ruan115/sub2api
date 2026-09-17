@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -198,7 +199,7 @@ func (e *SlotCommandExecutor) create(ctx context.Context, command *executionv1.S
 		}
 	} else if err != nil {
 		return nil, err
-	} else if status.Epoch != command.GetExecutionEpoch() {
+	} else if status.Epoch != command.GetExecutionEpoch() || status.RuntimeGeneration != commandRuntimeGeneration(command) || status.ImageDigest != command.GetImageDigest() {
 		return nil, errEpochConflict
 	}
 	instance, err := e.provider.Create(ctx, e.spec(command))
@@ -285,7 +286,8 @@ func (e *SlotCommandExecutor) inspectExact(ctx context.Context, command *executi
 	if err != nil {
 		return provider.Status{}, err
 	}
-	if status.SlotID != command.GetSlotId() || status.Epoch != command.GetExecutionEpoch() {
+	if status.SlotID != command.GetSlotId() || status.Epoch != command.GetExecutionEpoch() ||
+		status.RuntimeGeneration != commandRuntimeGeneration(command) || status.ImageDigest != command.GetImageDigest() {
 		return provider.Status{}, errEpochConflict
 	}
 	return status, nil
@@ -294,8 +296,45 @@ func (e *SlotCommandExecutor) inspectExact(ctx context.Context, command *executi
 func (e *SlotCommandExecutor) spec(command *executionv1.SlotCommand) provider.SlotSpec {
 	return provider.SlotSpec{
 		SlotID: command.GetSlotId(), AccountID: command.GetAccountId(), Epoch: command.GetExecutionEpoch(), ImageDigest: command.GetImageDigest(),
-		Resources: e.resources, Security: e.security, Network: e.network,
+		RuntimeGeneration: commandRuntimeGeneration(command),
+		Resources:         e.resources, Security: e.security, Network: e.network,
 	}
+}
+
+// SlotCommand metadata is authenticated by NodeControl. The desired generation
+// identifies the intent; cleanup may explicitly target an older assignment.
+// Neither a malformed value nor a missing old target is inferred from epoch.
+func commandRuntimeGeneration(command *executionv1.SlotCommand) uint64 {
+	desired := canonicalRuntimeGeneration(command.GetMetadata()["desired_generation"])
+	if desired == 0 {
+		return 0
+	}
+	raw, explicit := command.GetMetadata()["target_runtime_generation"]
+	if !explicit {
+		// Existing read-only probes identify a current generation, not cleanup
+		// of an old assignment. Missing metadata can never select an older one.
+		if command.GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_INSPECT {
+			return desired
+		}
+		return 0
+	}
+	target := canonicalRuntimeGeneration(raw)
+	if target == 0 || target > desired {
+		return 0
+	}
+	if (command.GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE ||
+		command.GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START) && target != desired {
+		return 0
+	}
+	return target
+}
+
+func canonicalRuntimeGeneration(raw string) uint64 {
+	generation, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || generation == 0 || strconv.FormatUint(generation, 10) != raw {
+		return 0
+	}
+	return generation
 }
 
 func (e *SlotCommandExecutor) validateCommand(command *executionv1.SlotCommand) error {

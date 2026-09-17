@@ -61,6 +61,10 @@
 
 ### K：独立身份（每项2分）
 
+2026-09-17 [S2b1证书安装与实际组件mTLS](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b1证书安装与实际组件mtls)
+已在170受限容器中三轮通过；仍缺受认证签发/启动前投递、跨容器和lease失效组合，
+因此K3/K4不提前勾选，总体仍32%。这不是代码无进展，而是完整验收门槛尚未关闭。
+
 - [ ] K1 稳定机器/逻辑实例标识生命周期，重启/升级/恢复/换账号的保留与换代规则。
 - [x] K2 每实例本地安全随机私钥/CSR，不能由模板、宿主Env/argv或线上私钥复制；[S2a双实例实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2a双实例本地身份与csr)。仅本地生成/保护/公开CSR，未安装证书或接通mTLS。
 - [ ] K3 准确身份的受认证签发、安全存放和原子安装，控制面不下发同一server私钥。

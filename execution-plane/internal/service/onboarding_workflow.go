@@ -46,6 +46,9 @@ func NewSecureOnboardingWorkflow(
 }
 
 func (w *SecureOnboardingWorkflow) CredentialKeyCommand(plan SecureOnboardingPlan) (*executionv1.NodeControlServiceControlResponse, error) {
+	// The durable plan remains the sole generation authority. Copy it into the
+	// value binding before either command is built; never use a stale duplicate.
+	plan.Binding.DesiredGeneration = plan.DesiredGeneration
 	if w == nil || w.builder == nil || w.builder.validateBinding(plan.Binding) != nil || plan.IntentID == "" ||
 		plan.Owner == "" || plan.DesiredGeneration == 0 {
 		return nil, ErrSecureOnboardingWorkflow
@@ -54,9 +57,6 @@ func (w *SecureOnboardingWorkflow) CredentialKeyCommand(plan SecureOnboardingPla
 	if err != nil {
 		return nil, ErrSecureOnboardingWorkflow
 	}
-	// Diagnostic ticket authority must use the workflow's existing generation,
-	// not a second independently editable copy in the worker identity binding.
-	response.GetCredentialKeyCommand().DesiredGeneration = plan.DesiredGeneration
 	return response, nil
 }
 
@@ -67,6 +67,7 @@ func (w *SecureOnboardingWorkflow) PrepareActivation(
 	plan SecureOnboardingPlan,
 	keyResult *executionv1.CommandResult,
 ) (*executionv1.NodeControlServiceControlResponse, error) {
+	plan.Binding.DesiredGeneration = plan.DesiredGeneration
 	if w == nil || w.intents == nil || w.builder == nil || w.authority == nil || w.now == nil ||
 		w.builder.validateBinding(plan.Binding) != nil ||
 		w.builder.validateKeyResult(plan.Binding, keyResult) != nil || plan.IntentID == "" || plan.Owner == "" || plan.DesiredGeneration == 0 {
@@ -115,6 +116,7 @@ func (w *SecureOnboardingWorkflow) validateActivationAuthority(ctx context.Conte
 // activation command reports a healthy, image-matched success. Replays are
 // idempotent in the intent repository.
 func (w *SecureOnboardingWorkflow) CompleteActivation(ctx context.Context, plan SecureOnboardingPlan, result *executionv1.CommandResult) error {
+	plan.Binding.DesiredGeneration = plan.DesiredGeneration
 	if w == nil || w.intents == nil || w.builder == nil || ctx == nil || ctx.Err() != nil ||
 		w.builder.validateBindingIdentity(plan.Binding) != nil || plan.IntentID == "" || plan.Owner == "" || plan.DesiredGeneration == 0 ||
 		result == nil || result.GetCommandId() != plan.Binding.ActivationCommandID || !result.GetSucceeded() ||

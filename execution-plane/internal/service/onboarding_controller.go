@@ -153,7 +153,8 @@ func secureOnboardingPlan(record onboarding.Provisioning) SecureOnboardingPlan {
 		Binding: SecureOnboardingBinding{
 			KeyCommandID: record.KeyCommandID, ActivationCommandID: record.ActivationCommandID,
 			SlotID: record.SlotID, AccountID: record.AccountID, ExecutionEpoch: record.ExecutionEpoch,
-			ImageDigest: record.ImageDigest, CredentialLeaseID: record.CredentialLeaseID,
+			DesiredGeneration: record.DesiredGeneration,
+			ImageDigest:       record.ImageDigest, CredentialLeaseID: record.CredentialLeaseID,
 			ProxyLeaseID: record.ProxyLeaseID, Deadline: record.CommandDeadline,
 		},
 	}

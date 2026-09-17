@@ -458,7 +458,8 @@ func TestProbeTicketsDoNotRetainNonDiagnosticControlPayloads(t *testing.T) {
 	for _, response := range []*executionv1.NodeControlServiceControlResponse{
 		{Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
 			CommandId: "activate", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 1,
-			ImageDigest: f.bound.ImageDigest, Deadline: timestamppb.New(f.server.config.Now().Add(time.Minute)),
+			DesiredGeneration: 2,
+			ImageDigest:       f.bound.ImageDigest, Deadline: timestamppb.New(f.server.config.Now().Add(time.Minute)),
 			CredentialLeaseId: "credential-lease", ProxyLeaseId: "proxy-1", EncryptedCredentialBundle: make([]byte, maxCredentialBundleBytes),
 		}}},
 		{Event: &executionv1.NodeControlServiceControlResponse_RevokeEpoch{RevokeEpoch: &executionv1.RevokeEpochCommand{CommandId: "revoke", SlotId: "slot-1", ExecutionEpoch: 1}}},

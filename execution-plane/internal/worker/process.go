@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,10 +26,12 @@ import (
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeidentity"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/ticket"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker/fixedtransport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
 
@@ -40,6 +43,9 @@ const maxWorkerRPCMessageBytes = maxWorkerRequestBytes + (64 << 10)
 var errInvalidProcessURL = errors.New("invalid worker endpoint URL")
 
 type ProcessConfig struct {
+	RuntimeGeneration   uint64
+	IdentityDirectory   string
+	RuntimeTrustFile    string
 	ListenAddress       string
 	Identity            Identity
 	TicketPublicKey     ed25519.PublicKey
@@ -57,6 +63,10 @@ func LoadProcessConfig(getenv func(string) string) (ProcessConfig, error) {
 	epoch, err := strconv.ParseUint(strings.TrimSpace(getenv("EXECUTION_EPOCH")), 10, 64)
 	if err != nil || epoch == 0 {
 		return ProcessConfig{}, errors.New("EXECUTION_EPOCH must be a positive integer")
+	}
+	generation, err := strconv.ParseUint(getenv("EXECUTION_RUNTIME_GENERATION"), 10, 64)
+	if err != nil || generation == 0 || strconv.FormatUint(generation, 10) != getenv("EXECUTION_RUNTIME_GENERATION") {
+		return ProcessConfig{}, errors.New("EXECUTION_RUNTIME_GENERATION must be a canonical positive integer")
 	}
 	publicKey, err := decodePublicKey(strings.TrimSpace(getenv("EXECUTION_TICKET_PUBLIC_KEY")))
 	if err != nil {
@@ -83,7 +93,10 @@ func LoadProcessConfig(getenv func(string) string) (ProcessConfig, error) {
 		}
 	}
 	config := ProcessConfig{
-		ListenAddress: strings.TrimSpace(getenv("EXECUTION_LISTEN_ADDRESS")),
+		RuntimeGeneration: generation,
+		IdentityDirectory: getenv("EXECUTION_IDENTITY_DIRECTORY"),
+		RuntimeTrustFile:  getenv("EXECUTION_RUNTIME_TRUST_FILE"),
+		ListenAddress:     strings.TrimSpace(getenv("EXECUTION_LISTEN_ADDRESS")),
 		Identity: Identity{
 			AccountID: strings.TrimSpace(getenv("EXECUTION_ACCOUNT_HASH")),
 			SlotID:    strings.TrimSpace(getenv("EXECUTION_SLOT_ID")),
@@ -137,7 +150,20 @@ func (c ProcessConfig) Validate() error {
 			return fmt.Errorf("worker onboarding configuration: %w", err)
 		}
 	}
+	if c.runtimeBinding().Validate() != nil {
+		return runtimeidentity.ErrIdentity
+	}
+	for _, path := range []string{c.IdentityDirectory, c.RuntimeTrustFile} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return runtimeidentity.ErrIdentity
+		}
+	}
 	return nil
+}
+
+func (c ProcessConfig) runtimeBinding() runtimeidentity.Binding {
+	return runtimeidentity.Binding{AccountHash: c.Identity.AccountID, SlotID: c.Identity.SlotID,
+		NodeID: c.Identity.NodeID, Epoch: c.Identity.Epoch, Generation: c.RuntimeGeneration}
 }
 
 func decodePublicKey(encoded string) (ed25519.PublicKey, error) {
@@ -253,6 +279,14 @@ func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) 
 	if err := config.Validate(); err != nil {
 		return err
 	}
+	trust, err := runtimeidentity.ReadTrustFile(config.RuntimeTrustFile)
+	if err != nil {
+		return runtimeidentity.ErrIdentity
+	}
+	tlsConfig, err := runtimeidentity.LoadServerTLS(config.IdentityDirectory, config.runtimeBinding(), trust)
+	if err != nil {
+		return runtimeidentity.ErrIdentity
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -314,6 +348,7 @@ func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) 
 	}
 	defer listener.Close()
 	grpcServer := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsConfig)),
 		grpc.MaxRecvMsgSize(maxWorkerRPCMessageBytes),
 		grpc.MaxSendMsgSize(maxWorkerRPCMessageBytes),
 	)

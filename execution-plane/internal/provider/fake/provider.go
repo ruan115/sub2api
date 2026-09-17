@@ -40,18 +40,22 @@ func (p *Provider) Create(_ context.Context, spec base.SlotSpec) (base.Instance,
 		if instance.Epoch != spec.Epoch {
 			return base.Instance{}, fmt.Errorf("slot %q already exists at epoch %d", spec.SlotID, instance.Epoch)
 		}
+		if instance.RuntimeGeneration != spec.RuntimeGeneration {
+			return base.Instance{}, fmt.Errorf("slot %q already exists at another runtime generation", spec.SlotID)
+		}
 		return instance, nil
 	}
 
 	now := p.now().UTC()
 	ref := "fake://" + spec.SlotID
 	instance := base.Instance{
-		ProviderRef: ref,
-		SlotID:      spec.SlotID,
-		Epoch:       spec.Epoch,
-		State:       slot.StateStopped,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ProviderRef:       ref,
+		SlotID:            spec.SlotID,
+		Epoch:             spec.Epoch,
+		RuntimeGeneration: spec.RuntimeGeneration,
+		State:             slot.StateStopped,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	p.instances[ref] = instance
 	p.bySlot[spec.SlotID] = ref

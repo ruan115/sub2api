@@ -104,14 +104,17 @@ func ValidateEgressProxyURL(raw string) error {
 }
 
 type SlotSpec struct {
-	SlotID      string
-	AccountID   string
-	Epoch       uint64
-	ImageDigest string
-	Resources   ResourceLimits
-	Security    SecurityPolicy
-	Network     NetworkPolicy
-	Metadata    map[string]string
+	SlotID    string
+	AccountID string
+	Epoch     uint64
+	// RuntimeGeneration is the control-plane desired generation, never a
+	// route-cache generation or a value inferred from the execution epoch.
+	RuntimeGeneration uint64
+	ImageDigest       string
+	Resources         ResourceLimits
+	Security          SecurityPolicy
+	Network           NetworkPolicy
+	Metadata          map[string]string
 }
 
 func (s SlotSpec) Validate() error {
@@ -123,6 +126,9 @@ func (s SlotSpec) Validate() error {
 	}
 	if s.Epoch == 0 {
 		return errors.New("execution epoch must be positive")
+	}
+	if s.RuntimeGeneration == 0 {
+		return errors.New("runtime generation must be positive")
 	}
 	if !immutableImageReference(s.ImageDigest) {
 		return errors.New("immutable image digest is required")
@@ -153,12 +159,13 @@ func immutableImageReference(reference string) bool {
 }
 
 type Instance struct {
-	ProviderRef string
-	SlotID      string
-	Epoch       uint64
-	State       slot.State
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ProviderRef       string
+	SlotID            string
+	Epoch             uint64
+	RuntimeGeneration uint64
+	State             slot.State
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type Status struct {

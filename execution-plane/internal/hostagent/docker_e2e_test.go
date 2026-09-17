@@ -40,6 +40,11 @@ func (s localTicketSource) Issue(_ context.Context, request TicketRequest) (stri
 }
 
 func TestDockerWorkerFakeUpstreamE2E(t *testing.T) {
+	// This legacy harness cannot enroll/install a distinct instance identity.
+	// Stop before opening its public proxy listener or mutating Docker. The
+	// S2b process_mtls tests exercise the real worker/Controller over loopback;
+	// they are not a substitute for future container bootstrap acceptance.
+	t.Fatal("Docker E2E blocked: per-instance mTLS certificate bootstrap is not installed; no plaintext fallback")
 	socket := requiredEnvironment(t, "EXECUTION_E2E_DOCKER_SOCKET")
 	image := requiredEnvironment(t, "EXECUTION_E2E_WORKER_IMAGE")
 
@@ -74,6 +79,7 @@ func TestDockerWorkerFakeUpstreamE2E(t *testing.T) {
 		NodeID: "local-e2e-node", TicketPublicKey: base64.RawStdEncoding.EncodeToString(publicKey),
 		UpstreamBaseURL: "http://fake.anthropic.local", RuntimePort: 8093,
 		AllowFakeActivation: true,
+		IdentityDirectory:   dockerprovider.WorkerIdentityDirectory, RuntimeTrustFile: dockerprovider.WorkerRuntimeTrustFile,
 	}
 	dockerRuntime, err := dockerprovider.New(providerConfig, engine)
 	if err != nil {
@@ -81,7 +87,8 @@ func TestDockerWorkerFakeUpstreamE2E(t *testing.T) {
 	}
 	spec := base.SlotSpec{
 		SlotID: "local-e2e-slot", AccountID: "account-plaintext-must-not-enter-container", Epoch: 1, ImageDigest: image,
-		Resources: base.ResourceLimits{CPUMilli: 500, MemoryBytes: 256 << 20, PIDs: 64, TmpfsBytes: 64 << 20},
+		RuntimeGeneration: 1,
+		Resources:         base.ResourceLimits{CPUMilli: 500, MemoryBytes: 256 << 20, PIDs: 64, TmpfsBytes: 64 << 20},
 		Security: base.SecurityPolicy{
 			RunAsUser: 65532, ReadOnlyRootFS: true, NoNewPrivileges: true,
 			DropAllCapabilities: true, SeccompProfile: "builtin", AppArmorProfile: "docker-default",

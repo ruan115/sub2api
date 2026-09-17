@@ -36,6 +36,7 @@ func slotCommand(now time.Time, id string, action executionv1.SlotCommandAction,
 	return &executionv1.SlotCommand{
 		CommandId: id, Action: action, SlotId: "slot-10380", AccountId: "account-10380", ExecutionEpoch: epoch,
 		ImageDigest: "sha256:" + strings.Repeat("a", 64), Deadline: timestamppb.New(now.Add(time.Minute)),
+		Metadata: map[string]string{"desired_generation": "3", "target_runtime_generation": "3"},
 	}
 }
 
@@ -125,5 +126,102 @@ func TestSlotCommandExecutorCapacityAndDelayedRevocation(t *testing.T) {
 	result := executor.ExecuteSlotCommand(context.Background(), second)
 	if result.GetSucceeded() || result.GetErrorCode() != "node_slot_capacity" {
 		t.Fatalf("capacity result = %+v", result)
+	}
+}
+
+func TestSlotCommandRuntimeGenerationIsCanonicalAndFenced(t *testing.T) {
+	now := time.Now().UTC()
+	for _, raw := range []string{"", "0", "03", "+3", " 3", "3 ", "-1", "18446744073709551616"} {
+		t.Run(raw, func(t *testing.T) {
+			implementation := providerfake.New()
+			executor := newTestSlotCommandExecutor(t, implementation, now)
+			command := slotCommand(now, "create", executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE, 9)
+			command.Metadata["desired_generation"] = raw
+			if result := executor.ExecuteSlotCommand(context.Background(), command); result.GetSucceeded() || result.GetErrorCode() != "invalid_command" {
+				t.Fatal("noncanonical desired generation was accepted")
+			}
+			if _, err := implementation.InspectSlot(context.Background(), command.GetSlotId()); err == nil {
+				t.Fatal("invalid generation created an instance")
+			}
+		})
+	}
+	implementation := providerfake.New()
+	executor := newTestSlotCommandExecutor(t, implementation, now)
+	command := slotCommand(now, "create", executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE, 9)
+	if result := executor.ExecuteSlotCommand(context.Background(), command); !result.GetSucceeded() {
+		t.Fatal("authoritative generation was rejected")
+	}
+	observed, err := implementation.InspectSlot(context.Background(), command.GetSlotId())
+	if err != nil || observed.RuntimeGeneration != 3 || observed.Epoch != 9 {
+		t.Fatal("runtime generation was lost or replaced by execution epoch")
+	}
+	command.Action = executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START
+	command.Metadata["desired_generation"] = "4"
+	if result := executor.ExecuteSlotCommand(context.Background(), command); result.GetSucceeded() {
+		t.Fatal("another runtime generation was started")
+	}
+}
+
+func TestSlotCommandCleansExactOldGenerationWithoutStartingOrDestroyingReplacement(t *testing.T) {
+	now := time.Now().UTC()
+	implementation := providerfake.New()
+	executor := newTestSlotCommandExecutor(t, implementation, now)
+	for _, action := range []executionv1.SlotCommandAction{executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START} {
+		if result := executor.ExecuteSlotCommand(context.Background(), slotCommand(now, "initial", action, 9)); !result.GetSucceeded() {
+			t.Fatal(result)
+		}
+	}
+	cleanup := slotCommand(now, "cleanup", executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_DRAIN, 9)
+	for _, action := range []executionv1.SlotCommandAction{executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START} {
+		wrongImage := slotCommand(now, "wrong-image", action, 9)
+		wrongImage.ImageDigest = "sha256:" + strings.Repeat("b", 64)
+		if result := executor.ExecuteSlotCommand(context.Background(), wrongImage); result.GetSucceeded() {
+			t.Fatal("new image command adopted or started the old image")
+		}
+	}
+	cleanup.Metadata = map[string]string{"desired_generation": "4", "target_runtime_generation": "3"}
+	for _, action := range []executionv1.SlotCommandAction{executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE} {
+		cleanup.Action = action
+		if result := executor.ExecuteSlotCommand(context.Background(), cleanup); result.GetSucceeded() || result.GetErrorCode() != "invalid_command" {
+			t.Fatal("new intent started an old runtime generation")
+		}
+	}
+	for _, action := range []executionv1.SlotCommandAction{executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_DRAIN, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_INSPECT, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_DESTROY} {
+		cleanup.Action = action
+		if result := executor.ExecuteSlotCommand(context.Background(), cleanup); !result.GetSucceeded() {
+			t.Fatal("new intent could not clean its explicitly selected old runtime", result)
+		}
+	}
+	replacement := slotCommand(now, "replacement", executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE, 10)
+	replacement.Metadata["desired_generation"] = "4"
+	replacement.Metadata["target_runtime_generation"] = "4"
+	replacement.ImageDigest = "sha256:" + strings.Repeat("b", 64)
+	if result := executor.ExecuteSlotCommand(context.Background(), replacement); !result.GetSucceeded() {
+		t.Fatal(result)
+	}
+	if result := executor.ExecuteSlotCommand(context.Background(), cleanup); result.GetSucceeded() {
+		t.Fatal("delayed cleanup destroyed the replacement")
+	}
+	if status, err := implementation.InspectSlot(context.Background(), replacement.GetSlotId()); err != nil || status.Epoch != 10 || status.RuntimeGeneration != 4 || status.ImageDigest != replacement.ImageDigest {
+		t.Fatal("replacement changed after delayed cleanup")
+	}
+}
+
+func TestCommandRequiresExplicitCanonicalLifecycleTarget(t *testing.T) {
+	for _, action := range []executionv1.SlotCommandAction{
+		executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START,
+		executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_DRAIN, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_STOP,
+		executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_DESTROY,
+	} {
+		for _, raw := range []string{"", "0", "03", "+3", " 3", "5", "18446744073709551616"} {
+			command := slotCommand(time.Now(), "target", action, 9)
+			command.Metadata = map[string]string{"desired_generation": "4"}
+			if raw != "" {
+				command.Metadata["target_runtime_generation"] = raw
+			}
+			if commandRuntimeGeneration(command) != 0 {
+				t.Fatal("missing or malformed target generation was accepted")
+			}
+		}
 	}
 }

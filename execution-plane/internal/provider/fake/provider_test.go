@@ -14,10 +14,11 @@ import (
 
 func spec() base.SlotSpec {
 	return base.SlotSpec{
-		SlotID:      "slot-1",
-		AccountID:   "account-1",
-		Epoch:       7,
-		ImageDigest: "registry.example/execution-worker@sha256:" + strings.Repeat("a", 64),
+		SlotID:            "slot-1",
+		AccountID:         "account-1",
+		Epoch:             7,
+		RuntimeGeneration: 3,
+		ImageDigest:       "registry.example/execution-worker@sha256:" + strings.Repeat("a", 64),
 		Resources: base.ResourceLimits{
 			CPUMilli: 500, MemoryBytes: 512 << 20, PIDs: 128, TmpfsBytes: 128 << 20,
 		},

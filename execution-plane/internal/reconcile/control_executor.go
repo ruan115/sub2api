@@ -33,7 +33,10 @@ func NewControlExecutor(dispatcher ControlDispatcher, deadline time.Duration, no
 func (e *ControlExecutor) Execute(ctx context.Context, action Action) error {
 	commandAction, ok := controlAction(action.Kind)
 	if !ok || action.CommandID == "" || action.NodeID == "" || action.SlotID == "" ||
-		action.AccountID == "" || action.ExecutionEpoch == 0 {
+		action.AccountID == "" || action.ExecutionEpoch == 0 || action.DesiredGeneration == 0 ||
+		!imageDigestPattern.MatchString(action.ImageDigest) ||
+		action.RuntimeGeneration == 0 || action.RuntimeGeneration > action.DesiredGeneration ||
+		((action.Kind == ActionCreate || action.Kind == ActionStart) && action.RuntimeGeneration != action.DesiredGeneration) {
 		return errors.New("reconcile action cannot be dispatched to a node")
 	}
 	response := &executionv1.NodeControlServiceControlResponse{
@@ -41,7 +44,10 @@ func (e *ControlExecutor) Execute(ctx context.Context, action Action) error {
 			CommandId: action.CommandID, Action: commandAction, SlotId: action.SlotID,
 			AccountId: action.AccountID, ExecutionEpoch: action.ExecutionEpoch, ImageDigest: action.ImageDigest,
 			Deadline: timestamppb.New(e.now().UTC().Add(e.deadline)),
-			Metadata: map[string]string{"desired_generation": strconv.FormatUint(action.DesiredGeneration, 10)},
+			Metadata: map[string]string{
+				"desired_generation":        strconv.FormatUint(action.DesiredGeneration, 10),
+				"target_runtime_generation": strconv.FormatUint(action.RuntimeGeneration, 10),
+			},
 		}},
 	}
 	return e.dispatcher.Dispatch(ctx, action.NodeID, response)

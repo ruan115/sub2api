@@ -25,11 +25,12 @@ func sandboxFixture(t *testing.T) (Container, Network) {
 	raw := fmt.Sprintf(`{
 		"Id":%q,"Name":%q,"Created":"2033-05-18T03:33:20Z","Image":%q,
 		"Config":{"Image":%q,"Hostname":%q,"User":"65532:65532","Env":[
-			"EXECUTION_SLOT_ID=slot/customer-1","EXECUTION_EPOCH=11",
+			"EXECUTION_SLOT_ID=slot/customer-1","EXECUTION_EPOCH=11","EXECUTION_RUNTIME_GENERATION=3",
 			"EXECUTION_EGRESS_PROXY_URL=http://host-agent.execution.internal:18080",
 			"HTTP_PROXY=http://host-agent.execution.internal:18080","HTTPS_PROXY=http://host-agent.execution.internal:18080","NO_PROXY=127.0.0.1,localhost"],"Labels":{
 			"com.sub2api.execution.managed":"true","com.sub2api.execution.slot_id":%q,
 			"com.sub2api.execution.account_hash":%q,"com.sub2api.execution.epoch":"11",
+			"com.sub2api.execution.runtime_generation":"3",
 			"com.sub2api.execution.image_digest":%q}},
 		"HostConfig":{"NetworkMode":%q,"ReadonlyRootfs":true,"CapDrop":["ALL"],"CapAdd":null,
 			"SecurityOpt":["no-new-privileges=true","seccomp=builtin","apparmor=docker-default"],
@@ -123,12 +124,14 @@ func sandboxProviderWithBootstrap(t *testing.T, engine *fakeEngine) *Provider {
 	config.WorkerBootstrap = &WorkerBootstrap{
 		NodeID: "node-sandbox", TicketPublicKey: base64.RawStdEncoding.EncodeToString(make([]byte, 32)),
 		UpstreamBaseURL: "https://api.anthropic.com", RuntimePort: 8093,
+		IdentityDirectory: WorkerIdentityDirectory, RuntimeTrustFile: WorkerRuntimeTrustFile,
 	}
 	engine.container.Config.Env = append(engine.container.Config.Env,
 		"EXECUTION_ACCOUNT_HASH="+base.RuntimeAccountID(dockerSpec().AccountID), "EXECUTION_NODE_ID=node-sandbox",
 		"EXECUTION_LISTEN_ADDRESS=0.0.0.0:8093", "EXECUTION_TICKET_PUBLIC_KEY="+config.WorkerBootstrap.TicketPublicKey,
 		"EXECUTION_UPSTREAM_BASE_URL=https://api.anthropic.com", "EXECUTION_IMAGE_DIGEST="+dockerSpec().ImageDigest,
 		"EXECUTION_ALLOW_FAKE_ACTIVATION=false",
+		"EXECUTION_IDENTITY_DIRECTORY="+WorkerIdentityDirectory, "EXECUTION_RUNTIME_TRUST_FILE="+WorkerRuntimeTrustFile,
 	)
 	provider, err := New(config, engine)
 	if err != nil {
@@ -238,8 +241,14 @@ func TestSandboxDriftIsRejectedByEveryAdoptionEntrypoint(t *testing.T) {
 		"bootstrap upstream": func(e *fakeEngine) {
 			replaceSandboxEnv(&e.container, "EXECUTION_UPSTREAM_BASE_URL", "https://wrong.invalid")
 		},
-		"bootstrap fake mode":   func(e *fakeEngine) { replaceSandboxEnv(&e.container, "EXECUTION_ALLOW_FAKE_ACTIVATION", "true") },
-		"duplicate environment": func(e *fakeEngine) { e.container.Config.Env = append(e.container.Config.Env, "EXECUTION_EPOCH=11") },
+		"bootstrap fake mode":          func(e *fakeEngine) { replaceSandboxEnv(&e.container, "EXECUTION_ALLOW_FAKE_ACTIVATION", "true") },
+		"bootstrap identity directory": func(e *fakeEngine) { replaceSandboxEnv(&e.container, "EXECUTION_IDENTITY_DIRECTORY", "/tmp/shared") },
+		"bootstrap TLS root": func(e *fakeEngine) {
+			replaceSandboxEnv(&e.container, "EXECUTION_RUNTIME_TRUST_FILE", "/tmp/caller-ca.pem")
+		},
+		"runtime generation environment": func(e *fakeEngine) { replaceSandboxEnv(&e.container, "EXECUTION_RUNTIME_GENERATION", "4") },
+		"runtime generation label":       func(e *fakeEngine) { e.container.Config.Labels[labelRuntimeGeneration] = "04" },
+		"duplicate environment":          func(e *fakeEngine) { e.container.Config.Env = append(e.container.Config.Env, "EXECUTION_EPOCH=11") },
 		"secret environment": func(e *fakeEngine) {
 			e.container.Config.Env = append(e.container.Config.Env, "ACCESS_TOKEN=synthetic-forbidden")
 		},

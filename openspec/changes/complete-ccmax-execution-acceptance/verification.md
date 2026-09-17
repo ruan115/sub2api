@@ -1,5 +1,81 @@
 # 验证记录
 
+## S2b1：证书安装与实际组件mTLS
+
+2026-09-17，先提交规划`18d16e9`，本地证书模块提交`c766b5d`。
+本轮交付安装及原组件接线，**不是S2b自动发证/跨容器整链完成**。
+固定台账仍为总体32%、镜像40%、运行服务60%、身份20%；K3/K4完整门槛不提前勾选。
+
+### 实现、review与修复
+
+- 在原`runtimeidentity`独占目录内安装单叶证书；外部配置固定CA，验证本地公钥、
+  accountHash/slot/node/epoch/runtime generation、时间/用途/SAN。原子替换同一0600
+  状态文件，不更换私钥/机器标识。首次安装、同证幂等；不同证书替换及残留半成品拒绝。
+  CLI新增`install`，仅有界公有证书stdin和受信CA文件路径，无私钥导出或CA发现逻辑。
+- CSR仍URI-only，签发端派生唯一`.execution.invalid` DNS SAN。TLS1.3默认Go验链、
+  时间、用途、hostname保留，再精确校验URI和原始SAN。服务端要求本node的clientAuth
+  证书；没有InsecureSkipVerify、系统根/明文回退、可注入验证回调或共享server私钥。
+- 原`worker.RunProcess`加载预安装身份后才监听；fake activation也无明文例外。
+  原`Controller.Start`使用mTLS并等待gRPC Ready，不以lazy client冒充握手，也不为
+  readiness额外消费业务scope票。Health仍要求独立有效ticket，错scope/账号/重放拒绝。
+- 显式贯通desired/runtime generation，新增SecureActivationCommand字段并按固定版本
+  重新生成proto。Docker label/env/adoption和activation严格核对generation与image。
+  review发现旧实例清理不能用新意图代/新image：明确区分当前desired generation与
+  target runtime generation，cleanup准确绑定旧assignment的epoch/generation/image；
+  create/start不能复活旧代，延迟旧cleanup不能作用于替代实例。相应回归通过。
+- 两位代理对非本人安装/CLI/worker/native lab部分交叉review，主代理审TLS与控制目标
+  语义。缺证书负例补为有效CA+无身份/无已装叶证/错绑定；错误TLS不拿deadline充数，
+  正向Health在负例后仍成功；另直接测试Controller错误代/node不能返回lazy成功。
+
+### 原生Linux最终运行
+
+仅170测试机，43仅SSH跳板；没有访问216生产。沿用已验证的S1b精确image ID
+`sha256:3f7a9a38c6ae0a779eb563ceb98cd70db6ae62243bf19ffbaa35587fa15ab807`。
+一个受限容器承载真实Go worker和Controller的回环TCP连接，provider创建使用fake，
+没有Docker自动证书bootstrap或真实CLI桥接。网络none/仅lo、UID1000、rootfs只读、
+cap0/NNP、1CPU/1GiB/swap0/pids128、私有tmpfs、无宿主bind/端口/新增网络；先读回
+内核限制与代码SHA。预检MemAvailable约4.29GiB，入口要求至少2GiB以保留余量。
+root仅系统tar上传，所有新测试二进制UID1000运行，合成CA/节点/实例密钥不导出。
+
+Go1.26.0、CGO0、linux/amd64、trimpath/buildvcs=false交叉编译三个测试二进制：
+
+| 制品 | 字节 | SHA256 |
+| --- | ---: | --- |
+| identity.test | 9510801 | `6311166dd35268eb951cc905450361163bd04b451e87f483835dc60ed162081c` |
+| identity-command.test | 7530318 | `019d0506e890eb2d7cc676b28e28efa025b8228c488d411c65cae5de2888a64f` |
+| worker.test | 22640507 | `5860d405c49854c6332e586099d46212a818bce5958049488cad60c658cf620d` |
+
+三组各3遍（worker仅`^TestProcessMTLS`），共66个顶层测试PASS；两个Controller错误
+身份子例各3次PASS；最终2.23秒exit0。正确链/票据通过；错槽/代/node/CA、明文、
+TLS1.2、错误用途/隐藏SAN、过期证书、无票/错票/重放、缺启动材料与错误安装均拒绝。
+TLS1.2/用途/过期/SAN矩阵在identity组，业务票在实际worker组，不混称为全业务链。
+
+初轮根`/var/tmp/isthmus-s1b.La13G3UH`；加强Controller直接负例后从新根
+`/var/tmp/isthmus-s1b.31yVdVI2`重跑全部三组。最终准确CID
+`6e831ff8fded76c644e7e1f2d081106e295a0033e185201762e15074225a61d6`
+已删除，私有tmpfs与测试私钥随容器销毁；cleanup_complete=true、unresolved_create=false。
+两轮原4业务容器ID/image/StartedAt/restarts/mount元数据均未改变，未读取其Env/logs。
+没有宿主防火墙改动、生产/UI/数据库操作、真实模型调用、push或部署。
+
+### 回归与保全、尚缺
+
+最终全execution-plane离线race/vet通过（显式移除三个真实DB/Redis测试变量）；
+ProcessMTLS定向race另3遍；固定buf1.72.0/仓库固定plugins生成及lint通过。
+`make -C recovery check`通过：236恢复Python、150 Bun/1027断言、177镜像Python；
+14manifest/116条合同仍只是结构检查，business_verification=false。
+旧Docker E2E build-tag编译通过，但实际入口**预期失败**且准确提示缺证书bootstrap，
+在任何Docker或0.0.0.0监听副作用之前停止；不是Skip/PASS，不代表容器整链通过。
+
+21项公开helper/锁/测试二进制逐项大小与SHA核对后上传。304项Go/proto/module源码
+摘要、二进制、两轮公开证据和回归日志保存在仓库外0700目录
+`/Users/ruanyang/My-project/api/z/isthmus-mtls-artifacts.KL3Qq4RI`，不含实例私钥。
+最终native日志SHA256 `344af3140ebb264e005f976b0dd6beb801c136ea15d817ce0de1121b06e226a2`；
+清理回执SHA256 `f8fcd3ba24da03ed65e9efd8df8d4f988bd93326c72a5ae0ce3596e230037060`。
+
+下一步S2b2：受认证CSR授权/投递必须在worker readiness前完成，生产host-agent真正
+装配、双实例实际连接与lease失效验证。仍缺CLI桥接、持久home恢复、轮换/撤销、
+内核受限出口与跨槽拒绝矩阵。证书标识不是CLI内部device-ID兼容性证据。
+
 ## S2a：双实例本地身份与CSR
 
 2026-09-17，规划`d55d0cd`及账号hash对齐`224114b`先于实现。

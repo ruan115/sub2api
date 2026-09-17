@@ -2,6 +2,7 @@ package hostagent
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -11,10 +12,12 @@ import (
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeidentity"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
 
@@ -24,10 +27,12 @@ type RuntimeProvider interface {
 }
 
 type ControllerConfig struct {
-	Provider     RuntimeProvider
-	TicketSource TicketSource
-	NodeID       string
-	ReadyTimeout time.Duration
+	Provider        RuntimeProvider
+	TicketSource    TicketSource
+	NodeID          string
+	ReadyTimeout    time.Duration
+	RuntimeTrustPEM []byte
+	NodeCertificate tls.Certificate
 }
 
 type TicketRequest struct {
@@ -58,10 +63,12 @@ func (l ActivationLease) Validate() error {
 }
 
 type Controller struct {
-	provider     RuntimeProvider
-	ticketSource TicketSource
-	nodeID       string
-	readyTimeout time.Duration
+	provider        RuntimeProvider
+	ticketSource    TicketSource
+	nodeID          string
+	readyTimeout    time.Duration
+	runtimeTrustPEM []byte
+	nodeCertificate tls.Certificate
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -71,12 +78,22 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if config.NodeID == "" {
 		return nil, errors.New("node id is required")
 	}
+	// Validate the trust anchor and exact node certificate before there can be
+	// any provider side effects. The placeholder identifies no real instance;
+	// Start builds and checks the authoritative binding for every connection.
+	validatedTLS, err := runtimeidentity.ClientTLS(runtimeidentity.Binding{
+		AccountHash: "00000000000000000000000000000000", SlotID: "validation", NodeID: config.NodeID, Epoch: 1, Generation: 1,
+	}, config.RuntimeTrustPEM, config.NodeCertificate)
+	if err != nil {
+		return nil, errors.New("runtime mTLS configuration is invalid")
+	}
 	if config.ReadyTimeout <= 0 {
 		config.ReadyTimeout = 45 * time.Second
 	}
 	return &Controller{
 		provider: config.Provider, ticketSource: config.TicketSource, nodeID: config.NodeID,
-		readyTimeout: config.ReadyTimeout,
+		readyTimeout:    config.ReadyTimeout,
+		runtimeTrustPEM: append([]byte(nil), config.RuntimeTrustPEM...), nodeCertificate: validatedTLS.Certificates[0],
 	}, nil
 }
 
@@ -147,16 +164,29 @@ func (c *Controller) ProvisionSecure(ctx context.Context, spec provider.SlotSpec
 // worker. The caller can retrieve its process-local transport public key,
 // request a sealed credential bundle from the orchestrator, then call Activate.
 func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtime, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	tlsConfig, err := runtimeidentity.ClientTLS(runtimeidentity.Binding{
+		AccountHash: provider.RuntimeAccountID(spec.AccountID), SlotID: spec.SlotID,
+		NodeID: c.nodeID, Epoch: spec.Epoch, Generation: spec.RuntimeGeneration,
+	}, c.runtimeTrustPEM, c.nodeCertificate)
+	if err != nil {
+		return nil, errors.New("runtime mTLS binding is invalid")
+	}
 	instance, err := c.provider.Create(ctx, spec)
 	if err != nil {
 		return nil, err
+	}
+	if instance.SlotID != spec.SlotID || instance.Epoch != spec.Epoch || instance.RuntimeGeneration != spec.RuntimeGeneration {
+		return nil, errors.New("worker provider returned a mismatched runtime binding")
 	}
 	if err := c.provider.Start(ctx, instance.ProviderRef); err != nil {
 		return nil, fmt.Errorf("start worker slot: %w", err)
 	}
 	readyContext, cancel := context.WithTimeout(ctx, c.readyTimeout)
 	defer cancel()
-	if err := c.waitReady(readyContext, instance.ProviderRef); err != nil {
+	if err := c.waitReady(readyContext, instance.ProviderRef, spec); err != nil {
 		return nil, err
 	}
 	endpoint, err := c.provider.RuntimeEndpoint(readyContext, instance.ProviderRef)
@@ -168,9 +198,19 @@ func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtim
 	if err != nil || ip == nil || (!ip.IsLoopback() && !ip.IsPrivate()) {
 		return nil, fmt.Errorf("worker endpoint is not node-private: %q", endpoint)
 	}
-	connection, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithNoProxy())
+	connection, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithNoProxy())
 	if err != nil {
 		return nil, fmt.Errorf("dial worker runtime: %w", err)
+	}
+	// NewClient is lazy. A TLS-authenticated HTTP/2 transport must actually be
+	// established before returning success. This consumes no business ticket
+	// and does not broaden a command's one-shot, scope-specific authorization.
+	connection.Connect()
+	for state := connection.GetState(); state != connectivity.Ready; state = connection.GetState() {
+		if state == connectivity.Shutdown || !connection.WaitForStateChange(readyContext, state) {
+			_ = connection.Close()
+			return nil, errors.New("worker authenticated transport did not become ready")
+		}
 	}
 	runtime := &Runtime{
 		Instance: instance, client: executionv1.NewWorkerRuntimeServiceClient(connection), connection: connection,
@@ -183,7 +223,7 @@ func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtim
 	return runtime, nil
 }
 
-func (c *Controller) waitReady(ctx context.Context, providerRef string) error {
+func (c *Controller) waitReady(ctx context.Context, providerRef string, spec provider.SlotSpec) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	var lastReason string
@@ -191,6 +231,9 @@ func (c *Controller) waitReady(ctx context.Context, providerRef string) error {
 		status, err := c.provider.Inspect(ctx, providerRef)
 		if err == nil {
 			lastReason = status.Reason
+			if status.SlotID != spec.SlotID || status.Epoch != spec.Epoch || status.RuntimeGeneration != spec.RuntimeGeneration || status.ImageDigest != spec.ImageDigest {
+				return errors.New("worker readiness returned a mismatched runtime binding")
+			}
 			if status.Healthy {
 				return nil
 			}

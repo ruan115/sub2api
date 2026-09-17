@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	labelManaged     = "com.sub2api.execution.managed"
-	labelSlotID      = "com.sub2api.execution.slot_id"
-	labelAccountHash = "com.sub2api.execution.account_hash"
-	labelEpoch       = "com.sub2api.execution.epoch"
-	labelImageDigest = "com.sub2api.execution.image_digest"
+	labelManaged           = "com.sub2api.execution.managed"
+	labelSlotID            = "com.sub2api.execution.slot_id"
+	labelAccountHash       = "com.sub2api.execution.account_hash"
+	labelEpoch             = "com.sub2api.execution.epoch"
+	labelRuntimeGeneration = "com.sub2api.execution.runtime_generation"
+	labelImageDigest       = "com.sub2api.execution.image_digest"
 )
 
 type Config struct {
@@ -45,7 +46,14 @@ type WorkerBootstrap struct {
 	UpstreamBaseURL     string
 	RuntimePort         uint16
 	AllowFakeActivation bool
+	// These paths name per-instance, independently enrolled material. The
+	// provider never generates, embeds or mounts a shared server private key.
+	IdentityDirectory string
+	RuntimeTrustFile  string
 }
+
+const WorkerIdentityDirectory = "/run/execution/identity"
+const WorkerRuntimeTrustFile = "/run/execution/runtime-ca.pem"
 
 func DefaultConfig() Config {
 	return Config{
@@ -82,6 +90,9 @@ func (c Config) Validate() error {
 }
 
 func (c WorkerBootstrap) Validate() error {
+	if c.IdentityDirectory != WorkerIdentityDirectory || c.RuntimeTrustFile != WorkerRuntimeTrustFile {
+		return errors.New("worker TLS bootstrap requires the fixed per-instance identity and trust paths; certificate installation is not implemented by the Docker provider")
+	}
 	if strings.TrimSpace(c.NodeID) == "" || strings.TrimSpace(c.TicketPublicKey) == "" {
 		return errors.New("node id and ticket public key are required")
 	}
@@ -117,6 +128,10 @@ func New(config Config, engine Engine) (*Provider, error) {
 	// Retain the validated policy, not mutable caller-owned slice storage.
 	config.AllowedSeccompProfiles = append([]string(nil), config.AllowedSeccompProfiles...)
 	config.AllowedAppArmorProfiles = append([]string(nil), config.AllowedAppArmorProfiles...)
+	if config.WorkerBootstrap != nil {
+		bootstrap := *config.WorkerBootstrap
+		config.WorkerBootstrap = &bootstrap
+	}
 	return &Provider{config: config, engine: engine}, nil
 }
 
@@ -166,6 +181,7 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 	environment := []string{
 		"EXECUTION_SLOT_ID=" + spec.SlotID,
 		"EXECUTION_EPOCH=" + strconv.FormatUint(spec.Epoch, 10),
+		"EXECUTION_RUNTIME_GENERATION=" + strconv.FormatUint(spec.RuntimeGeneration, 10),
 		"EXECUTION_EGRESS_PROXY_URL=" + spec.Network.EgressProxyEndpoint,
 		"HTTP_PROXY=" + spec.Network.EgressProxyEndpoint,
 		"HTTPS_PROXY=" + spec.Network.EgressProxyEndpoint,
@@ -183,6 +199,8 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 			"EXECUTION_UPSTREAM_BASE_URL="+strings.TrimSuffix(bootstrap.UpstreamBaseURL, "/"),
 			"EXECUTION_IMAGE_DIGEST="+spec.ImageDigest,
 			"EXECUTION_ALLOW_FAKE_ACTIVATION="+strconv.FormatBool(bootstrap.AllowFakeActivation),
+			"EXECUTION_IDENTITY_DIRECTORY="+bootstrap.IdentityDirectory,
+			"EXECUTION_RUNTIME_TRUST_FILE="+bootstrap.RuntimeTrustFile,
 		)
 		exposedPorts = map[string]struct{}{containerPort: {}}
 	}
@@ -192,11 +210,12 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 		User:        strconv.FormatUint(uint64(spec.Security.RunAsUser), 10) + ":" + strconv.FormatUint(uint64(spec.Security.RunAsUser), 10),
 		StopTimeout: &stopTimeout,
 		Labels: map[string]string{
-			labelManaged:     "true",
-			labelSlotID:      spec.SlotID,
-			labelAccountHash: base.RuntimeAccountID(spec.AccountID),
-			labelEpoch:       strconv.FormatUint(spec.Epoch, 10),
-			labelImageDigest: spec.ImageDigest,
+			labelManaged:           "true",
+			labelSlotID:            spec.SlotID,
+			labelAccountHash:       base.RuntimeAccountID(spec.AccountID),
+			labelEpoch:             strconv.FormatUint(spec.Epoch, 10),
+			labelRuntimeGeneration: strconv.FormatUint(spec.RuntimeGeneration, 10),
+			labelImageDigest:       spec.ImageDigest,
 		},
 		Env:          environment,
 		ExposedPorts: exposedPorts,
@@ -256,12 +275,13 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 	}
 	now := p.config.Now().UTC()
 	return base.Instance{
-		ProviderRef: name,
-		SlotID:      spec.SlotID,
-		Epoch:       spec.Epoch,
-		State:       slot.StateStopped,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ProviderRef:       name,
+		SlotID:            spec.SlotID,
+		Epoch:             spec.Epoch,
+		RuntimeGeneration: spec.RuntimeGeneration,
+		State:             slot.StateStopped,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}, nil
 }
 
@@ -298,6 +318,9 @@ func (p *Provider) existingSlot(ctx context.Context, name string, spec base.Slot
 	}
 	if existing.Epoch != spec.Epoch {
 		return base.Instance{}, fmt.Errorf("slot %q already exists at epoch %d", spec.SlotID, existing.Epoch)
+	}
+	if existing.RuntimeGeneration != spec.RuntimeGeneration {
+		return base.Instance{}, fmt.Errorf("slot %q already exists at another runtime generation", spec.SlotID)
 	}
 	if existing.ImageDigest != spec.ImageDigest {
 		return base.Instance{}, fmt.Errorf("slot %q already exists with a different image digest", spec.SlotID)
@@ -441,6 +464,10 @@ func (p *Provider) statusFromContainer(container Container, providerRef string) 
 	if err != nil || epoch == 0 {
 		return base.Status{}, errors.New("container has an invalid execution epoch label")
 	}
+	generation, err := strconv.ParseUint(container.Config.Labels[labelRuntimeGeneration], 10, 64)
+	if err != nil || generation == 0 {
+		return base.Status{}, errors.New("container has an invalid runtime generation label")
+	}
 	createdAt, err := time.Parse(time.RFC3339Nano, container.Created)
 	if err != nil {
 		return base.Status{}, fmt.Errorf("parse Docker create time: %w", err)
@@ -448,12 +475,13 @@ func (p *Provider) statusFromContainer(container Container, providerRef string) 
 	state, healthy, reason := dockerState(container.State)
 	return base.Status{
 		Instance: base.Instance{
-			ProviderRef: providerRef,
-			SlotID:      container.Config.Labels[labelSlotID],
-			Epoch:       epoch,
-			State:       state,
-			CreatedAt:   createdAt.UTC(),
-			UpdatedAt:   p.config.Now().UTC(),
+			ProviderRef:       providerRef,
+			SlotID:            container.Config.Labels[labelSlotID],
+			Epoch:             epoch,
+			RuntimeGeneration: generation,
+			State:             state,
+			CreatedAt:         createdAt.UTC(),
+			UpdatedAt:         p.config.Now().UTC(),
 		},
 		Healthy:     healthy,
 		Reason:      reason,

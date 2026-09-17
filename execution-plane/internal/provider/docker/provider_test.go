@@ -135,10 +135,11 @@ func (e *fakeEngine) record(value string) {
 
 func dockerSpec() base.SlotSpec {
 	return base.SlotSpec{
-		SlotID:      "slot/customer-1",
-		AccountID:   "secret-account-id",
-		Epoch:       11,
-		ImageDigest: "registry.example/execution-worker@sha256:" + strings.Repeat("a", 64),
+		SlotID:            "slot/customer-1",
+		AccountID:         "secret-account-id",
+		Epoch:             11,
+		RuntimeGeneration: 3,
+		ImageDigest:       "registry.example/execution-worker@sha256:" + strings.Repeat("a", 64),
 		Resources: base.ResourceLimits{
 			CPUMilli: 500, MemoryBytes: 512 << 20, PIDs: 128, TmpfsBytes: 128 << 20,
 		},

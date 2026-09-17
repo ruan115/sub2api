@@ -7,10 +7,11 @@ import (
 
 func validSpec() SlotSpec {
 	return SlotSpec{
-		SlotID:      "slot-1",
-		AccountID:   "account-1",
-		Epoch:       1,
-		ImageDigest: "registry.example/execution-worker@sha256:" + strings.Repeat("a", 64),
+		SlotID:            "slot-1",
+		AccountID:         "account-1",
+		Epoch:             1,
+		RuntimeGeneration: 3,
+		ImageDigest:       "registry.example/execution-worker@sha256:" + strings.Repeat("a", 64),
 		Resources: ResourceLimits{
 			CPUMilli:    500,
 			MemoryBytes: 512 << 20,
@@ -42,6 +43,7 @@ func TestSlotSpecRejectsMutableOrUnsafeRuntime(t *testing.T) {
 		name   string
 		mutate func(*SlotSpec)
 	}{
+		{"missing generation", func(s *SlotSpec) { s.RuntimeGeneration = 0 }},
 		{"root", func(s *SlotSpec) { s.Security.RunAsUser = 0 }},
 		{"writable root", func(s *SlotSpec) { s.Security.ReadOnlyRootFS = false }},
 		{"direct internet", func(s *SlotSpec) { s.Network.DenyDirectInternet = false }},

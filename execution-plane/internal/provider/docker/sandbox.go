@@ -70,6 +70,10 @@ func (p *Provider) validateSandbox(container Container) error {
 	if err != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != labels[labelEpoch] {
 		return errors.New("container sandbox epoch is invalid")
 	}
+	generation, err := strconv.ParseUint(labels[labelRuntimeGeneration], 10, 64)
+	if err != nil || generation == 0 || strconv.FormatUint(generation, 10) != labels[labelRuntimeGeneration] {
+		return errors.New("container sandbox runtime generation is invalid")
+	}
 	user := strings.Split(container.Config.User, ":")
 	if len(user) != 2 || !canonicalNonRootID(user[0]) || user[0] != user[1] {
 		return errors.New("container sandbox requires a canonical non-root user and group")
@@ -130,6 +134,8 @@ func (p *Provider) validateSandbox(container Container) error {
 			"EXECUTION_IMAGE_DIGEST": labels[labelImageDigest], "EXECUTION_TICKET_PUBLIC_KEY": bootstrap.TicketPublicKey,
 			"EXECUTION_LISTEN_ADDRESS": "0.0.0.0:" + port, "EXECUTION_UPSTREAM_BASE_URL": strings.TrimSuffix(bootstrap.UpstreamBaseURL, "/"),
 			"EXECUTION_ALLOW_FAKE_ACTIVATION": strconv.FormatBool(bootstrap.AllowFakeActivation),
+			"EXECUTION_IDENTITY_DIRECTORY":    bootstrap.IdentityDirectory,
+			"EXECUTION_RUNTIME_TRUST_FILE":    bootstrap.RuntimeTrustFile,
 		}
 		for name, value := range expected {
 			if env[name] != value {
@@ -228,7 +234,8 @@ func sandboxEnvironment(container Container) (map[string]string, error) {
 			return nil, errors.New("container environment contains a forbidden secret field")
 		}
 	}
-	if env["EXECUTION_SLOT_ID"] != container.Config.Labels[labelSlotID] || env["EXECUTION_EPOCH"] != container.Config.Labels[labelEpoch] {
+	if env["EXECUTION_SLOT_ID"] != container.Config.Labels[labelSlotID] || env["EXECUTION_EPOCH"] != container.Config.Labels[labelEpoch] ||
+		env["EXECUTION_RUNTIME_GENERATION"] != container.Config.Labels[labelRuntimeGeneration] {
 		return nil, errors.New("container environment identity is inconsistent")
 	}
 	proxy := env["EXECUTION_EGRESS_PROXY_URL"]

@@ -83,6 +83,9 @@ type Action struct {
 	ExecutionEpoch    uint64
 	ImageDigest       string
 	DesiredGeneration uint64
+	// RuntimeGeneration is the immutable generation of the target assignment.
+	// Cleanup can target an old runtime under a newer desired-state intent.
+	RuntimeGeneration uint64
 	IdempotencyKey    string
 }
 
@@ -263,6 +266,12 @@ func newAction(kind ActionKind, input Input) Action {
 	if input.Assignment != nil {
 		action.NodeID = input.Assignment.NodeID
 		action.ExecutionEpoch = input.Assignment.ExecutionEpoch
+		action.RuntimeGeneration = input.Assignment.DesiredGeneration
+		if kind == ActionDrain || kind == ActionDestroy || kind == ActionInspect {
+			// The image is part of the target assignment too. An upgraded desired
+			// image must not poison cleanup observations for the old instance.
+			action.ImageDigest = input.Assignment.ImageDigest
+		}
 	}
 	if kind != ActionNone {
 		actualGeneration := uint64(0)

@@ -101,7 +101,8 @@ func TestRuntimeActivationExecutorGetsProcessKeyAndActivatesThroughSink(t *testi
 	implementation := providerfake.New()
 	instance, err := implementation.Create(context.Background(), provider.SlotSpec{
 		SlotID: "slot-10380", AccountID: "account-10380", Epoch: 19, ImageDigest: imageDigest,
-		Resources: resources, Security: security, Network: network,
+		RuntimeGeneration: 3,
+		Resources:         resources, Security: security, Network: network,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +128,8 @@ func TestRuntimeActivationExecutorGetsProcessKeyAndActivatesThroughSink(t *testi
 	}
 	keyResult := executor.CredentialTransportKey(context.Background(), &executionv1.CredentialKeyCommand{
 		CommandId: "cmd-key", SlotId: "slot-10380", AccountId: "account-10380", ExecutionEpoch: 19,
-		ImageDigest: imageDigest, Deadline: timestamppb.New(now.Add(time.Minute)),
+		DesiredGeneration: 3,
+		ImageDigest:       imageDigest, Deadline: timestamppb.New(now.Add(time.Minute)),
 	})
 	if !keyResult.GetSucceeded() || credential.ValidateRecipientKey(keyResult.GetCredentialTransportKey().GetKeyId(), keyResult.GetCredentialTransportKey().GetPublicKey()) != nil ||
 		starter.spec.AccountID != "account-10380" || runtime.closed != 1 {
@@ -137,7 +139,8 @@ func TestRuntimeActivationExecutorGetsProcessKeyAndActivatesThroughSink(t *testi
 	sink := &capturingActivationSink{}
 	activationResult := executor.SecureActivate(context.Background(), &executionv1.SecureActivationCommand{
 		CommandId: "cmd-activate", SlotId: "slot-10380", AccountId: "account-10380", ExecutionEpoch: 19,
-		ImageDigest: imageDigest, CredentialLeaseId: "lease-10380", ProxyLeaseId: "proxy-10380",
+		DesiredGeneration: 3,
+		ImageDigest:       imageDigest, CredentialLeaseId: "lease-10380", ProxyLeaseId: "proxy-10380",
 		EncryptedCredentialBundle: bundle, Deadline: timestamppb.New(now.Add(time.Minute)),
 	}, sink)
 	if !activationResult.GetSucceeded() || runtime.closed != 2 || runtime.committedID != "55555555-6666-4777-8888-999999999999" ||
@@ -150,7 +153,8 @@ func TestRuntimeActivationExecutorFailsClosedWithoutSinkOrOnImageMismatch(t *tes
 	now := time.Now().UTC()
 	command := &executionv1.SecureActivationCommand{
 		CommandId: "cmd-activate", SlotId: "slot-10380", AccountId: "account-10380", ExecutionEpoch: 19,
-		ImageDigest: "sha256:" + strings.Repeat("f", 64), CredentialLeaseId: "lease-10380", ProxyLeaseId: "proxy-10380",
+		DesiredGeneration: 3,
+		ImageDigest:       "sha256:" + strings.Repeat("f", 64), CredentialLeaseId: "lease-10380", ProxyLeaseId: "proxy-10380",
 		EncryptedCredentialBundle: []byte("ciphertext"), Deadline: timestamppb.New(now.Add(time.Minute)),
 	}
 	result := (&RuntimeActivationExecutor{}).SecureActivate(context.Background(), command, nil)
@@ -167,7 +171,8 @@ func TestRuntimeActivationExecutorFailsClosedWithoutSinkOrOnImageMismatch(t *tes
 	implementation := providerfake.New()
 	instance, err := implementation.Create(context.Background(), provider.SlotSpec{
 		SlotID: "slot-10380", AccountID: "account-10380", Epoch: 19,
-		ImageDigest: "sha256:" + strings.Repeat("e", 64), Resources: resources, Security: security, Network: network,
+		RuntimeGeneration: 3,
+		ImageDigest:       "sha256:" + strings.Repeat("e", 64), Resources: resources, Security: security, Network: network,
 	})
 	if err != nil {
 		t.Fatal(err)

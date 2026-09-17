@@ -31,6 +31,7 @@ type SecureOnboardingBinding struct {
 	SlotID              string
 	AccountID           string
 	ExecutionEpoch      uint64
+	DesiredGeneration   uint64
 	ImageDigest         string
 	CredentialLeaseID   string
 	ProxyLeaseID        string
@@ -74,7 +75,8 @@ func (b *SecureOnboardingCommandBuilder) CredentialKeyCommand(binding SecureOnbo
 			CredentialKeyCommand: &executionv1.CredentialKeyCommand{
 				CommandId: binding.KeyCommandID, SlotId: binding.SlotID, AccountId: binding.AccountID,
 				ExecutionEpoch: binding.ExecutionEpoch, ImageDigest: binding.ImageDigest,
-				Deadline: timestamppb.New(binding.Deadline.UTC()),
+				DesiredGeneration: binding.DesiredGeneration,
+				Deadline:          timestamppb.New(binding.Deadline.UTC()),
 			},
 		},
 	}, nil
@@ -134,6 +136,7 @@ func (b *SecureOnboardingCommandBuilder) SecureActivationCommand(
 			SecureActivationCommand: &executionv1.SecureActivationCommand{
 				CommandId: binding.ActivationCommandID, SlotId: binding.SlotID, AccountId: binding.AccountID,
 				ExecutionEpoch: binding.ExecutionEpoch, ImageDigest: binding.ImageDigest,
+				DesiredGeneration: binding.DesiredGeneration,
 				CredentialLeaseId: binding.CredentialLeaseID, ProxyLeaseId: binding.ProxyLeaseID,
 				EncryptedCredentialBundle: sealed, Deadline: timestamppb.New(binding.Deadline.UTC()),
 			},
@@ -160,7 +163,7 @@ func (b *SecureOnboardingCommandBuilder) validateBindingIdentity(binding SecureO
 		credential.ValidateTransportID(binding.AccountID) != nil ||
 		credential.ValidateTransportID(binding.CredentialLeaseID) != nil ||
 		credential.ValidateTransportID(binding.ProxyLeaseID) != nil ||
-		binding.ExecutionEpoch == 0 || !onboardingImageDigest.MatchString(binding.ImageDigest) || binding.Deadline.IsZero() {
+		binding.ExecutionEpoch == 0 || binding.DesiredGeneration == 0 || !onboardingImageDigest.MatchString(binding.ImageDigest) || binding.Deadline.IsZero() {
 		return ErrSecureOnboardingCommand
 	}
 	return nil

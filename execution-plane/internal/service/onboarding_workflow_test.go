@@ -61,6 +61,9 @@ func TestSecureOnboardingWorkflowBridgesDurableIntentToExactActivation(t *testin
 	if bytes.Contains(response.GetSecureActivationCommand().GetEncryptedCredentialBundle(), []byte(secret)) {
 		t.Fatal("activation command contains durable intent plaintext")
 	}
+	if response.GetSecureActivationCommand().GetDesiredGeneration() != plan.DesiredGeneration {
+		t.Fatal("activation command lost the authoritative workflow generation")
+	}
 	if authority.calls != 2 {
 		t.Fatalf("activation authority calls = %d, want 2", authority.calls)
 	}
@@ -111,7 +114,8 @@ func TestSecureOnboardingWorkflowRejectsKeyResultBeforeIntentExposure(t *testing
 		Binding: SecureOnboardingBinding{
 			KeyCommandID: "key-1", ActivationCommandID: "activate-1", SlotID: "slot-1", AccountID: "account-1",
 			ExecutionEpoch: 1, ImageDigest: "sha256:" + strings.Repeat("a", 64), CredentialLeaseID: "lease-1",
-			ProxyLeaseID: "proxy-1", Deadline: now.Add(time.Minute),
+			DesiredGeneration: 1,
+			ProxyLeaseID:      "proxy-1", Deadline: now.Add(time.Minute),
 		},
 	}
 	_, err := workflow.PrepareActivation(context.Background(), plan, &executionv1.CommandResult{CommandId: "wrong-command"})

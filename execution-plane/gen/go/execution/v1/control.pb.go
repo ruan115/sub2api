@@ -1453,6 +1453,7 @@ type SecureActivationCommand struct {
 	ProxyLeaseId              string                 `protobuf:"bytes,7,opt,name=proxy_lease_id,json=proxyLeaseId,proto3" json:"proxy_lease_id,omitempty"`
 	EncryptedCredentialBundle []byte                 `protobuf:"bytes,8,opt,name=encrypted_credential_bundle,json=encryptedCredentialBundle,proto3" json:"encrypted_credential_bundle,omitempty"`
 	Deadline                  *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=deadline,proto3" json:"deadline,omitempty"`
+	DesiredGeneration         uint64                 `protobuf:"varint,10,opt,name=desired_generation,json=desiredGeneration,proto3" json:"desired_generation,omitempty"`
 	unknownFields             protoimpl.UnknownFields
 	sizeCache                 protoimpl.SizeCache
 }
@@ -1548,6 +1549,13 @@ func (x *SecureActivationCommand) GetDeadline() *timestamppb.Timestamp {
 		return x.Deadline
 	}
 	return nil
+}
+
+func (x *SecureActivationCommand) GetDesiredGeneration() uint64 {
+	if x != nil {
+		return x.DesiredGeneration
+	}
+	return 0
 }
 
 type ControlCredentialCommit struct {
@@ -1994,7 +2002,7 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"error_code\x18\x05 \x01(\tR\terrorCode\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x06 \x01(\tR\trequestId\"\x8a\x03\n" +
+	"request_id\x18\x06 \x01(\tR\trequestId\"\xb9\x03\n" +
 	"\x17SecureActivationCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x17\n" +
@@ -2006,7 +2014,9 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"\x13credential_lease_id\x18\x06 \x01(\tR\x11credentialLeaseId\x12$\n" +
 	"\x0eproxy_lease_id\x18\a \x01(\tR\fproxyLeaseId\x12>\n" +
 	"\x1bencrypted_credential_bundle\x18\b \x01(\fR\x19encryptedCredentialBundle\x126\n" +
-	"\bdeadline\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\"\xb3\x02\n" +
+	"\bdeadline\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\x12-\n" +
+	"\x12desired_generation\x18\n" +
+	" \x01(\x04R\x11desiredGeneration\"\xb3\x02\n" +
 	"\x17ControlCredentialCommit\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12'\n" +

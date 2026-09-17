@@ -16,7 +16,8 @@
    InsecureSkipVerify。服务端 TLS1.3、RequireAndVerifyClientCert、唯一正确 node URI。
 3. 将控制权威 desired_generation 显式传进 SlotSpec、Docker 环境和 worker，
    与 epoch 分开。Controller 在创建实例前校验 TLS 配置，原拨号改为 mTLS，
-   用带票据 INSPECT 确認实际连接而非仅建立 lazy client。worker 缺身份/证书/信任根
+   等待 gRPC Ready 确认实际握手而非仅建立 lazy client（当前协议没有 Inspect RPC，
+   不能为探活额外消费单 scope 业务票或扩大授权）。worker 缺身份/证书/信任根
    时不监听，包括 fake activation；不允许明文回退。票据、scope、防重放及既有
    lease/session fencing 保留，TLS 不能取代业务授权。
 4. 在真实 TCP 上组合既有 RunProcess / Controller 验证：正确身份+票据通过；
@@ -47,3 +48,12 @@ ready 前 CSR/证书投递、私有卷生命周期、CLI 原生服务与此 Go w
 只改本地代码及本任务170测试资源；43仅SSH跳板，不访问216生产，不更换宿主Bun，
 不改现有业务容器/网络/防火墙/UI/数据，不用线上凭据，不push。
 保留暂停中的 `image/lab/build.py` 和 `image/runtimekit/` WIP。
+
+## 本轮结果：S2b1
+
+证书安装和当前Go worker/Controller真实TLS接线已实现并独立review，在170无网络
+受限容器三组测试各三遍通过；完整离线race/vet和恢复工具回归通过。
+[输入摘要、正反例及清理证据](verification.md#s2b1证书安装与实际组件mtls)。
+review另修意图代与清理目标代/旧image混淆，不让换代卡死旧实例清理。
+K3/K4整体未关闭，总体32%不变；S2b2继续补本计划列明的认证发证、启动前投递及
+实际host-agent/双实例装配。旧Docker E2E在副作用前明确失败，不能当作绿色验收。

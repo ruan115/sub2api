@@ -72,7 +72,7 @@ func (e *RuntimeActivationExecutor) CredentialTransportKey(ctx context.Context, 
 		return failedCommandResult("", "", 1, "invalid_command", "credential-key command is invalid", nil)
 	}
 	observation := missingObservation(command.GetSlotId(), command.GetExecutionEpoch(), command.GetImageDigest())
-	if e == nil || ctx == nil || e.validateBinding(command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(), command.GetDeadline()) != nil {
+	if e == nil || ctx == nil || e.validateBinding(command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetDesiredGeneration(), command.GetImageDigest(), command.GetDeadline()) != nil {
 		return failedCommandResult(command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), "invalid_command", "credential-key command is invalid", observation)
 	}
 	commandContext, cancel := context.WithDeadline(ctx, command.GetDeadline().AsTime())
@@ -81,7 +81,7 @@ func (e *RuntimeActivationExecutor) CredentialTransportKey(ctx context.Context, 
 		return failedCommandResult(command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), "command_deadline_exceeded", "credential-key command deadline exceeded", observation)
 	}
 	runtime, observation, err := e.startVerifiedRuntime(
-		commandContext, command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(),
+		commandContext, command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetDesiredGeneration(), command.GetImageDigest(),
 	)
 	if err != nil {
 		return e.failure(commandContext, command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), command.GetImageDigest(), "key_discovery_failed")
@@ -104,7 +104,7 @@ func (e *RuntimeActivationExecutor) SecureActivate(ctx context.Context, command 
 		return failedCommandResult("", "", 1, "invalid_command", "secure activation command is invalid", nil)
 	}
 	observation := missingObservation(command.GetSlotId(), command.GetExecutionEpoch(), command.GetImageDigest())
-	if e == nil || ctx == nil || sink == nil || e.validateBinding(command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(), command.GetDeadline()) != nil ||
+	if e == nil || ctx == nil || sink == nil || e.validateBinding(command.GetCommandId(), command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetDesiredGeneration(), command.GetImageDigest(), command.GetDeadline()) != nil ||
 		credential.ValidateTransportID(command.GetCredentialLeaseId()) != nil || credential.ValidateTransportID(command.GetProxyLeaseId()) != nil ||
 		len(command.GetEncryptedCredentialBundle()) == 0 || len(command.GetEncryptedCredentialBundle()) > maxActivationBundleBytes {
 		return failedCommandResult(command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), "invalid_command", "secure activation command is invalid", observation)
@@ -115,7 +115,7 @@ func (e *RuntimeActivationExecutor) SecureActivate(ctx context.Context, command 
 		return failedCommandResult(command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), "command_deadline_exceeded", "secure activation command deadline exceeded", observation)
 	}
 	runtime, _, err := e.startVerifiedRuntime(
-		commandContext, command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetImageDigest(),
+		commandContext, command.GetSlotId(), command.GetAccountId(), command.GetExecutionEpoch(), command.GetDesiredGeneration(), command.GetImageDigest(),
 	)
 	if err != nil {
 		return e.failure(commandContext, command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), command.GetImageDigest(), "secure_activation_failed")
@@ -148,32 +148,36 @@ func (e *RuntimeActivationExecutor) startVerifiedRuntime(
 	slotID string,
 	accountID string,
 	epoch uint64,
+	generation uint64,
 	imageDigest string,
 ) (activationRuntime, *executionv1.SlotObservation, error) {
-	runtime, err := e.starter.StartRuntime(ctx, e.spec(slotID, accountID, epoch, imageDigest))
+	runtime, err := e.starter.StartRuntime(ctx, e.spec(slotID, accountID, epoch, generation, imageDigest))
 	if err != nil {
 		return nil, nil, err
 	}
-	observation := e.observe(ctx, slotID, epoch, imageDigest)
-	if !observation.GetHealthy() || observation.GetImageDigest() != imageDigest {
+	status, inspectErr := e.inspector.InspectSlot(ctx, slotID)
+	observation := observationFromStatus(status)
+	if inspectErr != nil || status.SlotID != slotID || status.Epoch != epoch || status.RuntimeGeneration != generation ||
+		!observation.GetHealthy() || observation.GetImageDigest() != imageDigest {
 		_ = runtime.Close()
 		return nil, observation, errors.New("runtime binding verification failed")
 	}
 	return runtime, observation, nil
 }
 
-func (e *RuntimeActivationExecutor) validateBinding(commandID, slotID, accountID string, epoch uint64, imageDigest string, deadline *timestamppb.Timestamp) error {
+func (e *RuntimeActivationExecutor) validateBinding(commandID, slotID, accountID string, epoch, generation uint64, imageDigest string, deadline *timestamppb.Timestamp) error {
 	if credential.ValidateTransportID(commandID) != nil || credential.ValidateTransportID(slotID) != nil ||
 		credential.ValidateTransportID(accountID) != nil || epoch == 0 || deadline == nil || deadline.CheckValid() != nil {
 		return errors.New("activation command binding is invalid")
 	}
-	return e.spec(slotID, accountID, epoch, imageDigest).Validate()
+	return e.spec(slotID, accountID, epoch, generation, imageDigest).Validate()
 }
 
-func (e *RuntimeActivationExecutor) spec(slotID, accountID string, epoch uint64, imageDigest string) provider.SlotSpec {
+func (e *RuntimeActivationExecutor) spec(slotID, accountID string, epoch, generation uint64, imageDigest string) provider.SlotSpec {
 	return provider.SlotSpec{
 		SlotID: slotID, AccountID: accountID, Epoch: epoch, ImageDigest: imageDigest,
-		Resources: e.resources, Security: e.security, Network: e.network,
+		RuntimeGeneration: generation,
+		Resources:         e.resources, Security: e.security, Network: e.network,
 	}
 }
 

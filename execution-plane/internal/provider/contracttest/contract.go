@@ -21,12 +21,17 @@ func Exercise(t *testing.T, factory func() provider.ExecutionProvider, spec prov
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if instance.ProviderRef == "" || instance.SlotID != spec.SlotID || instance.Epoch != spec.Epoch {
+	if instance.ProviderRef == "" || instance.SlotID != spec.SlotID || instance.Epoch != spec.Epoch || instance.RuntimeGeneration != spec.RuntimeGeneration {
 		t.Fatalf("create returned invalid identity: %+v", instance)
 	}
 	repeated, err := implementation.Create(ctx, spec)
 	if err != nil || repeated.ProviderRef != instance.ProviderRef {
 		t.Fatalf("create is not idempotent: instance=%+v err=%v", repeated, err)
+	}
+	stale := spec
+	stale.RuntimeGeneration++
+	if _, err := implementation.Create(ctx, stale); err == nil {
+		t.Fatal("create adopted another runtime generation")
 	}
 
 	if err := implementation.Start(ctx, instance.ProviderRef); err != nil {

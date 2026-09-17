@@ -190,3 +190,27 @@ func testAssignment(actual ActualState, healthy bool) *Assignment {
 		DesiredGeneration: 3, ActualGeneration: 2, ImageDigest: "sha256:" + strings.Repeat("a", 64), ActualState: actual, Healthy: healthy,
 	}
 }
+
+func TestUpgradeCleanupTargetsOldImageAndGeneration(t *testing.T) {
+	for _, currentGeneration := range []uint64{3, 4} {
+		for _, tc := range []struct {
+			actual ActualState
+			want   ActionKind
+		}{
+			{ActualRunning, ActionDrain}, {ActualCreated, ActionDrain},
+			{ActualDraining, ActionInspect}, {ActualStopped, ActionDestroy},
+			{ActualDrained, ActionDestroy}, {ActualMissing, ActionRelease},
+		} {
+			input := Input{Slot: testSlot(DesiredReady), Assignment: testAssignment(tc.actual, true)}
+			input.Slot.DesiredGeneration = currentGeneration
+			input.Slot.ImageDigest = "sha256:" + strings.Repeat("b", 64)
+			action, err := Plan(input)
+			if err != nil || action.Kind != tc.want || action.DesiredGeneration != currentGeneration || action.RuntimeGeneration != 3 {
+				t.Fatalf("upgraded intent revived an old assignment: action=%+v err=%v", action, err)
+			}
+			if (tc.want == ActionDrain || tc.want == ActionDestroy || tc.want == ActionInspect) && action.ImageDigest != input.Assignment.ImageDigest {
+				t.Fatal("cleanup/inspect command used the new desired image for the old instance")
+			}
+		}
+	}
+}

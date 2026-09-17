@@ -58,8 +58,8 @@ def inputs(lab):
     return entries
 
 
-def probe_script(entries, *, require_empty_home=True, smoke=True, memory_bytes=2147483648):
-    """Shared UID1000 isolation/hash gates; identity probes retain a nonempty home."""
+def isolation_script(*, require_empty_home=True, memory_bytes=2147483648):
+    """Read back kernel/resource gates before running reviewed probe code."""
     if type(memory_bytes) is not int or memory_bytes not in (1024**3, 2 * 1024**3):
         raise ValueError("cli_probe_memory_rejected")
     script = """set -eu
@@ -79,6 +79,12 @@ cd /opt/isthmus-probe
 """.replace("MEMORY_BYTES", str(memory_bytes))
     if require_empty_home:
         script += 'test -z "$(find /home/claude -mindepth 1 -print -quit)"\n'
+    return script
+
+
+def probe_script(entries, *, require_empty_home=True, smoke=True, memory_bytes=2147483648):
+    """Shared UID1000 isolation/hash gates; identity probes retain a nonempty home."""
+    script = isolation_script(require_empty_home=require_empty_home, memory_bytes=memory_bytes)
     # Paths come solely from SOURCE_FILES and the checked-in binary lock (or
     # the identity harness's one explicitly checked helper binary).
     allowed = {"app/" + path for path in SOURCE_FILES} | {"bin/claude", "bin/bun-1.4.2", "bin/instance-identity"}

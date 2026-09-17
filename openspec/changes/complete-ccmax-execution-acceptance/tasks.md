@@ -2,7 +2,7 @@
 
 总计划：[CCMAX execution acceptance v2](../../../docs/plans/ccmax-execution-acceptance-v2.md)。
 
-用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收26%，镜像专项6/15=40%。S1b仅新增I2的3分，不关闭I3/I4/I5/N3。不再把VM0a–d数量当整体进度。
+用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收32%，镜像专项6/15=40%、运行服务12/20=60%、身份2/10=20%。R3和K2已关闭；S2b1安装/mTLS原生组件测试通过但K3/K4完整门槛仍开放，不提前加分。
 
 沿用Sub2计价/倍率/产品权限，按 [S1–S6聚焦阶段](isthmus-focused-stages.md) 交付。S1a后，S1b已用真实9包锁、原生Linux构建和新context/空builder-cache重跑关闭I2；[实证](verification.md#s1b原生linux基础镜像构建)。后续C/L仍是桥接usage/执行生命周期，不重做用户计费。
 
@@ -14,6 +14,9 @@
 - [ ] VM0b Linux 实际出口防火墙/namespace、宿主/跨槽/metadata/DNS/IPv6 拒绝及失效回收。
   - 局部前置：`recoverykit lab inspect` 只读专用端点检查已实现并 review；45项合成用例/十轮重复及236项完整Python回归通过。没有连接实际Docker、启动VM或验证防火墙，不勾选VM0b/N3、不增加23%分数。见 [预检结果](verification.md#n3前置专用实验端点只读预检)。
 - [ ] VM0c 每实例身份材料、生产 worker mTLS 与换代/重放拒绝；按明确客户端版本验证 TLS 特征。
+  - [x] S2a 两实际实例本地独立私钥/CSR，K2通过。
+  - [x] S2b1 原子证书安装、真实worker/Controller mTLS与票据负例，170单容器原生三遍及review/race/vet通过；[实证](verification.md#s2b1证书安装与实际组件mtls)。
+  - [ ] S2b2 受认证签发/启动前证书投递、host-agent装配、双实例mTLS/lease失效组合；不以S2b1关闭VM0c。
 - [ ] VM0d 当前组件实际隔离整链，不复用旧 VM/旧凭据或局部 PASS 冒充完成。
 
 ## A：HTTP worker 增量转发

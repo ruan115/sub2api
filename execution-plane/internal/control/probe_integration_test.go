@@ -75,7 +75,7 @@ func TestRuntimeProbeTLSInspectRefreshReconnectAndUnhealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	implementation := &inspectOnlyProbeProvider{status: provider.Status{Instance: provider.Instance{ProviderRef: "container-1", SlotID: "slot-1", Epoch: assignment.ExecutionEpoch, State: slot.StateReady}, Healthy: true, ImageDigest: image}}
+	implementation := &inspectOnlyProbeProvider{status: provider.Status{Instance: provider.Instance{ProviderRef: "container-1", SlotID: "slot-1", Epoch: assignment.ExecutionEpoch, RuntimeGeneration: assignment.DesiredGeneration, State: slot.StateReady}, Healthy: true, ImageDigest: image}}
 	executor, err := hostagent.NewSlotCommandExecutor(hostagent.SlotCommandExecutorConfig{
 		Provider: implementation, Resources: provider.ResourceLimits{CPUMilli: 100, MemoryBytes: 1 << 20, PIDs: 16, TmpfsBytes: 1 << 20},
 		Security:     provider.SecurityPolicy{RunAsUser: 65532, ReadOnlyRootFS: true, NoNewPrivileges: true, DropAllCapabilities: true, SeccompProfile: "worker", AppArmorProfile: "worker"},

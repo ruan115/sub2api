@@ -310,7 +310,8 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 	keyCommand := &executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_CredentialKeyCommand{CredentialKeyCommand: &executionv1.CredentialKeyCommand{
 			CommandId: "cmd-key-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: assignment.ExecutionEpoch,
-			ImageDigest: "sha256:" + strings.Repeat("d", 64), Deadline: timestamppb.New(test.now.Add(time.Minute)),
+			DesiredGeneration: 1,
+			ImageDigest:       "sha256:" + strings.Repeat("d", 64), Deadline: timestamppb.New(test.now.Add(time.Minute)),
 		}},
 	}
 	if err := test.server.Dispatch(context.Background(), "srv74", keyCommand); err != nil {
@@ -352,7 +353,8 @@ func TestSecureActivationControlCommandsAndCredentialCommitBridge(t *testing.T) 
 	activationCommand := &executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
 			CommandId: "cmd-activate-1", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: assignment.ExecutionEpoch,
-			ImageDigest: "sha256:" + strings.Repeat("d", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
+			DesiredGeneration: 1,
+			ImageDigest:       "sha256:" + strings.Repeat("d", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
 			EncryptedCredentialBundle: []byte("process-bound-ciphertext"), Deadline: timestamppb.New(test.now.Add(time.Minute)),
 		}},
 	}
@@ -405,7 +407,8 @@ func TestSecureActivationDispatchRequiresDependenciesAndCapability(t *testing.T)
 	response := &executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_SecureActivationCommand{SecureActivationCommand: &executionv1.SecureActivationCommand{
 			CommandId: "cmd-activate", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 1,
-			ImageDigest: "sha256:" + strings.Repeat("e", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
+			DesiredGeneration: 1,
+			ImageDigest:       "sha256:" + strings.Repeat("e", 64), CredentialLeaseId: "lease-1", ProxyLeaseId: "proxy-1",
 			EncryptedCredentialBundle: []byte("ciphertext"), Deadline: timestamppb.New(time.Now().Add(time.Minute)),
 		}},
 	}
@@ -426,7 +429,8 @@ func TestSecureActivationDispatchRequiresDependenciesAndCapability(t *testing.T)
 	keyResponse := &executionv1.NodeControlServiceControlResponse{
 		Event: &executionv1.NodeControlServiceControlResponse_CredentialKeyCommand{CredentialKeyCommand: &executionv1.CredentialKeyCommand{
 			CommandId: "cmd-key", SlotId: "slot-1", AccountId: "account-1", ExecutionEpoch: 1,
-			ImageDigest: "sha256:" + strings.Repeat("e", 64), Deadline: timestamppb.New(time.Now().Add(time.Minute)),
+			DesiredGeneration: 1,
+			ImageDigest:       "sha256:" + strings.Repeat("e", 64), Deadline: timestamppb.New(time.Now().Add(time.Minute)),
 		}},
 	}
 	server.sessions["srv74"].capabilities = map[string]struct{}{secureActivationCapability: {}}

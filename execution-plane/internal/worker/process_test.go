@@ -30,6 +30,9 @@ func TestProcessConfigAllowsSecureActivationAndValidatesOnboarding(t *testing.T)
 func processConfigEnvironment() map[string]string {
 	publicKey := ed25519.PublicKey(strings.Repeat("k", ed25519.PublicKeySize))
 	return map[string]string{
+		"EXECUTION_RUNTIME_GENERATION":    "11",
+		"EXECUTION_IDENTITY_DIRECTORY":    "/home/worker/identity",
+		"EXECUTION_RUNTIME_TRUST_FILE":    "/etc/execution/runtime-ca.pem",
 		"EXECUTION_EPOCH":                 "7",
 		"EXECUTION_TICKET_PUBLIC_KEY":     base64.RawStdEncoding.EncodeToString(publicKey),
 		"EXECUTION_UPSTREAM_BASE_URL":     "https://api.anthropic.com",
@@ -105,6 +108,7 @@ func TestApplyActiveCredentialBuildsOnlyCanonicalUpstreamAuth(t *testing.T) {
 func TestProcessRejectsPlaintextOnboardingButLibraryFixtureRemainsAvailable(t *testing.T) {
 	baseURL, _ := url.Parse("https://api.anthropic.com")
 	config := ProcessConfig{
+		RuntimeGeneration: 11, IdentityDirectory: "/home/worker/identity", RuntimeTrustFile: "/etc/execution/runtime-ca.pem",
 		ListenAddress:   "127.0.0.1:8093",
 		Identity:        Identity{AccountID: "95a7c9f1f7654af7a836061a6561b839", SlotID: "slot-1", NodeID: "srv74", Epoch: 1},
 		TicketPublicKey: ed25519.PublicKey(strings.Repeat("p", ed25519.PublicKeySize)),

@@ -39,7 +39,7 @@ func TestSecureOnboardingCommandBuilderSealsProcessBoundPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if command := keyCommand.GetCredentialKeyCommand(); command.GetCommandId() != binding.KeyCommandID || command.GetSlotId() != binding.SlotID ||
-		!command.GetDeadline().AsTime().Equal(binding.Deadline) {
+		!command.GetDeadline().AsTime().Equal(binding.Deadline) || command.GetDesiredGeneration() != binding.DesiredGeneration {
 		t.Fatalf("credential-key command = %+v", command)
 	}
 	workerKeyID, workerPublicKey, err := workerRecipient.PublicKey()
@@ -64,7 +64,7 @@ func TestSecureOnboardingCommandBuilderSealsProcessBoundPackage(t *testing.T) {
 		t.Fatal("plaintext onboarding input was not consumed")
 	}
 	command := activationResponse.GetSecureActivationCommand()
-	if command == nil || command.GetCommandId() != binding.ActivationCommandID || bytes.Contains(command.GetEncryptedCredentialBundle(), []byte(secret)) {
+	if command == nil || command.GetCommandId() != binding.ActivationCommandID || command.GetDesiredGeneration() != binding.DesiredGeneration || bytes.Contains(command.GetEncryptedCredentialBundle(), []byte(secret)) {
 		t.Fatalf("secure activation command = %+v", command)
 	}
 	plaintext, err := workerRecipient.Open(context.Background(), command.GetEncryptedCredentialBundle(), credential.TransportContext{
@@ -125,7 +125,8 @@ func testSecureOnboardingBinding(now time.Time) SecureOnboardingBinding {
 	return SecureOnboardingBinding{
 		KeyCommandID: "cmd-key-10380", ActivationCommandID: "cmd-activate-10380",
 		SlotID: "slot-10380", AccountID: "account-10380", ExecutionEpoch: 19,
-		ImageDigest: "sha256:" + strings.Repeat("a", 64), CredentialLeaseID: "lease-10380",
+		DesiredGeneration: 3,
+		ImageDigest:       "sha256:" + strings.Repeat("a", 64), CredentialLeaseID: "lease-10380",
 		ProxyLeaseID: "proxy-10380", Deadline: now.Add(2 * time.Minute),
 	}
 }
