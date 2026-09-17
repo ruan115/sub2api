@@ -18,11 +18,11 @@
 - 分数不是代码量、工时估计、生产准备度或“与线上百分之几相同”。即使99分，未满足安全停止线仍不能启用新执行面。
 - 每次阶段交付固定汇报：总体百分比、镜像专项百分比、本轮关闭项、仍缺项、测试/review、commit。未完整关闭子门槛时分数可以不变。
 
-## 当前总览：23%
+## 当前总览：26%
 
 | 模块 | 权重 | 已验收 | 模块完成率 |
 | --- | ---: | ---: | ---: |
-| I 可复建 isthmus-vm-base 及依赖 | 15 | 3 | 20% |
+| I 可复建 isthmus-vm-base 及依赖 | 15 | 6 | 40% |
 | R 实际 isthmus/CLI 运行服务 | 20 | 8 | 40% |
 | N 出口与实例隔离 | 20 | 8 | 40% |
 | K 独立机器标识/密钥/证书/mTLS | 10 | 0 | 0% |
@@ -30,12 +30,12 @@
 | C CCMAX 调用链接通 | 10 | 0 | 0% |
 | L 凭据与完整生命周期 | 10 | 0 | 0% |
 | E 整体验收及可恢复交付 | 5 | 0 | 0% |
-| **总计** | **100** | **23** | **23%** |
+| **总计** | **100** | **26** | **26%** |
 
 ### I：可复建镜像（每项3分）
 
 - [x] I1 镜像职责、外部卷、静态来源和未证实差异基线；[证据](../../recovery/docs/vm-identity-tls-baseline-2026-09-16.md)。只奖励基线，不声称镜像已重建。
-- [ ] I2 可审查 Dockerfile、隔离构建入口及构建失败/无隐式代理或秘密注入测试。
+- [x] I2 可审查 Dockerfile、隔离构建入口及构建失败/无隐式代理或秘密注入测试；[S1b实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1b原生linux基础镜像构建)。本次入口为共存测试宿主上的受限可信构建，官方包特权builder例外不代表不可信工作负载隔离、N3或完整runtime已通过。
 - [ ] I3 app/Bun/CLI/工具版本与每项哈希固定，允许来源及双架构兼容边界明确；不使用 latest 或不审查原件。
 - [ ] I4 无秘密的 home/配置/卷初始化合同，所有权/权限、跨实例隔离、重建保留语义实际验证。
 - [ ] I5 空白专用环境重建与冷启动，核对当前镜像和挂载制品；不能以旧缓存、Go-only worker 或同名 tag 替代。
@@ -143,3 +143,14 @@ execution-plane/internal/worker/           只装配实际执行器；按需独�
 最终 `make -C recovery check`：236项恢复工具Python、111项Bun1.3.9、37项镜像工程测试均通过；37项镜像测试另完整十轮370次通过。两位代理交叉review；自审/复审发现并关闭锁关联窗口、私有父目录配方及URL空分隔符问题。[完整证据](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1a基础镜像配方与离线构建上下文)。仅为合成输入测试，非Docker构建证据。
 
 当前没有完整官方发布锁、实际Linux构建或冷启动，因此不勾选I2/I3/I5，总体仍23%、镜像仍20%。下一切片S1b：取得并验证官方base/package索引及依赖闭包，在通过实际宿主准入的专用Linux里构建base；然后固定Bun/CLI/app，不把上下文工具当成镜像交付。
+
+### 2026-09-17 S1b 子阶段验收（更新上述S1a历史状态）
+
+[S1b实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1b原生linux基础镜像构建)：
+真实官方base/BuildKit固定digest、签名APT对应9包锁、原生amd64实际构建、新context与空
+builder-cache完整重跑、全9包及dpkg audit、非特权无网络冒烟、失败关闭和精确所有权清理
+通过。独立review收尾，完整236恢复Python/111Bun/101镜像测试PASS，镜像测试再十轮1010次。
+
+只给I2增加3分，当前**26%/镜像40%**。这是一台共存测试机上的可信官方包受限构建，
+特权builder不承载不可信代码/CLI/账号；没有关闭专用Linux网络隔离N3、完整runtime冷启动I5。
+下一项I3补齐固定Bun/CLI/app与双架构边界；I4、I5、S2隔离和S3独立身份仍需实际验收。

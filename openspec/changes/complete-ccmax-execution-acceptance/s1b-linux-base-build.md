@@ -48,6 +48,8 @@ openspec/changes/complete-ccmax-execution-acceptance/
 3. 独立有界联网准备：拉取固定官方镜像；新建非特权下载容器，最多1 CPU/512 MiB、
    pids128、无业务挂载/端口/凭据。APT 必须校验官方签名索引，不启用 trusted=yes /
    allow-unauthenticated。下载四核心包及相对固定基底的依赖闭包；不执行旧部署脚本。
+   实测APT需要CHOWN/SETUID/SETGID/FOWNER/DAC_OVERRIDE管理其私有缓存和_apt降权；
+   仅下载容器添加这五项，不添加SYS_ADMIN，不沿用到最终运行实例。
    记录 InRelease/索引哈希、APT校验结果、包control元数据、大小/SHA256和官方来源。
    HTTP签名APT和HTTPS来源记录若不同须说明，不伪称整个准备过程离线。
 4. 用 S1a stage/verify 实际包生成私有上下文，上传/复制后再次 verify；仅发送白名单

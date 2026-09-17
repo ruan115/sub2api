@@ -308,3 +308,76 @@ make -C recovery image
 没有完整官方base/package发布锁，没有校验本轮真实APT签名/包control metadata/依赖闭包/Pre-Depends顺序、目标架构匹配，没有Docker构建或Linux冷启动。合成ar头不是可安装软件包；hash只绑定审阅输入，不认证发布者。RUN无网络不证明FROM/builder无外联。实际builder准入、I2/I3/I4/I5、N3–N5、K/R/H/C/L/E原门槛仍开放。
 
 本轮仅联网查阅官方Docker语法说明；无SSH/生产数据/UI/配置/服务/路由/账号操作，不读真实home/密钥，不下载或执行线上二进制，不启动VM，不改本机/项目Bun1.3.9。真实模型调用0次；无push、部署、execution_onboarding或migrated变更。下一切片是官方依赖固定与专用Linux实际构建，不再用增加静态工具代替这项运行证据。
+# S1b原生Linux基础镜像构建
+
+2026-09-17，先提交执行计划`7210db9`、review权限修订`4c09103`再执行。
+阶段实现提交`3d7c43b`；本文为对应最终实测记录。
+仅170.106.159.197测试机；43.153.75.220仅SSH中转，未访问216.106.185.119生产。
+用户确认闲置，但保留原Portunex/CCMAX等业务；这不是空白专用宿主，不关闭N3/I5。
+
+## 输入与真实构建
+
+- 官方Docker registry通过HTTPS读取并核sha256，锁定Debian13-slim amd64 manifest
+  `abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f`。
+  BuildKit v0.33.0 amd64 manifest
+  `a461e7f0ce921972028acfbed628d45663d83e67ac1230722c2b34cf72760a0d`。
+  它们是registry manifest digest，不是image config ID；不额外宣称验证了OCI发行者签名。
+- [真实base锁](../../../execution-plane/isthmus-runtime/image/locks/base-linux-amd64-2026-09-17.json)：
+  9包、7,993,428字节，ca-certificates20250419、passwd1:4.17.4-2、procps2:4.0.4-9、
+  util-linux2.41.5-0+deb13u1及其基底外依赖。APT严格update、官方Signed-By且未禁验签，
+  保留原始InRelease/Packages、每包index/control/URI；HTTP签名APT获取与HTTPS来源地址
+  如实区分。实际keyring.pgp SHA256
+  `506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017`。
+- 最终上下文canonical lock SHA256
+  `308dd8cb28ca7e359dabb376908c6070d9ab57d15d2b2346d85b9d0946c2c575`；
+  渲染Dockerfile SHA256
+  `e971191030efca4b350c28dd0dcecce434213e37afbc75c6ba59cc6b2653b2c3`。
+  staging仍不授业务执行权，只把严格白名单包送入构建上下文。
+- 实际离线dpkg安装成功。builder官方可信输入特权例外，独立缓存卷、无host bind/socket/
+  port/secret/SSH/build-arg/环境代理，rootful不是不可信代码沙箱。真实cgroup根核对
+  2CPU、2GiB、swap0、pids512；采样到dpkg/证书更新等进程在准确容器scope的子组内。
+  builder watchdog900秒，客户端预算失败停止准确ID；磁盘8GiB增量/20GiB剩余是监控阈值。
+
+## 最终代码的完整重跑
+
+第一轮定位问题并修复后，使用**新0700目录、新上下文、新空BuildKit缓存**，重用同次
+已验签索引所对应的确切9包字节，不重新浮动解析APT。直接执行当前build→smoke→cleanup
+模块，全部返回成功；没有手工补状态通过最终这一轮。
+
+- 构建exit0；缺失target负例exit1且错误准确匹配，失败输出不存在或仅0字节占位，不加载。
+  构建器停止成功后才写built-image完成记录，非零传输错误不能冒充负例PASS。
+- UID/GID1000、home及子目录0700且空、machine-id空；无网络（仅lo）、dropALL/NNP、
+  readonly根、tmpfs、128MiB/0.5CPU/pids64；写根及unshare mount被拒。
+  全9包版本/架构/install ok installed逐项匹配，dpkg --audit为空，默认false按预期exit1。
+  注入额外合成context文件被拒，恢复后再verify；镜像Env仅PATH/HOME/USER/LOGNAME。
+- 最终镜像tag `isthmus-vm-base-lab:isthmus-s1b-8g2apoxg`；image ID
+  `sha256:3f7a9a38c6ae0a779eb563ceb98cd70db6ae62243bf19ffbaa35587fa15ab807`。
+  Docker导出42,482,688字节，SHA256
+  `193ee2984814e4c7f900ae7a7f88109e600cd9b07e56aef1592a63d845eb05a8`。
+  两次构建验证输入锁和功能重建，不主张逐字节相同输出（时间元数据尚未归一化）。
+- 原4个业务容器的ID/image/StartedAt/RestartCount/挂载元数据前后相同。没有部署或操作
+  原服务、数据库、UI，也未手动修改宿主路由/防火墙配置（Docker自己的测试网络资源由
+  daemon管理）。只移除本轮记录并核所有权的测试容器及缓存卷；
+  原镜像和本轮导出/输入/证据都保留。没有全局prune，不声称删除事务可自动回滚。
+  最后按两轮准确label再次查询：剩余测试容器0、测试缓存卷0；业务容器仍4且基线相同。
+
+## Review与修复
+
+两名独立代理审查，关闭：全量inspect读取业务Env、输出缓冲/超时末尾窗口、异常后漏停、
+builder的image/卷/身份/namespace绑定、提前发布完成记录、APT缓存epoch与URI转义、
+keyring软链接、用户创建时复制skel。真实运行另外修正local日志轮转参数及APT最小cap。
+scope检查的初次误报也保留失败记录：BuildKit将daemon移至/init，不改变上级Docker资源
+根；改为核exactCID systemd scope，不忽略任何越界进程。
+参见[BuildKit v0.33.0实际初始化源码](https://github.com/moby/buildkit/blob/v0.33.0/executor/resources/monitor.go#L236)。
+
+`make -C recovery check`：236恢复Python、111Bun1.3.9、101镜像测试PASS；
+14manifest/116条合同结构校验仍`business_verification=false`。这些单测与真实运行证据
+分别记录，不把合成测试当真实账号/生产兼容性证据。
+101项镜像测试另连续十轮1010次PASS。原始包上下文、6份APT索引/Release、keyring及
+42,482,688字节镜像导出已保存在本机仓库外0700目录
+`/Users/ruanyang/My-project/api/z/isthmus-s1b-artifacts.VSdfTzYv`；传输后全部大小/哈希和
+S1a context独立复核通过。原始二进制不入Git；Git保存源码、真实锁与本证据摘要，未push。
+
+**只关闭I2（+3分）：总体26%，镜像6/15=40%。** I3完整Bun/CLI/app及双架构、I4独立
+持久home、I5空白环境runtime冷启动、N3–N5内核隔离与出口、K每实例密钥证书、R3–R5真实
+运行服务、控制面桥接均未因此通过。没有借用账号、真实模型请求、生产配置开关或Git push。

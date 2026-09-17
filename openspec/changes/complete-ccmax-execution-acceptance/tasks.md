@@ -2,9 +2,9 @@
 
 总计划：[CCMAX execution acceptance v2](../../../docs/plans/ccmax-execution-acceptance-v2.md)。
 
-用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收23%，镜像专项3/15=20%。不再把VM0a–d的完成项数量当作整体进度；本台账与100分门槛交叉引用，不重复计分。
+用户要求的固定百分比见 [100分交付台账](../../../docs/plans/isthmus-container-delivery-v1.md)：当前执行链工程验收26%，镜像专项6/15=40%。S1b仅新增I2的3分，不关闭I3/I4/I5/N3。不再把VM0a–d数量当整体进度。
 
-沿用Sub2计价/倍率/产品权限，按 [S1–S6聚焦阶段](isthmus-focused-stages.md) 交付。S1a镜像配方/离线上下文子切片已实现、交叉review并通过完整回归；尚未真实构建，不勾选I2/I3/I5，进度仍23%/20%。后续C/L仍是桥接usage/执行生命周期，不重做用户计费。
+沿用Sub2计价/倍率/产品权限，按 [S1–S6聚焦阶段](isthmus-focused-stages.md) 交付。S1a后，S1b已用真实9包锁、原生Linux构建和新context/空builder-cache重跑关闭I2；[实证](verification.md#s1b原生linux基础镜像构建)。后续C/L仍是桥接usage/执行生命周期，不重做用户计费。
 
 ## 当前优先门槛：VM 隔离与 TLS
 
