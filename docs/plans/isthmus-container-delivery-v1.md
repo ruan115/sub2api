@@ -18,19 +18,19 @@
 - 分数不是代码量、工时估计、生产准备度或“与线上百分之几相同”。即使99分，未满足安全停止线仍不能启用新执行面。
 - 每次阶段交付固定汇报：总体百分比、镜像专项百分比、本轮关闭项、仍缺项、测试/review、commit。未完整关闭子门槛时分数可以不变。
 
-## 当前总览：26%
+## 当前总览：30%
 
 | 模块 | 权重 | 已验收 | 模块完成率 |
 | --- | ---: | ---: | ---: |
 | I 可复建 isthmus-vm-base 及依赖 | 15 | 6 | 40% |
-| R 实际 isthmus/CLI 运行服务 | 20 | 8 | 40% |
+| R 实际 isthmus/CLI 运行服务 | 20 | 12 | 60% |
 | N 出口与实例隔离 | 20 | 8 | 40% |
 | K 独立机器标识/密钥/证书/mTLS | 10 | 0 | 0% |
 | H 控制面与 host-agent | 10 | 4 | 40% |
 | C CCMAX 调用链接通 | 10 | 0 | 0% |
 | L 凭据与完整生命周期 | 10 | 0 | 0% |
 | E 整体验收及可恢复交付 | 5 | 0 | 0% |
-| **总计** | **100** | **26** | **26%** |
+| **总计** | **100** | **30** | **30%** |
 
 ### I：可复建镜像（每项3分）
 
@@ -39,7 +39,7 @@
 - [ ] I3 app/Bun/CLI/工具版本与每项哈希固定，允许来源及双架构兼容边界明确；不使用 latest 或不审查原件。
   S1c已固定Bun/CLI双架构公开制品、23文件fake源码和amd64展开哈希，并在170完成
   原生CLI版本/两版Bun测试/关闭对照；[实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1c固定制品与原生linux工具验证)。
-  当前app仍fake，完整运行工具依赖及不可变组合制品未完成，暂不关闭I3、不加分。
+  已有真实CLI单实例probe，但默认app仍fake，完整运行工具依赖及不可变组合制品未完成，暂不关闭I3、不加分。
 - [ ] I4 无秘密的 home/配置/卷初始化合同，所有权/权限、跨实例隔离、重建保留语义实际验证。
 - [ ] I5 空白专用环境重建与冷启动，核对当前镜像和挂载制品；不能以旧缓存、Go-only worker 或同名 tag 替代。
 
@@ -47,7 +47,7 @@
 
 - [x] R1 原 proto/WS codec 与 fake HTTP/WS 测试基础；[边界](../../execution-plane/isthmus-runtime/README.md)。不代表真实服务或原版可靠停机已恢复。
 - [x] R2 实际 HTTP 增量转发、usage、背压和取消；[A验收](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md)。
-- [ ] R3 固定版本真实 CLI 执行器，参数/环境白名单、stream-json、无凭据假上游实际验证。
+- [x] R3 固定版本真实 CLI 执行器，参数/环境白名单、stream-json、无凭据假上游实际验证；[原生五项实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#r3单实例真实cli双向stream-json闭环)。只含单轮文本、JSON/SSE与合成上游，不含会话池、真实模型或线上等价。
 - [ ] R4 session/pool/MCP/工具续接与子进程生命周期、跨会话拒绝、超时终止。
 - [ ] R5 实际 HTTP/WS/gRPC 兼容、连接回收和可靠停机；关闭既有 Bun 停机缺口。
 
@@ -100,6 +100,8 @@
 - [ ] E5 制品校验、版本清单与空白环境恢复演练。
 
 ## 实施顺序与文件职责
+
+2026-09-17用户确认[收敛顺序](../../openspec/changes/complete-ccmax-execution-acceptance/single-instance-cli-first.md)：先真实CLI单实例，再双实例隔离/身份，最后CCMAX桥接。该顺序覆盖下列原始排序，暂停S1d新增构建工具，保留其WIP；验收门槛和100分权重不变。R3现已通过，总体30%、运行服务60%、镜像40%。
 
 用户再次明确沿用Sub2价格/倍率/计费，CCMAX保留现有业务模板；[S1–S6收敛阶段及本轮S1a设计](../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md)规定分阶段交付。这里的C3仅回传usage和防重复归属，不实现第二套计价；L是执行凭据/实例生命周期，不是Sub2用户业务。权重不变；S1b后总体26%、镜像40%，S1c部分交付不重复加分。
 

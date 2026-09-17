@@ -1,5 +1,77 @@
 # 验证记录
 
+## R3：单实例真实CLI双向stream-json闭环
+
+2026-09-17；先提交收敛规划`dad891e`，暂停S1d构建WIP，再实现真实执行器。
+只关闭R3（+4分）：**总体30%、运行服务12/20=60%、镜像6/15=40%**。
+生产216.106.185.119未连接；170.106.159.197仅测试，43.153.75.220仅SSH中转。
+没有真实凭据、模型调用、宿主Bun替换、生产配置/数据/UI变更、push或部署。
+
+实际测试链为HTTP调用方→新isthmus CLI probe→官方CLI2.1.258→同容器回环合成
+上游→原路JSON/SSE。stdin和stdout均stream-json；stdin为一个用户记录加EOF。
+按CCMAX测试技能使用随机回环capture路径、显式synthetic凭据/usage、固定计数诊断，
+不保留认证头、正文或CLI原始stdout/stderr。不是模型推理或计费准确性证据。
+
+### 范围与原生结果
+
+- `src/runtime/cli/`分别管理参数/环境、进程与有界事件解码；`src/app/cli/`为显式
+  loopback工厂；`test/cli/`独立合成上游与实际冒烟；`image/lab/cli.py`只复用既有
+  宿主门禁和容器，不新增构建框架。默认fake入口和Sub2业务代码均未改。
+- 固定模型、max_tokens128、单轮文本、单并发；其他请求字段明确拒绝。CLI工具、MCP、
+  用户/项目配置、会话持久化及非必要外联关闭。显式env，不继承宿主代理或凭据。
+- 使用S1b精确base image ID及已锁定CLI2.1.258/Bun1.4.2；10源码+2二进制在容器内
+  逐项复核SHA/版本。Bun1.4.2仅实验，项目/CI仍1.3.9。不是新不可变组合镜像。
+- UID1000、rootfs只读、cap0、NNP、networknone、只lo、无宿主bind/端口；私有空白
+  tmpfs home700/noexec，代码树UID1000不可写；内核回读1CPU/2GiB/swap0/pids128/core0。
+  CLI/服务/stub共用一个隔离容器，不是已通过双实例或内核可用出口验收。
+
+| 最终真实CLI测试 | 实际结果 |
+| --- | --- |
+| 非流式JSON | 固定合成文本、usage1/1；恰好1个CLI/上游请求，进程回收 |
+| SSE | 文本/usage增量返回；完整stream+成功result+exit0+清理后才发message_stop |
+| 客户端取消 | 已到达stub才取消；无完成响应，active=0 |
+| 执行超时 | 已到达stub，HTTP504；active=0 |
+| 上游503 | HTTP502；恰好1请求，无重试或伪成功；错误映射不冒称线上保真 |
+
+最终冻结源码版本在原生Linux amd64运行exit0、4.85秒；真实模型调用0。
+最终容器`435519d57c1767a7c6299bbd1e57a0406dd5edace4baf614e8960b2c2c4b6d2b`
+已删除；原4业务容器ID/image/StartedAt/restarts/mount元数据前后相同。
+只清理各轮明确自有容器；没有新卷/网络/镜像。磁盘上的任务输入与证据保留。
+
+### Review、回归与保全
+
+独立review及主代理关闭：遗漏shutdown依赖、成功marker核对、同一stdout块取消后
+继续输出、已reaped后向旧数字PGID发信号、leader已退出但stderr未EOF使取消挂起。
+取消同时唤醒两条pipe；只对仍活跃的工具禁用probe进程组发一次KILL，再等待退出。
+这不是任意工具后代监督合同，R4仍未通过。最后两项均有回归，reviewer独立9项
+进程测试/27断言PASS并确认关闭；最终原生五项在修复后重新全跑通过。
+
+前三次原生失败保留记录：真实CLI输出`system/status`被严格解码器拒绝；仅补上该已
+观察到的非内容事件，不放行未知事件或忽略错误。之后文本stdin、双向stream-json、
+最终cleanup修复三个版本分别五项通过，不把较早版本当最终版本证据。
+六轮均清理自有容器并通过业务基线对照。
+
+最终`make -C recovery check`通过：236 recovery Python、150 Bun1.3.9测试
+（1027断言）、158 image Python；14份合同/116条entry仍business_verification=false。
+普通Bun测试的进程/HTTP使用内存fixtures；与上面的真实Linux五项分别记录。
+
+六轮源码/助手/清单/运行及清理记录已保全至仓库外0700目录
+`/Users/ruanyang/My-project/api/z/isthmus-cli-artifacts.NzTfeRIr`。
+最终远端根`/var/tmp/isthmus-s1b.QyuYs1Aa`；其10项`cli-source.json` SHA256为
+`28b58145f54740fb5cf1248fecdb18d64d85d921dde0ace991ed6d6106dd154a`。
+传输后六轮各10源码逐项核大小/SHA；最终10源码与当前工作区完全一致。
+二进制沿用S1c已保全的公开制品，不重复进入Git。
+
+### 调用流程与线上仍不等价
+
+线上参照为2026-09-14/15已保全材料，不是本轮重新观察生产。
+[历史调用配置](../../../recovery/docs/online-cli-forwarder-config-2026-09-14.md)是
+Portunex→WS/gRPC(S)→isthmus→持久CLI池/双向stream-json→上游，带会话/工具循环。
+当前只是HTTP单请求→一次CLI进程→合成上游；两端stream-json已对齐，但会话池/
+工具/MCP、实际gRPCS及独立证书、受限出口、5m/1h请求改写/透传合同、真实凭据刷新、
+CCMAX/Sub2整链接线仍未验收。host-agent是本地桥接设计，不冒称线上原拓扑。
+I3/R4/R5/N3–N5/K/H3–H5/C/L/E均不随R3关闭；不能启用生产新执行面。
+
 ## S1c 后续 review：ZIP64 解析前预算
 
 2026-09-17，按用户要求先review、汇报26%进度，再修复和规划S1d。
