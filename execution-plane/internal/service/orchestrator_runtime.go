@@ -11,17 +11,24 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/config"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/control"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/outbox"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/pki"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/reconcile"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
+	enrollmentservice "github.com/Wei-Shaw/sub2api/execution-plane/internal/service/runtimeenrollment"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 const orchestratorDatabaseStartupTimeout = 10 * time.Second
 
 var ErrProductionOrchestrator = errors.New("production orchestrator runtime failed")
+
+type runtimeEnrollmentDependencies interface {
+	ControlConfig() *control.RuntimeEnrollmentConfig
+	Close() error
+}
 
 type orchestratorRuntimeFactories struct {
 	openDatabase          func(string) (*sql.DB, error)
@@ -30,6 +37,7 @@ type orchestratorRuntimeFactories struct {
 	ensureCCMAXCheckpoint func(context.Context, *sql.DB, string) error
 	newRuntimeOutbox      func(*sql.DB, *store.Repository, RuntimeOutboxConfig) (orchestratorRunner, error)
 	newRoutePublisher     func(*store.Repository, config.OrchestratorRuntimeConfig) (orchestratorRunner, error)
+	newRuntimeEnrollment  func(context.Context, config.RuntimeEnrollmentConfig, *sql.DB, *store.Repository) (runtimeEnrollmentDependencies, error)
 	newKMS                func(credential.TencentKMSConfig) (credential.KMS, error)
 	loadPKI               func(OrchestratorPKIConfig) (*pki.Authority, *tls.Config, error)
 	loadRecipient         func(context.Context, credential.KMS, string) (*credential.Recipient, error)
@@ -51,6 +59,13 @@ func defaultOrchestratorRuntimeFactories() orchestratorRuntimeFactories {
 			return NewRoutePublisherRunner(repository, runtimeConfig, func(error) {
 				slog.Error("execution route publication failed")
 			})
+		},
+		newRuntimeEnrollment: func(ctx context.Context, c config.RuntimeEnrollmentConfig, database *sql.DB, repository *store.Repository) (runtimeEnrollmentDependencies, error) {
+			dependencies, err := enrollmentservice.New(ctx, c, database, repository)
+			if err != nil {
+				return nil, err
+			}
+			return dependencies, nil
 		},
 		newKMS: func(runtimeConfig credential.TencentKMSConfig) (credential.KMS, error) {
 			return credential.NewTencentKMSFromCVMRole(runtimeConfig)
@@ -84,7 +99,8 @@ func runProductionOrchestrator(
 	factories orchestratorRuntimeFactories,
 ) error {
 	if ctx == nil || ctx.Err() != nil || healthConfig.Validate() != nil || healthConfig.Role != config.RoleOrchestrator ||
-		!runtimeConfig.Enabled || runtimeConfig.Validate() != nil || validateOrchestratorRuntimeFactories(factories) != nil {
+		!runtimeConfig.Enabled || runtimeConfig.Validate() != nil || validateOrchestratorRuntimeFactories(factories) != nil ||
+		runtimeConfig.RuntimeEnrollment.Enabled && factories.newRuntimeEnrollment == nil {
 		return productionOrchestratorStageError("configuration")
 	}
 	if logger == nil {
@@ -129,6 +145,22 @@ func runProductionOrchestrator(
 	repository, err := store.NewRepository(database)
 	if err != nil {
 		return productionOrchestratorStageError("database repository")
+	}
+	// Set defaults before the opt-in field: component composition otherwise
+	// replaces a zero-EnrollmentTTL ControlConfig wholesale.
+	controlConfig := orchestratorControlConfig(runtimeConfig)
+	if runtimeConfig.RuntimeEnrollment.Enabled {
+		dependencies, err := factories.newRuntimeEnrollment(ctx, runtimeConfig.RuntimeEnrollment, database, repository)
+		if dependencies != nil {
+			defer dependencies.Close()
+		}
+		if err != nil || dependencies == nil || ctx.Err() != nil {
+			return productionOrchestratorStageError("runtime enrollment")
+		}
+		controlConfig.RuntimeEnrollment = dependencies.ControlConfig()
+		if controlConfig.RuntimeEnrollment == nil || ctx.Err() != nil {
+			return productionOrchestratorStageError("runtime enrollment")
+		}
 	}
 	runtimeOutbox, err := factories.newRuntimeOutbox(ccmaxDatabase, repository, RuntimeOutboxConfig{
 		ConsumerName:     runtimeConfig.RuntimeOutboxConsumerName,
@@ -194,6 +226,7 @@ func runProductionOrchestrator(
 		}
 	}()
 	components, err := NewOrchestratorComponents(OrchestratorComponentsConfig{
+		ControlConfig:  controlConfig,
 		NodeRepository: repository, CredentialRepository: repository,
 		IntentRepository: repository, ProvisioningRepository: repository,
 		StartTriggerRepository: repository, HealthyStartRepository: repository,
@@ -272,6 +305,23 @@ func runProductionOrchestrator(
 
 func productionOrchestratorStageError(stage string) error {
 	return fmt.Errorf("%w: %s", ErrProductionOrchestrator, stage)
+}
+
+func orchestratorControlConfig(c config.OrchestratorRuntimeConfig) control.Config {
+	result := control.DefaultConfig()
+	if c.RuntimeEnrollment.Enabled {
+		result.CertificateTTL = c.CertificateTTL
+		// Keep the existing 6h window for long-lived node certificates, but
+		// never make a shorter configured lifetime invalid or immediately due.
+		window := c.CertificateTTL / 4
+		if window == 0 {
+			window = c.CertificateTTL
+		}
+		if result.RotateBefore > window {
+			result.RotateBefore = window
+		}
+	}
+	return result
 }
 
 func validateOrchestratorRuntimeFactories(factories orchestratorRuntimeFactories) error {

@@ -73,6 +73,7 @@ type OrchestratorRuntimeConfig struct {
 	RouteRedisAddr                   string
 	RoutePublishTTL                  time.Duration
 	RoutePublishInterval             time.Duration
+	RuntimeEnrollment                RuntimeEnrollmentConfig
 	KMS                              credential.TencentKMSConfig
 }
 
@@ -91,6 +92,7 @@ func DefaultOrchestratorRuntimeConfig() OrchestratorRuntimeConfig {
 		OnboardingStartBatchSize: defaultStartCoordinatorBatchSize, OnboardingStartClaimTTL: defaultStartCoordinatorClaimTTL,
 		OnboardingStartRetryDelay: defaultStartCoordinatorRetryDelay,
 		RoutePublishTTL:           defaultRoutePublishTTL, RoutePublishInterval: defaultRoutePublishInterval,
+		RuntimeEnrollment: DefaultRuntimeEnrollmentConfig(),
 	}
 }
 
@@ -106,6 +108,10 @@ func LoadOrchestratorRuntime(getenv func(string) string) (OrchestratorRuntimeCon
 	config.Enabled = enabled
 	if !enabled {
 		return config, nil
+	}
+	config.RuntimeEnrollment, err = LoadRuntimeEnrollment(getenv)
+	if err != nil {
+		return OrchestratorRuntimeConfig{}, err
 	}
 	assignTrimmed(getenv, "EXECUTION_ORCHESTRATOR_RPC_LISTEN_ADDRESS", &config.RPCListenAddress)
 	config.MySQLDSN = strings.TrimSpace(getenv("EXECUTION_MYSQL_DSN"))
@@ -189,6 +195,9 @@ func LoadOrchestratorRuntime(getenv func(string) string) (OrchestratorRuntimeCon
 func (c OrchestratorRuntimeConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	if err := c.RuntimeEnrollment.Validate(); err != nil {
+		return err
 	}
 	if err := validateListenAddress(c.RPCListenAddress); err != nil {
 		return fmt.Errorf("orchestrator RPC address: %w", err)
