@@ -65,6 +65,9 @@
 已在170受限容器中三轮通过：受认证签发、实例内安装、原worker/Controller就绪闭环。
 后续[S2b2-live双实例实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b2-live双实例真实docker证书管理通道)
 已通过实际Docker CSR导出/公开证书安装、交叉/错CA拒绝和lease撤销后拒绝签发。
+后续[S2b3正式START组件](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b3正式start命令的已有实例认证装配)
+接上物理CID只读核验、认证bootstrap和mTLS，实际ControlClient/Dispatch→worker回环
+组合通过；失败/漂移后INSPECT不得复活健康。尚未接入host-agent二进制或生产签发入口。
 SQL仍为mock而非真实MySQL并发；仍缺生产host-agent/provider装配、跨容器mTLS和在途lease失效组合，
 因此K3/K4不提前勾选，总体仍32%。这不是代码无进展，而是完整验收门槛尚未关闭。
 

@@ -20,6 +20,7 @@
     - [x] S2b2组件：分目录实现受认证签发、SQL公开receipt、实例CA pin安装、Controller启动接线；本地race/vet、独立review及170单容器9组×3遍通过；[实证](verification.md#s2b2受认证签发与启动前bootstrap)。
     - [x] S2b2-live：双实例真实Docker CSR/证书投递，独立key、交叉/错CA精确拒绝、幂等安装、lease撤销后拒绝签发；清理后原4业务容器不变；[实证](verification.md#s2b2-live双实例真实docker证书管理通道)。
     - [ ] 剩余：生产host-agent/provider装配、真实SQL幂等并发、双实例mTLS连接及lease失效整链；当前不宣称CLI整链/生产可用。
+  - [x] S2b3组件：严格START经准确物理CID核验→认证bootstrap→实际mTLS，失败/漂移不被普通INSPECT复活；真实ControlClient/Dispatch与worker回环组合通过；[实证](verification.md#s2b3正式start命令的已有实例认证装配)。仅组件装配，host-agent二进制与orchestrator签发入口仍未启用。
 - [ ] VM0d 当前组件实际隔离整链，不复用旧 VM/旧凭据或局部 PASS 冒充完成。
 
 ## A：HTTP worker 增量转发

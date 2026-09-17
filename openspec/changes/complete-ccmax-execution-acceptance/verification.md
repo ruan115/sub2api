@@ -1,5 +1,63 @@
 # 验证记录
 
+## S2b3：正式START命令的已有实例认证装配
+
+2026-09-18，先规划`3b41be9`；物理实例锁定`277406d`，认证START组件与控制流
+组合测试`b43fd69`。发现并修复原START仅调用provider.Start/Inspect、未走证书
+bootstrap的接线缺口；worker原本等待证书才监听，单纯启动容器不能完成这个流程。
+
+### 实现与文件职责
+
+- `provider.Instance.RuntimeID`来自真实Docker Container.ID，保留ProviderRef原有
+  逻辑名称，避免破坏旧Destroy/网络名称语义；不改proto或持久化结构。
+- `provider/docker/existing.go`按确切物理CID只读核完整slot/account/epoch/gen/
+  image/资源/用户/出口/sandbox，无Create、修复或重新发现替代容器。
+- `hostagent/runtime_existing.go`在启动前、bootstrap后和TLS握手后重核完整spec；
+  Start、管理投递、ready检查与endpoint查找使用同一物理CID。禁止Create/recreate，
+  失败关闭连接但不盲目Stop/Delete。只做真实TLS1.3/HTTP2握手，不消耗业务票。
+- `hostagent/lifecycle/`将同一provider、原Coordinator、Controller和命令执行器
+  装配为严格START入口；要求认证enrollment、CA trust及node certificate，禁止
+  自定义替代Startup，使用拒绝所有业务ticket的source，返回后关闭临时连接。
+- `command_start_proof.go`保留进程内准确实例的成功启动记录，失败、漂移、健康
+  丢失、drain/stop/destroy/revoke后清除；普通TCP/INSPECT不能复活认证失败状态。
+  它不是持续mTLS检查、业务runtime registry、有效lease或持久化授权。
+
+### 实际控制流组合测试
+
+`lifecycle/integration_test.go`使用实际loopback TLS NodeControl服务与原ControlClient：
+EnrollNode→活Control session→Server.Dispatch START→认证EnrollRuntimeCertificate→
+原worker.RunProcess安装及监听→Controller mTLS→命令结果写MemoryRepository。
+只有物理container provider是fake；控制RPC、TLS和worker不是fake调用，未使用Docker。
+
+首次及重复START均成功；撤销独立lease后的第三次START拒绝，即使既有worker的
+TCP还存活，随后INSPECT和Snapshot也保持不健康。断言Create=0、物理CID Start=3、
+成功安装=2、认证签发RPC=3、Control业务票/credential提交=0。没有账号或模型请求。
+这只证明重启/重验被拒，不声称撤销既有业务流或关闭已有worker监听。
+
+另有真实loopback mTLS正负例：错slot/account/node/epoch/gen/CA、明文对端；
+无完整只读provider能力、无bootstrap、无物理CID及spec漂移启动前拒绝；每段
+取消与TLS后置验证失败均失败关闭并释放连接。START过程中不调用Create/Stop/Delete，
+不请求Health/业务RPC或ticket。Docker只读核验有真实ID来源及资源/身份漂移回归，
+但本轮未新增实际Docker验收。
+
+### Review、回归与边界
+
+三位代理交叉review，关闭三处P2：失败START可被普通INSPECT恢复健康；取消发生在
+Inspect返回时仍能回成功；epoch/gen/image等实际漂移后恢复旧metadata可复用proof。
+新增确定回归，延迟旧命令不会清掉当前新代proof。最终限定改动未见未处理P1/P2。
+
+全execution-plane离线race/vet通过；provider及hostagent相关包race三遍，实际控制流
+组合测试另做race十遍通过。`make -C recovery check`通过：236恢复Python、150 Bun/
+1027断言、186镜像Python。测试使用合成密钥/临时目录，未访问216生产或170测试机，
+无部署、push、真实数据库迁移、宿主Bun/网络/防火墙/UI/业务数据改动。原有暂停
+`image/lab/build.py`及`image/runtimekit/`WIP继续保留、未纳入本轮提交。
+
+**本轮是可装配组件，不是host-agent二进制已启用**：`cmd/host-agent`仍为健康HTTP
+骨架；orchestrator生产装配尚未注入RuntimeEnrollment，不能将组件测试作为已上线。
+下一步先完成这两个入口的显式默认关闭配置/装配，再做真实provider两独占Internal
+网络实例mTLS实验（同步收紧MemorySwap门禁），之后CLI桥接和在途lease失效/出口矩阵。
+完整K3/K4/H5未关闭，固定总分仍32%，镜像40%、运行服务60%、身份20%。
+
 ## S2b2-live：双实例真实Docker证书管理通道
 
 2026-09-18，规划`09e3b99`，精确拒绝信号/真实HTTP回归`477925c`，按模块实现
