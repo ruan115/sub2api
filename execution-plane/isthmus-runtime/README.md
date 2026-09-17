@@ -8,8 +8,9 @@ application-handler response is marked `x-isthmus-runtime: fake`. There are no
 third-party dependencies and no install step.
 
 The separate [image module](image/README.md) provides a base-only Dockerfile
-template and offline reviewed-input staging. It is not a built image or a
-production service entrypoint; app/Bun/CLI integration and cold-start gates
+template and offline reviewed-input staging. S1b has built and checked the
+base image; it is not a production service entrypoint. S1c pins and probes
+isolated tools and fake source; app/CLI integration and cold-start gates
 remain open.
 
 ## Run the offline tests
@@ -174,7 +175,14 @@ documented in [the isolated validation record](docs/bun-stop-fix-validation.md).
 The candidate passed the complete demo suite and five independent runs of each
 normal/server-1011 close path. The user authorized isolated validation only:
 system/project/CI remain pinned to 1.3.9, whose control probe still fails. No
-Linux or production validation, version replacement or deployment was performed.
+production validation, version replacement or deployment was performed.
+S1c now additionally validates native Linux amd64 in a network-disabled,
+nonprivileged container: both Bun versions pass110 runtime tests,1.4.2 passes
+five normal and five server-1011 shutdown probes, and1.3.9 reproduces the exact
+expected shutdown-gate failure. The remaining local provenance test is excluded
+because its metadata contains an old local recovery path; the canonical proto
+is separately byte/hash-checked in the40-file payload. See the
+[S1c evidence](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1c固定制品与原生linux工具验证).
 
 Run the separate release gate with `bun run test/shutdown-regression.smoke.ts`
 (or repository-root `make -C recovery runtime-shutdown-gate`). It uses synthetic

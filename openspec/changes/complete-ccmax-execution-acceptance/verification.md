@@ -1,5 +1,50 @@
 # 验证记录
 
+## S1c：固定制品与原生Linux工具验证
+
+2026-09-17；先规划提交`a318eda`，再开发和隔离验证。**部分交付，不关闭I3：
+总进度仍26%，镜像6/15=40%**。本轮没有生产连接、账号凭据、真实模型请求、
+宿主Bun替换、镜像发布或业务部署。170用于测试，43.153.75.220只转发SSH。
+
+| 验证项 | 实际结果及限制 |
+| --- | --- |
+| 源码冻结 | 固定Git `e2715b6e7f968e638c2f4fd68467c56fa0151c72`，23普通文件/47,550字节；proto/package/相对imports，无第三方安装；明确fake-only |
+| 二进制来源 | Bun1.4.2候选、1.3.9对照及CLI2.1.258各自锁amd64/arm64官方URL、size/SHA；Linuxamd64实际下载/展开复验。BunPGP未验，不冒称已验签 |
+| CLI签名 | 官方manifest1778字节，SHA256 `ec53b2ce3d9f95d2c94c07aacf9202e6df9f79c695b71a1af2b4491081fba60f`；独立GPG目录，VALIDSIG指纹 `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`；两架构签名清单hash/size均与锁相符 |
+| CLI原生启动 | S1b精确image ID上，UID1000真实运行`--version`为`2.1.258 (Claude Code)`；不是QEMU，也不是假CLI。未运行真实CLI转发/工具调用/登录 |
+| Bun正常合同 | 两版均110 PASS/0 FAIL/499 expect，11测试文件；本地全仓另有1项proto provenance测试，因其引用带绝对恢复路径的metadata未上传。proto的4433字节和固定哈希已在40文件检查内验证，不伪称Linux111项 |
+| Bun关闭 | 1.4.2正常loopback与server1011异常关闭各5次PASS；1.3.9正常loopback通过、异常关闭返回精确单行FAIL及exit1。只复现指定gate失败，不从genericcatch推断唯一底层原因；项目/CI仍1.3.9，R5未关闭 |
+| 运行限制 | 精确S1b image ID、UID1000、cap0、NNP、networknone、无宿主/业务挂载和端口；内核cgroup读回memory.max=2147483648、swap.max=0、cpu.max=100000/100000、pids128、core0 |
+| 文件边界 | 根实际ro；home和/tmp独立rw/noexec；512MiB `/opt/isthmus-probe` 为root-owned rw/exec tmpfs。40个固定普通文件、UID1000整树不可写、内层哈希先检查再执行。它不是不可变组合镜像 |
+| 上传root例外 | Docker29的cp只读rootfs检查也拒绝tmpfs，改用自制固定USTAR397,486,080字节通过stdin给容器内系统shell/tar。只有该系统准备步骤UID0，实测cap0/NNP/networknone/2GiB；新工具一律UID1000。不是外部tar/特权解包 |
+| 清理与共存 | 最终probe命令exit0/7.36s；只删除本轮确切容器 `2226d3e7f61c931ef0ced0cc7c777255435df85fae0d1d9e807dd02e54122070`。原4业务容器ID/image/StartedAt/restarts/mount元数据前后相同；成功receipt在清理和基线比较后发布 |
+
+公开锁在`image/locks/`：toolchain外层、amd64-expanded内层、app-fake-source、
+probe-tests-source分别管理。实际ELF解释器均`/lib64/ld-linux-x86-64.so.2`；readelf
+静态NEEDED为glibc家族（libc/loader/pthread/dl/m，CLI另librt），未用ldd执行原件、
+未复制旧rootfs库。不意味着所有CLI子工具/git/curl/rg或真实执行能力已验收。
+
+私有证据：最终重新下载/验签在170 `/var/tmp/isthmus-s1b.C4hJQZtN`；
+最终运行证据在`/var/tmp/isthmus-s1b.6d4oItCu`。本机备份在仓库外
+`/Users/ruanyang/My-project/api/z/isthmus-s1c-artifacts.UqaLLThy`，包含官方原始下载、
+签名/public key、源锁、运行/清理记录；不含真实账号、密码或token，不入Git。
+早期macOS UID501目录上传被权限校验拒绝，已修正任务文件所有权；两次Docker cp
+方案失败均在新工具运行前，失败容器已清理。没有跳过安全检查使旧方案通过。
+
+Review关闭项：成功记录提前发布、把任意exit1当对照、载荷自证未锚定公开锁、
+复制累计上限、HTTPS慢读硬超时、chmod后字节变化导致旧摘要。均有合成负例；
+源/二进制模块交叉review，上传失败不会执行工具。实际证据与离线PASS分开记账。
+
+最终`make -C recovery check`通过：236项recovery Python、111项本地Bun测试、
+152项image Python；14份合同/116条目录项仍`business_verification=false`。
+二进制下载备份在本机用最终stager再次核外层+内层哈希通过；26个模块/锁/测试文件
+内容扫描及`git diff --check`通过。三个试验run label均无残留容器，原4容器基线
+一致，测试机磁盘余41,208,025,088字节。只保留私有公开制品/日志，没有新卷/镜像发布。
+
+下一项：固定真实CLI必需工具闭包与不可变组合运行制品，随后I4双实例私有home
+持久化/重建语义。ARM64本轮仅元数据边界；真实CLI转发、身份/独立密钥证书、
+出口拒绝矩阵和控制面桥接均未因此验收。不上线、不借用真实凭据。
+
 日期：2026-09-16。A 总规划提交 `c8380da` 先于实现 `fe9c3b8`；B1 细化规划 `e07bb7d` 先于实现 `c3dae96`；B2a 规划 `f32aa47` 先于实现 `d6a12a6`；B2b1 规划 `02b0f88` 先于本切片实现。B 总项（B2–B4）、C–G 与整链/生产门槛仍开放，细分切片结果如下。
 
 计划复验：

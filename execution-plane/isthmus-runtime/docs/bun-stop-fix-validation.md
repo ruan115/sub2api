@@ -1,5 +1,15 @@
 # Bun停机修复候选验证
 
+## 2026-09-17：原生Linux amd64隔离补验
+
+S1c在170测试机追加原生amd64验证；宿主/package.json/CI仍保留Bun1.3.9。
+两版官方ZIP和展开ELF分别锁定哈希。两版均通过110项runtime测试；1.4.2的正常
+loopback和server-1011关闭各5次通过。1.3.9正常关闭通过，异常门禁返回精确单行
+FAIL及exit1。仓库第111项仅验证带本机恢复路径的proto provenance，未传入Linux
+探针；proto本身已传入并核固定哈希。没有真实账号、上游请求、ARM64或生产验证。
+详见[S1c证据](../../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1c固定制品与原生linux工具验证)。
+下文保留此前macOS验证原始范围；“Linux尚未测试”只在本段明确的amd64范围内更新。
+
 调查日期：2026-09-13。状态：**Bun 1.4.2已在仓库外隔离验证通过；没有替换系统或项目版本**。用户本轮明确授权仅隔离下载/运行、不替换、不部署线上。系统及项目仍使用Bun 1.3.9，其异常停机对照仍失败；D4.1b不因候选通过而自动关闭。
 
 ## 证据链

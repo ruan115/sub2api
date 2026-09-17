@@ -64,6 +64,12 @@ S1a本身**不关闭I2/I3/I5，不增加23%/20%**。下一切片收集并核官�
 
 ## S1b 子阶段结果与下一项
 
+S1c后续已交付[固定制品与原生Linux工具验证](verification.md#s1c固定制品与原生linux工具验证)：
+官方CLI2.1.258验签/版本启动、两版Bun110项runtime测试和候选正常/异常关闭各5轮、
+23文件fake源码/14文件测试分离、40项payload哈希与无网络/不可写权限验证。
+未产出不可变组合运行镜像，真实CLI所需工具闭包还未验全；I3继续开放，总体26%、镜像40%。
+本段补充下方S1b记录，不把fake源码改称完整isthmus。
+
 已按[Linux实构建计划](s1b-linux-base-build.md)在170测试机完成基础层；43.153.75.220仅SSH中转，未访问216生产。官方Debian基底与BuildKit固定digest，9个真实包共7,993,428字节；实际APT签名链、metadata/control/hash核对、离线dpkg构建、cgroup限额归属、非特权无网络冒烟和准确清理均有[运行证据](verification.md#s1b原生linux基础镜像构建)。新context/空BuildKit缓存复跑使用最终代码完整通过，未用手工补状态跳过门槛。
 
 I2新增3分：总体26%、镜像40%。共享测试宿主上的特权可信builder不等于工作负载隔离；N3/I5继续开放。下一子阶段S1c/I3固定并验证Linux Bun、真实CLI、当前app及必需工具，明确amd64/arm64边界；不替换宿主Bun、不接真实账号，不用Go-only/fake冒充完整isthmus服务。独立home持久化(I4)、运行冷启动(I5)、出口拒绝矩阵(S2)和独立密钥证书(S3)仍待完成。

@@ -37,6 +37,9 @@
 - [x] I1 镜像职责、外部卷、静态来源和未证实差异基线；[证据](../../recovery/docs/vm-identity-tls-baseline-2026-09-16.md)。只奖励基线，不声称镜像已重建。
 - [x] I2 可审查 Dockerfile、隔离构建入口及构建失败/无隐式代理或秘密注入测试；[S1b实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1b原生linux基础镜像构建)。本次入口为共存测试宿主上的受限可信构建，官方包特权builder例外不代表不可信工作负载隔离、N3或完整runtime已通过。
 - [ ] I3 app/Bun/CLI/工具版本与每项哈希固定，允许来源及双架构兼容边界明确；不使用 latest 或不审查原件。
+  S1c已固定Bun/CLI双架构公开制品、23文件fake源码和amd64展开哈希，并在170完成
+  原生CLI版本/两版Bun测试/关闭对照；[实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s1c固定制品与原生linux工具验证)。
+  当前app仍fake，完整运行工具依赖及不可变组合制品未完成，暂不关闭I3、不加分。
 - [ ] I4 无秘密的 home/配置/卷初始化合同，所有权/权限、跨实例隔离、重建保留语义实际验证。
 - [ ] I5 空白专用环境重建与冷启动，核对当前镜像和挂载制品；不能以旧缓存、Go-only worker 或同名 tag 替代。
 
@@ -98,7 +101,7 @@
 
 ## 实施顺序与文件职责
 
-用户再次明确沿用Sub2价格/倍率/计费，CCMAX保留现有业务模板；[S1–S6收敛阶段及本轮S1a设计](../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md)规定分阶段交付。这里的C3仅回传usage和防重复归属，不实现第二套计价；L是执行凭据/实例生命周期，不是Sub2用户业务。权重及当前23%/20%不变。
+用户再次明确沿用Sub2价格/倍率/计费，CCMAX保留现有业务模板；[S1–S6收敛阶段及本轮S1a设计](../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md)规定分阶段交付。这里的C3仅回传usage和防重复归属，不实现第二套计价；L是执行凭据/实例生命周期，不是Sub2用户业务。权重不变；S1b后总体26%、镜像40%，S1c部分交付不重复加分。
 
 1. **N3前置 → I2/I3**：先补专用实验环境安全入口，拒绝默认Docker context/环境代理；再审查并固定镜像/运行制品、离线可控构建。现有 `scripts/docker-e2e.sh` 不能未经预检直接运行。
 2. **I4/I5 + N3/N4**：在专用 Linux 中完成卷/home初始化、当前镜像冷启动、实例及网络矩阵。镜像尚未获得隔离证据前不注入身份材料或真实账号。
