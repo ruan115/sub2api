@@ -5,10 +5,12 @@ package execution.v1;
 option go_package = "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1";
 
 import "google/protobuf/timestamp.proto";
+import "execution/v1/runtime_enrollment.proto";
 
 service NodeControlService {
   rpc EnrollNode(EnrollNodeRequest) returns (EnrollNodeResponse);
   rpc RenewNodeCertificate(RenewNodeCertificateRequest) returns (RenewNodeCertificateResponse);
+  rpc EnrollRuntimeCertificate(EnrollRuntimeCertificateRequest) returns (EnrollRuntimeCertificateResponse);
   rpc Control(stream NodeControlServiceControlRequest) returns (stream NodeControlServiceControlResponse);
 }
 

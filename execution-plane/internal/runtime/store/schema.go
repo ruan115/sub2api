@@ -13,6 +13,7 @@ var requiredRuntimeTables = []string{
 	"nodes",
 	"node_enrollments",
 	"node_certificates",
+	"runtime_certificates",
 	"slots",
 	"slot_assignments",
 	"execution_leases",
@@ -39,6 +40,17 @@ type runtimeSchemaColumn struct {
 // These post-core columns are checked separately so a partially applied
 // additive migration cannot be mistaken for a usable runtime schema.
 var requiredRuntimeColumns = []runtimeSchemaColumn{
+	{table: "runtime_certificates", name: "assignment_id"},
+	{table: "runtime_certificates", name: "account_hash"},
+	{table: "runtime_certificates", name: "slot_id"},
+	{table: "runtime_certificates", name: "node_id"},
+	{table: "runtime_certificates", name: "execution_epoch"},
+	{table: "runtime_certificates", name: "runtime_generation"},
+	{table: "runtime_certificates", name: "public_key_sha256"},
+	{table: "runtime_certificates", name: "ca_sha256"},
+	{table: "runtime_certificates", name: "not_before"},
+	{table: "runtime_certificates", name: "expires_at"},
+	{table: "runtime_certificates", name: "certificate_pem"},
 	{table: "slot_assignments", name: "desired_generation"},
 	{table: "slot_assignments", name: "observed_control_session_id"},
 	{table: "proxy_leases", name: "reservation_id"},
@@ -75,6 +87,8 @@ type runtimeSchemaIndex struct {
 }
 
 var requiredRuntimeUniqueIndexes = []runtimeSchemaIndex{
+	{table: "runtime_certificates", name: "PRIMARY", expectedColumns: "assignment_id"},
+	{table: "runtime_certificates", name: "uq_runtime_certificates_slot_epoch", expectedColumns: "slot_id,execution_epoch"},
 	{table: "onboarding_workflows", name: "uq_onboarding_workflows_intent", expectedColumns: "intent_id"},
 	{table: "onboarding_start_triggers", name: "uq_onboarding_start_triggers_event", expectedColumns: "event_id"},
 	{table: "onboarding_start_triggers", name: "uq_onboarding_start_triggers_sequence", expectedColumns: "source_sequence"},

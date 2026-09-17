@@ -20,6 +20,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/pki"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeenrollment"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -56,6 +57,7 @@ type Config struct {
 	CredentialSink    worker.SealedCredentialSink
 	CommandObserver   CommandObserver
 	ProbeTickets      *ProbeTicketConfig
+	RuntimeEnrollment *RuntimeEnrollmentConfig
 	Now               func() time.Time
 }
 
@@ -82,9 +84,10 @@ type EnrollmentToken struct {
 
 type Server struct {
 	executionv1.UnimplementedNodeControlServiceServer
-	repository store.NodeRepository
-	authority  *pki.Authority
-	config     Config
+	repository        store.NodeRepository
+	authority         *pki.Authority
+	config            Config
+	runtimeEnrollment *runtimeenrollment.Broker
 
 	mu       sync.RWMutex
 	sessions map[string]*nodeSession
@@ -150,7 +153,18 @@ func NewServer(repository store.NodeRepository, authority *pki.Authority, config
 	if err != nil {
 		return nil, err
 	}
-	return &Server{repository: repository, authority: authority, config: config, sessions: make(map[string]*nodeSession)}, nil
+	s := &Server{repository: repository, authority: authority, config: config, sessions: make(map[string]*nodeSession)}
+	if config.RuntimeEnrollment != nil {
+		dependencies := *config.RuntimeEnrollment
+		s.runtimeEnrollment, err = runtimeenrollment.New(runtimeenrollment.Config{
+			Bindings: dependencies.Bindings, Receipts: dependencies.Receipts, Leases: dependencies.Leases,
+			Authority: authority, Sessions: s, Now: config.Now, Timeout: dependencies.Timeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // CreateEnrollment returns the raw one-time token exactly once. The repository

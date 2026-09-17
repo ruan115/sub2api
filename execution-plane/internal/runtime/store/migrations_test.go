@@ -10,7 +10,7 @@ func TestRuntimeCoreMigrationContainsRequiredBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 13 {
+	if len(migrations) != 14 {
 		t.Fatalf("unexpected migrations: %+v", migrations)
 	}
 	for _, migration := range migrations {

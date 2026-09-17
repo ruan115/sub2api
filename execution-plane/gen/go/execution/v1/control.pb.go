@@ -1872,7 +1872,7 @@ var File_execution_v1_control_proto protoreflect.FileDescriptor
 
 const file_execution_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1aexecution/v1/control.proto\x12\fexecution.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"=\n" +
+	"\x1aexecution/v1/control.proto\x12\fexecution.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a%execution/v1/runtime_enrollment.proto\"=\n" +
 	"\x0fProtocolVersion\x12\x14\n" +
 	"\x05major\x18\x01 \x01(\rR\x05major\x12\x14\n" +
 	"\x05minor\x18\x02 \x01(\rR\x05minor\"\x8d\x02\n" +
@@ -2049,11 +2049,12 @@ const file_execution_v1_control_proto_rawDesc = "" +
 	"\x19SLOT_COMMAND_ACTION_DRAIN\x10\x03\x12\x1c\n" +
 	"\x18SLOT_COMMAND_ACTION_STOP\x10\x04\x12\x1f\n" +
 	"\x1bSLOT_COMMAND_ACTION_DESTROY\x10\x05\x12\x1f\n" +
-	"\x1bSLOT_COMMAND_ACTION_INSPECT\x10\x062\xc4\x02\n" +
+	"\x1bSLOT_COMMAND_ACTION_INSPECT\x10\x062\xbf\x03\n" +
 	"\x12NodeControlService\x12O\n" +
 	"\n" +
 	"EnrollNode\x12\x1f.execution.v1.EnrollNodeRequest\x1a .execution.v1.EnrollNodeResponse\x12m\n" +
-	"\x14RenewNodeCertificate\x12).execution.v1.RenewNodeCertificateRequest\x1a*.execution.v1.RenewNodeCertificateResponse\x12n\n" +
+	"\x14RenewNodeCertificate\x12).execution.v1.RenewNodeCertificateRequest\x1a*.execution.v1.RenewNodeCertificateResponse\x12y\n" +
+	"\x18EnrollRuntimeCertificate\x12-.execution.v1.EnrollRuntimeCertificateRequest\x1a..execution.v1.EnrollRuntimeCertificateResponse\x12n\n" +
 	"\aControl\x12..execution.v1.NodeControlServiceControlRequest\x1a/.execution.v1.NodeControlServiceControlResponse(\x010\x01BMZKgithub.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1b\x06proto3"
 
 var (
@@ -2093,10 +2094,12 @@ var file_execution_v1_control_proto_goTypes = []any{
 	(*ControlCredentialCommit)(nil),           // 19: execution.v1.ControlCredentialCommit
 	(*ControlCredentialCommitAck)(nil),        // 20: execution.v1.ControlCredentialCommitAck
 	(*NodeControlServiceControlResponse)(nil), // 21: execution.v1.NodeControlServiceControlResponse
-	nil,                           // 22: execution.v1.EnrollNodeRequest.LabelsEntry
-	nil,                           // 23: execution.v1.NodeHello.LabelsEntry
-	nil,                           // 24: execution.v1.SlotCommand.MetadataEntry
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
+	nil,                                      // 22: execution.v1.EnrollNodeRequest.LabelsEntry
+	nil,                                      // 23: execution.v1.NodeHello.LabelsEntry
+	nil,                                      // 24: execution.v1.SlotCommand.MetadataEntry
+	(*timestamppb.Timestamp)(nil),            // 25: google.protobuf.Timestamp
+	(*EnrollRuntimeCertificateRequest)(nil),  // 26: execution.v1.EnrollRuntimeCertificateRequest
+	(*EnrollRuntimeCertificateResponse)(nil), // 27: execution.v1.EnrollRuntimeCertificateResponse
 }
 var file_execution_v1_control_proto_depIdxs = []int32{
 	22, // 0: execution.v1.EnrollNodeRequest.labels:type_name -> execution.v1.EnrollNodeRequest.LabelsEntry
@@ -2129,12 +2132,14 @@ var file_execution_v1_control_proto_depIdxs = []int32{
 	17, // 27: execution.v1.NodeControlServiceControlResponse.probe_ticket_response:type_name -> execution.v1.ControlProbeTicketResponse
 	3,  // 28: execution.v1.NodeControlService.EnrollNode:input_type -> execution.v1.EnrollNodeRequest
 	5,  // 29: execution.v1.NodeControlService.RenewNodeCertificate:input_type -> execution.v1.RenewNodeCertificateRequest
-	12, // 30: execution.v1.NodeControlService.Control:input_type -> execution.v1.NodeControlServiceControlRequest
-	4,  // 31: execution.v1.NodeControlService.EnrollNode:output_type -> execution.v1.EnrollNodeResponse
-	6,  // 32: execution.v1.NodeControlService.RenewNodeCertificate:output_type -> execution.v1.RenewNodeCertificateResponse
-	21, // 33: execution.v1.NodeControlService.Control:output_type -> execution.v1.NodeControlServiceControlResponse
-	31, // [31:34] is the sub-list for method output_type
-	28, // [28:31] is the sub-list for method input_type
+	26, // 30: execution.v1.NodeControlService.EnrollRuntimeCertificate:input_type -> execution.v1.EnrollRuntimeCertificateRequest
+	12, // 31: execution.v1.NodeControlService.Control:input_type -> execution.v1.NodeControlServiceControlRequest
+	4,  // 32: execution.v1.NodeControlService.EnrollNode:output_type -> execution.v1.EnrollNodeResponse
+	6,  // 33: execution.v1.NodeControlService.RenewNodeCertificate:output_type -> execution.v1.RenewNodeCertificateResponse
+	27, // 34: execution.v1.NodeControlService.EnrollRuntimeCertificate:output_type -> execution.v1.EnrollRuntimeCertificateResponse
+	21, // 35: execution.v1.NodeControlService.Control:output_type -> execution.v1.NodeControlServiceControlResponse
+	32, // [32:36] is the sub-list for method output_type
+	28, // [28:32] is the sub-list for method input_type
 	28, // [28:28] is the sub-list for extension type_name
 	28, // [28:28] is the sub-list for extension extendee
 	0,  // [0:28] is the sub-list for field type_name
@@ -2145,6 +2150,7 @@ func file_execution_v1_control_proto_init() {
 	if File_execution_v1_control_proto != nil {
 		return
 	}
+	file_execution_v1_runtime_enrollment_proto_init()
 	file_execution_v1_control_proto_msgTypes[11].OneofWrappers = []any{
 		(*NodeControlServiceControlRequest_Hello)(nil),
 		(*NodeControlServiceControlRequest_Heartbeat)(nil),

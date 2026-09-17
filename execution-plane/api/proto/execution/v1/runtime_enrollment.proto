@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package execution.v1;
+
+option go_package = "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1;executionv1";
+
+// Node and account identity are derived from authenticated control state.
+message EnrollRuntimeCertificateRequest {
+  string slot_id = 1;
+  uint64 execution_epoch = 2;
+  uint64 runtime_generation = 3;
+  bytes csr_pem = 4;
+}
+
+// Never distributes a new trust anchor or any private-key material.
+message EnrollRuntimeCertificateResponse {
+  bytes certificate_pem = 1;
+}

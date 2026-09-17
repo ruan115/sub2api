@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NodeControlService_EnrollNode_FullMethodName           = "/execution.v1.NodeControlService/EnrollNode"
-	NodeControlService_RenewNodeCertificate_FullMethodName = "/execution.v1.NodeControlService/RenewNodeCertificate"
-	NodeControlService_Control_FullMethodName              = "/execution.v1.NodeControlService/Control"
+	NodeControlService_EnrollNode_FullMethodName               = "/execution.v1.NodeControlService/EnrollNode"
+	NodeControlService_RenewNodeCertificate_FullMethodName     = "/execution.v1.NodeControlService/RenewNodeCertificate"
+	NodeControlService_EnrollRuntimeCertificate_FullMethodName = "/execution.v1.NodeControlService/EnrollRuntimeCertificate"
+	NodeControlService_Control_FullMethodName                  = "/execution.v1.NodeControlService/Control"
 )
 
 // NodeControlServiceClient is the client API for NodeControlService service.
@@ -30,6 +31,7 @@ const (
 type NodeControlServiceClient interface {
 	EnrollNode(ctx context.Context, in *EnrollNodeRequest, opts ...grpc.CallOption) (*EnrollNodeResponse, error)
 	RenewNodeCertificate(ctx context.Context, in *RenewNodeCertificateRequest, opts ...grpc.CallOption) (*RenewNodeCertificateResponse, error)
+	EnrollRuntimeCertificate(ctx context.Context, in *EnrollRuntimeCertificateRequest, opts ...grpc.CallOption) (*EnrollRuntimeCertificateResponse, error)
 	Control(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[NodeControlServiceControlRequest, NodeControlServiceControlResponse], error)
 }
 
@@ -61,6 +63,16 @@ func (c *nodeControlServiceClient) RenewNodeCertificate(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *nodeControlServiceClient) EnrollRuntimeCertificate(ctx context.Context, in *EnrollRuntimeCertificateRequest, opts ...grpc.CallOption) (*EnrollRuntimeCertificateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EnrollRuntimeCertificateResponse)
+	err := c.cc.Invoke(ctx, NodeControlService_EnrollRuntimeCertificate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *nodeControlServiceClient) Control(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[NodeControlServiceControlRequest, NodeControlServiceControlResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &NodeControlService_ServiceDesc.Streams[0], NodeControlService_Control_FullMethodName, cOpts...)
@@ -80,6 +92,7 @@ type NodeControlService_ControlClient = grpc.BidiStreamingClient[NodeControlServ
 type NodeControlServiceServer interface {
 	EnrollNode(context.Context, *EnrollNodeRequest) (*EnrollNodeResponse, error)
 	RenewNodeCertificate(context.Context, *RenewNodeCertificateRequest) (*RenewNodeCertificateResponse, error)
+	EnrollRuntimeCertificate(context.Context, *EnrollRuntimeCertificateRequest) (*EnrollRuntimeCertificateResponse, error)
 	Control(grpc.BidiStreamingServer[NodeControlServiceControlRequest, NodeControlServiceControlResponse]) error
 	mustEmbedUnimplementedNodeControlServiceServer()
 }
@@ -96,6 +109,9 @@ func (UnimplementedNodeControlServiceServer) EnrollNode(context.Context, *Enroll
 }
 func (UnimplementedNodeControlServiceServer) RenewNodeCertificate(context.Context, *RenewNodeCertificateRequest) (*RenewNodeCertificateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RenewNodeCertificate not implemented")
+}
+func (UnimplementedNodeControlServiceServer) EnrollRuntimeCertificate(context.Context, *EnrollRuntimeCertificateRequest) (*EnrollRuntimeCertificateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EnrollRuntimeCertificate not implemented")
 }
 func (UnimplementedNodeControlServiceServer) Control(grpc.BidiStreamingServer[NodeControlServiceControlRequest, NodeControlServiceControlResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Control not implemented")
@@ -157,6 +173,24 @@ func _NodeControlService_RenewNodeCertificate_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeControlService_EnrollRuntimeCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnrollRuntimeCertificateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeControlServiceServer).EnrollRuntimeCertificate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeControlService_EnrollRuntimeCertificate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeControlServiceServer).EnrollRuntimeCertificate(ctx, req.(*EnrollRuntimeCertificateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _NodeControlService_Control_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(NodeControlServiceServer).Control(&grpc.GenericServerStream[NodeControlServiceControlRequest, NodeControlServiceControlResponse]{ServerStream: stream})
 }
@@ -178,6 +212,10 @@ var NodeControlService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RenewNodeCertificate",
 			Handler:    _NodeControlService_RenewNodeCertificate_Handler,
+		},
+		{
+			MethodName: "EnrollRuntimeCertificate",
+			Handler:    _NodeControlService_EnrollRuntimeCertificate_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
