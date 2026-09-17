@@ -130,7 +130,9 @@ def _command(lab, cid, operation, binding, deadline, *, denied=False):
     return public_result(result.stdout, binding, request=operation == "request")
 
 
-def _cleanup(lab, containers, baseline, *, unresolved_create=False):
+def _cleanup(lab, containers, baseline, *, unresolved_create=False, evidence_name="identity-cleanup.json"):
+    if evidence_name not in ("identity-cleanup.json", "live-cleanup.json"):
+        raise ValueError("identity_cleanup_evidence_rejected")
     removed, failed = [], False
     for cid in containers.values():
         try:
@@ -149,7 +151,7 @@ def _cleanup(lab, containers, baseline, *, unresolved_create=False):
     except Exception:
         unchanged = False
     complete = not failed and not unresolved_create and len(removed) == len(containers) and unchanged
-    lab.save("identity-cleanup.json", {"removed_container_ids": removed,
+    lab.save(evidence_name, {"removed_container_ids": removed,
         "existing_containers_unchanged": unchanged, "cleanup_complete": complete,
         "unresolved_create": unresolved_create})
     if not complete:

@@ -9,6 +9,8 @@
 - `image/lab/livebootstrap/`：复用原 Lab daemon/基线/预算/精确清理，分别管理公开
   制品、实验 profile、子进程协议和双容器实验，不继续堆入 `mtls.py`。
 - `internal/provider/docker/bootstrap_http_test.go`：真实 Unix HTTP/hijack wire 回归。
+- `internal/provider/docker/bootstrap/`：安装命令完成且目标ID、退出码2、空stdout、
+  固定拒绝stderr全部匹配，才返回独立 `ErrInstallRejected`；传输失败不能充当拒绝实证。
 
 ## 执行范围及明确例外
 
@@ -17,8 +19,9 @@
 现有170用户不在Docker组。实验协调器属于**可信宿主管理程序**，由已有root Lab
 启动，访问固定Unix Docker socket即有daemon管理权限；不能用非root UID或应用
 allowlist冒称其具有安全沙箱。它不接收用户工作负载，仅处理两个准确CID。
-子进程使用干净环境、core=0、单线程调度/软内存目标、输出上限和硬时限；不持久化
-CA/node/ticket私钥，只在可信宿主进程RAM保存。真实worker全部UID1000执行。
+子进程使用干净环境、core=0、GOMAXPROCS=1/软内存目标、输出上限和硬时限；不持久化
+CA/node/ticket私钥，只在可信宿主进程RAM保存。真实worker/证书命令全部UID1000执行；
+既有固定TCP healthcheck helper为UID65532，不读取身份文件、不持有私钥。
 
 本轮新增一个**仅实验**的只读文件挂载例外：各worker仅bind已核SHA、root所有、
 单hardlink、0555的公开静态Go worker制品至 `/worker`。源必须为当前0700实验根下

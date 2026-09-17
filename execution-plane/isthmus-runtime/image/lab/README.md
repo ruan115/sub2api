@@ -23,6 +23,13 @@ with automatic discovery or reuse the production `isthmus-vm-base` tag.
   authenticated issuance, pre-listener local install and actual worker/Controller
   TLS. Docker bootstrap transport and SQL use mocks; no cross-container, CLI
   bridge, restricted egress or production acceptance is claimed.
+- `livebootstrap/`: separate two-worker Docker management probe, split into
+  artifact verification, container policy, bounded coordinator IPC and cleanup.
+  Read the [S2b2-live plan](../../../../../openspec/changes/complete-ccmax-execution-acceptance/docker-enrollment-s2b2-live.md)
+  first: a trusted host coordinator may use the daemon socket, and workers have
+  one hash-pinned public binary file mounted read-only. This lab-only exception
+  does not relax production provider checks. Keys remain in private container
+  tmpfs; no real credentials, network, cross-container mTLS or CLI bridge.
 
 Preparation runs APT in a fresh official base container, never on the host. It
 has CHOWN/SETUID/SETGID/FOWNER/DAC_OVERRIDE solely for APT's `_apt` account and
