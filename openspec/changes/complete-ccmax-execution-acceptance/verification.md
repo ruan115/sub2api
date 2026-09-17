@@ -1,5 +1,87 @@
 # 验证记录
 
+## S2b2：受认证签发与启动前bootstrap
+
+2026-09-18，先规划`6b228c0`；签发及公开receipt提交`a347da8`，实例启动接线提交
+`adecb20`。按功能拆为`runtimeenrollment/{contracts,storage}`、`runtimebootstrap`、
+`hostagent/bootstrap`、`provider/docker/bootstrap`；原控制/worker/provider仅保留适配。
+本轮关闭的是**组件启动闭环**，不提前关闭完整K3/K4；总体32%、镜像40%、身份20%不变。
+
+### 本轮实现与review
+
+- 原NodeControl新增默认关闭的受认证签发RPC，不新开明文端口。严格TLS1.3/node单叶
+  身份，RPC必须使用当前活Control stream同张证书。实例account/slot/node/epoch/gen/
+  image来自权威DB；当前session、DB及独立lease在存储前后重新核验，不能用worker
+  ready或provider_ref当首次签发前提。签证书不等于签业务ticket。
+- 首次公开证书持久化后才返回；assignment及slot/epoch唯一约束，固定完整binding、
+  SPKI、CA摘要和有效期。同key的不同ECDSA CSR仍返回原证书，换key/过期receipt拒绝，
+  不把重试变成轮换。新增014迁移，**未运行真实迁移**；SQLmock不是MySQL并发实证。
+- 正常worker启动先在实例内建独占目录和私钥，等待公开证书，默认最多45秒。
+  宿主只有固定CSR导出/公开bundle安装通道，配置钉住确切CA PEM的SHA256。实例验证
+  本地key、绑定、CA与首次安装规则后原子保存，安装前不监听。私钥不通过Env/argv/
+  RPC/数据库传送；host node key和控制CA key不送入实例。
+- 原Controller按Create→Start→Bootstrap→waitReady→实际mTLS Ready接线；宿主也核对
+  返回SPKI、CA、身份，再由固定非root Docker exec投递。管理调用前后核准sandbox/
+  准确CID/UID/image/代，exec inspect必须具有准确exec ID/ContainerID/状态/退出码。
+  Docker通道目前是mock合同验证，不冒称已实跑Docker自动投递。
+- 两位独立代理交叉review，修复正常Wait/Install锁竞争导致随机启动失败（只对busy
+  限时重试同bundle，不重签），以及最后文件I/O后取消仍可能返回成功/启动监听的窗口。
+  固定命令短输出、空exec状态等边界补回归。最终未见未处理P1/P2。
+
+### 原生Linux运行及清理
+
+仅170测试机、43只作SSH跳板，未访问216生产。使用原S1b精确base ID
+`sha256:3f7a9a38c6ae0a779eb563ceb98cd70db6ae62243bf19ffbaa35587fa15ab807`，
+一个network-none/仅lo测试容器，UID1000、只读根、cap0/NNP、1CPU/1GiB/swap0/
+pids128、独立tmpfs、无host bind/端口/新网络。预检MemAvailable约4.29GiB；入口
+要求至少2GiB以留宿主余量。root仅capless系统tar上传，新测试程序全部非root执行。
+CA、node及实例测试私钥在容器临时目录中生成，从未导出或写入Git。
+
+Go1.26.0、linux/amd64、CGO0、trimpath/buildvcs=false，336项Go/proto/module源码
+摘要及19项公开helper/锁有记录；二进制按确切大小/SHA检查后运行：
+
+| 制品 | 字节 | SHA256 |
+| --- | ---: | --- |
+| runtimebootstrap.test | 7577396 | `82ddc8ad5b4f94d2614717a09a62db15fb2643c22dfe6d58fa2881398d674b1d` |
+| worker-command.test | 17804234 | `11c27f63cab386932a42fe6e3e6270f30094533d0ee2e19fa5d28b7cf9e0d59a` |
+| control.test | 23121824 | `edd52e8f74a264925f36e5a1e18cb1c51171570e1fa4397072eca01d37241343` |
+| docker.test | 11508992 | `37f6a994c45c291073cbcce5410cdebc249e167e16b59aae31019908d717f56a` |
+| docker-bootstrap.test | 7101971 | `6d59b6a80bcf93b3bc4eda21df976f5c600085b1a4b91efee558c3ffda468160` |
+| enrollment.test | 19563120 | `9b9c4d940ac6bf83b9b9e386ccd1765bdab552cb41d22db317f3f0797b327d8e` |
+| receipts.test | 19681944 | `927b208d77dd2b1031866d6c5437e3f2cb56930b8770464f19623656f7642776` |
+| host-bootstrap.test | 17551664 | `b7ea8377f3892759f00ff70b54f4aa69d618ede6ac24519a9255d2d7f021d93b` |
+| worker.test | 22696343 | `ec5cdcc2cb61657e132a52052f7dfdac8beafc6589ac1d44735e043698576930` |
+
+九组各3遍，共90个顶层PASS，6.41秒exit0。真实控制TLS RPC→受权签发→实例本地
+安装→原worker TCP监听→原Controller mTLS→独立票据Health通过；provider/exec为
+fake，证书receipt为Memory（SQL另为mock）。覆盖无会话/断连、另一张同节点证书
+借会话、错槽/代/key/CA、lease不可用、并发首次key固定、存取期间权威变化、超时/
+取消、未安装不监听、错误/重放ticket等反例。没有真实账号/模型请求。
+
+实验根`/var/tmp/isthmus-s1b.CqSmGWCn`，准确CID
+`d33c271d3de72b93832c8b2501cf232d3b986e57a600a201742021a79d6788fd`已删除；
+临时home/密钥随tmpfs销毁，cleanup_complete=true、unresolved_create=false。
+原4业务容器ID/image/StartedAt/restarts/mount元数据一致，未读其Env/Cmd/logs。
+没有生产、UI、业务数据库、宿主防火墙、宿主Bun改动或push/部署。
+
+### 回归、保全和下一步
+
+最终全execution-plane离线race/vet通过（移除真实DB/Redis测试变量）；控制集成和
+两位代理各自相关模块另做race三遍。固定buf1.72.0/固定插件生成及lint通过。
+`make -C recovery check`通过：236恢复Python、150 Bun/1027断言、178镜像Python。
+lab另验证空匹配测试拒绝、独立profile、payload绑定与失败清理；这不替代业务验证。
+
+公开源码摘要、测试制品及证据保存在仓库外0700目录
+`/Users/ruanyang/My-project/api/z/isthmus-enrollment-artifacts.du7Nqk0y`；无私钥。
+上传包SHA256 `f3ebb87cbddf3e9ff34e01b827612b529023a552c286534c1df205bdb48ad30e`；
+native日志SHA256 `6ca037e92f7f4ed2f33141472e2fb3bd259566644ad965d42d47d16896358295`；
+清理回执SHA256 `3ad18713a605fae9e026b74f775115a58f33e6dfffe51187b3a1d4a4891d93a1`。
+运行后仅完善helper docstring说明，不改变执行逻辑。
+
+仍缺：实际Docker投递与双实例mTLS/lease撤销组合、真实SQL幂等并发、host-agent
+二进制完整装配、Go控制桥与isthmus/真实CLI接通、持久home/恢复/轮换/撤销，以及
+内核受限出口拒绝矩阵。默认生产开关不变，不宣称与线上完全一致或已可上线。
+
 ## S2b1：证书安装与实际组件mTLS
 
 2026-09-17，先提交规划`18d16e9`，本地证书模块提交`c766b5d`。

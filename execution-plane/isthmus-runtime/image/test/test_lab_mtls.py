@@ -13,11 +13,11 @@ from test.test_lab_toolchain import fixture
 
 
 class MTLSInputTests(TestCase):
-    def files(self, root):
+    def files(self, root, names=mtls.NAMES):
         (root / "mtls-bin").mkdir(mode=0o700)
         content = b"\x7fELF\x02\x01" + b"\0" * 12 + b"\x3e\0" + b"synthetic-not-executable"
         records = []
-        for name in mtls.NAMES:
+        for name in names:
             (root / "mtls-bin" / name).write_bytes(content)
             records.append({"name": name, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
         (root / "mtls-binaries.json").write_text(json.dumps(records))
@@ -30,6 +30,18 @@ class MTLSInputTests(TestCase):
             self.assertEqual(mtls.inputs(SimpleNamespace(root=root)),
                 [(root / "mtls-bin" / name, "bin/" + name, record, 0o755)
                  for name, record in zip(mtls.NAMES, records)])
+
+    def test_enrollment_profile_is_separate_and_explicit(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.files(root, mtls.ENROLLMENT_NAMES)
+            self.assertEqual(len(mtls.inputs(SimpleNamespace(root=root), mtls.ENROLLMENT_NAMES)), 9)
+            with self.assertRaises(ValueError):
+                mtls.inputs(SimpleNamespace(root=root))
+            self.assertEqual(len(mtls.ENROLLMENT_NAMES), len(mtls.ENROLLMENT_RUNS))
+            self.assertIn("^TestRuntimeEnrollment", mtls.ENROLLMENT_RUNS)
+        with self.assertRaises(ValueError):
+            mtls.probe(None, enrollment="yes")
 
     def test_rejects_unbounded_untrusted_or_changed_payload(self):
         for mode in ("name", "size", "bool-size", "extra", "hash", "elf", "link", "symlink", "duplicate"):
@@ -52,7 +64,7 @@ class MTLSInputTests(TestCase):
                     mtls.inputs(SimpleNamespace(root=root))
 
     def test_cleanup_success_failure_and_uncertain_create(self):
-        for mode in ("pass", "test-fail", "uncertain"):
+        for mode in ("pass", "test-fail", "uncertain", "empty-tests"):
             with self.subTest(mode=mode), TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
                 self.files(root)
@@ -74,7 +86,8 @@ class MTLSInputTests(TestCase):
                     self.assertIn("-test.count=3", args[-1])
                     self.assertNotIn("PRIVATE", args[-1])
                     if mode == "test-fail": raise ValueError("test-failure")
-                    (root / (name + ".log")).write_text("synthetic-mtls-native-pass\n")
+                    warning = "testing: warning: no tests to run\n" if mode == "empty-tests" else ""
+                    (root / (name + ".log")).write_text(warning + "synthetic-mtls-native-pass\n")
                 lab.logged.side_effect = logged
                 original = Path.read_text
                 def read(path, *args, **kwargs):

@@ -61,8 +61,10 @@
 
 ### K：独立身份（每项2分）
 
-2026-09-17 [S2b1证书安装与实际组件mTLS](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b1证书安装与实际组件mtls)
-已在170受限容器中三轮通过；仍缺受认证签发/启动前投递、跨容器和lease失效组合，
+2026-09-18 [S2b2受认证签发与启动前bootstrap](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b2受认证签发与启动前bootstrap)
+已在170受限容器中三轮通过：受认证签发、实例内安装、原worker/Controller就绪闭环。
+Docker管理通道仍为mock合同，SQL为mock而非真实MySQL并发；仍缺实际Docker投递、
+生产host-agent装配、跨容器和lease失效组合，
 因此K3/K4不提前勾选，总体仍32%。这不是代码无进展，而是完整验收门槛尚未关闭。
 
 - [ ] K1 稳定机器/逻辑实例标识生命周期，重启/升级/恢复/换账号的保留与换代规则。

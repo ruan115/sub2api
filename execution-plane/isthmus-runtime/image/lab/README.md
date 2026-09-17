@@ -17,6 +17,12 @@ with automatic discovery or reuse the production `isthmus-vm-base` tag.
   observations, explicit export/load, failed-target check and final receipt.
 - `smoke.py`: nonprivileged, read-only, no-network checks and every locked package.
 - `cleanup.py`: only recorded exact container IDs and the owned cache volume.
+- `mtls.py`: bounded synthetic component tests in one UID1000/network-none
+  container; default profile covers preinstalled instance TLS.
+- `enrollment.py`: opt-in nine-suite profile of that same sandbox, covering
+  authenticated issuance, pre-listener local install and actual worker/Controller
+  TLS. Docker bootstrap transport and SQL use mocks; no cross-container, CLI
+  bridge, restricted egress or production acceptance is claimed.
 
 Preparation runs APT in a fresh official base container, never on the host. It
 has CHOWN/SETUID/SETGID/FOWNER/DAC_OVERRIDE solely for APT's `_apt` account and

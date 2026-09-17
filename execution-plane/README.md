@@ -23,11 +23,34 @@ automatically applied, and historical unscoped observations remain unavailable.
 VM isolation now takes priority over further business wiring. The VM0a source
 gate verifies instance adoption against actual Docker image/network/sandbox
 metadata and forces worker HTTP traffic through an explicit proxy with verified
-upstream TLS. It does **not** implement per-instance machine identity or worker
-RPC mTLS, nor prove Linux firewall isolation. See the
+upstream TLS. S2a/S2b additionally implement instance-local P-256 keys/CSRs,
+atomic first-leaf installation and strict TLS 1.3 worker RPC. S2b2 adds opt-in
+authenticated enrollment and pre-readiness bootstrap; this is **not** yet a
+production host-agent/CLI deployment or proof of Linux firewall isolation. See the
 [VM gate plan](../openspec/changes/complete-ccmax-execution-acceptance/vm-isolation-design.md),
 [provider boundary](internal/provider/docker/README.md) and
 [online identity evidence](../recovery/docs/vm-identity-tls-baseline-2026-09-16.md).
+
+### Instance bootstrap module boundaries
+
+```text
+internal/runtimeidentity/            local identity, CSR and strict TLS policy
+internal/runtimeenrollment/          authenticated issuance and retry policy
+  contracts/                        read-only authoritative grant types
+  storage/                          public certificate receipts (SQL/memory)
+internal/runtimebootstrap/           instance-local CA pin, install and wait
+internal/hostagent/bootstrap/        request → control RPC → install coordinator
+internal/provider/docker/bootstrap/  fixed non-root Docker exec protocol
+```
+
+Existing control/worker/provider packages contain only the required adapters;
+tests live beside their owning modules. SQL migration 014 remains in the
+central `internal/runtime/store/migrations/` directory and is **not** applied
+automatically. The original NodeControl service carries the new opt-in RPC;
+no plaintext bootstrap port is added. Instance private keys never travel
+through the host, RPC or database. See the
+[S2b2 design](../openspec/changes/complete-ccmax-execution-acceptance/instance-enrollment-s2b2.md)
+for pending production assembly, rotation and cross-container acceptance gates.
 
 - slot lifecycle state machine;
 - validated pilot timing and capacity defaults;

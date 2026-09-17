@@ -1,6 +1,8 @@
 """S2b synthetic Go component tests in one network-none Linux probe.
 
-Not cross-container mTLS, CLI bridging, enrollment or a production launcher.
+The opt-in enrollment profile also covers authenticated component bootstrap;
+neither profile proves live Docker bootstrap, cross-container mTLS, CLI
+bridging or a production launcher.
 Reuses the existing image/resource/ownership checks; no daemon configuration.
 """
 import hashlib
@@ -21,18 +23,20 @@ from recoverykit.evidence.filesystem import file_descriptor
 
 NAMES = ("identity.test", "identity-command.test", "worker.test")
 RUNS = (".", ".", "^TestProcessMTLS")
+ENROLLMENT_NAMES = ("runtimebootstrap.test", "worker-command.test", "control.test", "docker.test", "docker-bootstrap.test", "enrollment.test", "receipts.test", "host-bootstrap.test", "worker.test")
+ENROLLMENT_RUNS = (".", "^TestBootstrap", "^TestRuntimeEnrollment", "^Test(Provider)?Bootstrap", ".", ".", ".", ".", "^TestProcess(MTLS|Bootstrap)")
 
 
-def inputs(lab):
+def inputs(lab, names=NAMES):
     with file_descriptor(lab.root, "mtls-binaries.json") as (fd, info):
         if info.st_nlink != 1 or not 0 < info.st_size <= 4096:
             raise ValueError("mtls_manifest_rejected")
         data = os.read(fd, 4097)
     records = json.loads(data, object_pairs_hook=_object)
-    if not isinstance(records, list) or len(records) != len(NAMES):
+    if not isinstance(records, list) or len(records) != len(names):
         raise ValueError("mtls_manifest_rejected")
     entries = []
-    for record, name in zip(records, NAMES):
+    for record, name in zip(records, names):
         if (not isinstance(record, dict) or set(record) != {"name", "size", "sha256"}
                 or record["name"] != name or type(record["size"]) is not int
                 or not 0 < record["size"] <= 64 * 1024**2
@@ -58,12 +62,15 @@ def inputs(lab):
     return entries
 
 
-def probe(lab):
+def probe(lab, *, enrollment=False):
+    if type(enrollment) is not bool:
+        raise ValueError("mtls_suite_rejected")
+    names, runs = (ENROLLMENT_NAMES, ENROLLMENT_RUNS) if enrollment else (NAMES, RUNS)
     available = int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines()
                          if line.startswith("MemAvailable:")))
     if available < 2 * 1024**2:
         raise ValueError("mtls_host_memory_reserve")
-    entries = inputs(lab)
+    entries = inputs(lab, names)
     archive = lab.root / "mtls-inputs.tar"
     _archive(archive, entries)
     baseline = lab.baseline()
@@ -88,7 +95,7 @@ def probe(lab):
         script = isolation_script(memory_bytes=1024**3)
         for _, name, record, _ in entries:
             script += 'test "$(sha256sum ' + name + " | cut -d ' ' -f 1)\" = " + record["sha256"] + "\n"
-        for name, run in zip(NAMES, RUNS):
+        for name, run in zip(names, runs):
             script += "bin/" + name + " -test.v -test.count=3 -test.timeout=30s -test.run='" + run + "'\n"
         script += "echo synthetic-mtls-native-pass\n"
         lab.logged("mtls-native", ["exec", "--user", "1000:1000", cid, "/usr/bin/timeout", "--kill-after=5", "130",
@@ -97,13 +104,15 @@ def probe(lab):
         validate_probe(value, lab.name, memory_gib=1)
         if value["State"]["OOMKilled"] or not value["State"]["Running"]:
             raise ValueError("mtls_probe_container_failed")
-        if not (lab.root / "mtls-native.log").read_text().rstrip().endswith("synthetic-mtls-native-pass"):
+        output = (lab.root / "mtls-native.log").read_text()
+        if "warning: no tests to run" in output or not output.rstrip().endswith("synthetic-mtls-native-pass"):
             raise ValueError("mtls_tests_incomplete")
     finally:
         _cleanup(lab, containers, baseline, unresolved_create=unresolved)
     lab.save("mtls-result.json", {"native_component_tests": True, "repetitions": 3,
         "actual_worker_and_controller_tls": True, "synthetic_credentials_only": True,
-        "real_model_requests": 0, "cross_container_mtls": False, "authenticated_enrollment": False,
+        "real_model_requests": 0, "cross_container_mtls": False, "authenticated_enrollment": enrollment,
+        "docker_bootstrap_transport_live": False,
         "cli_bridge": False, "restricted_egress_verified": False, "production_ready": False})
 
 
