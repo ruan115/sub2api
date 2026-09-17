@@ -28,6 +28,10 @@ func (a *Authority) IssueRuntime(binding runtimeidentity.Binding, csrPEM []byte)
 	if err != nil {
 		return IssuedCertificate{}, ErrRuntimeCertificate
 	}
+	serverName, err := binding.ServerName()
+	if err != nil {
+		return IssuedCertificate{}, ErrRuntimeCertificate
+	}
 	publicKeyDER, err := x509.MarshalPKIXPublicKey(request.PublicKey)
 	if err != nil {
 		return IssuedCertificate{}, ErrRuntimeCertificate
@@ -40,7 +44,7 @@ func (a *Authority) IssueRuntime(binding runtimeidentity.Binding, csrPEM []byte)
 	// later clock rollback must not bypass the CA NotBefore check above.
 	issuer := *a
 	issuer.now = func() time.Time { return current }
-	issued, err := issuer.issue(pkix.Name{}, request.PublicKey, publicKeyDER, nil,
+	issued, err := issuer.issue(pkix.Name{}, request.PublicKey, publicKeyDER, []string{serverName},
 		[]*url.URL{identity}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
 	if err != nil {
 		return IssuedCertificate{}, ErrRuntimeCertificate

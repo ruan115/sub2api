@@ -4,9 +4,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/hex"
 	"encoding/pem"
 	"net/url"
 	"strings"
@@ -23,6 +25,33 @@ func TestBindingIsCanonicalAndBounded(t *testing.T) {
 		if value.Validate() == nil {
 			t.Fatal("unsafe binding accepted")
 		}
+	}
+}
+
+func TestBindingServerNameIsDerivedFromEveryIdentityField(t *testing.T) {
+	b := testBinding()
+	u, _ := b.URI()
+	digest := sha256.Sum256([]byte(u.String()))
+	name, err := b.ServerName()
+	if err != nil || name != "rt-"+hex.EncodeToString(digest[:16])+".execution.invalid" {
+		t.Fatal("server name is not the canonical identity digest")
+	}
+	for _, mutate := range []func(*Binding){
+		func(b *Binding) { b.AccountHash = strings.Repeat("b", 32) },
+		func(b *Binding) { b.NodeID = "node-b" },
+		func(b *Binding) { b.SlotID = "slot-b" },
+		func(b *Binding) { b.Epoch++ },
+		func(b *Binding) { b.Generation++ },
+	} {
+		other := b
+		mutate(&other)
+		got, err := other.ServerName()
+		if err != nil || got == name {
+			t.Fatal("changed identity retained the server name")
+		}
+	}
+	if _, err := (Binding{}).ServerName(); err != ErrIdentity {
+		t.Fatal("invalid binding got a server name")
 	}
 }
 

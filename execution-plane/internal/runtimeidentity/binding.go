@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"net/url"
@@ -44,6 +46,17 @@ func (b Binding) URI() (*url.URL, error) {
 		return nil, ErrIdentity
 	}
 	return &url.URL{Scheme: "spiffe", Host: "sub2api.execution", Path: "/runtime/" + b.NodeID + "/" + b.SlotID + "/" + b.AccountHash + "/" + strconv.FormatUint(b.Epoch, 10) + "/" + strconv.FormatUint(b.Generation, 10)}, nil
+}
+
+// ServerName lets Go's default TLS verifier check a DNS SAN without depending
+// on a container address. It complements, never replaces, exact URI identity.
+func (b Binding) ServerName() (string, error) {
+	u, err := b.URI()
+	if err != nil {
+		return "", ErrIdentity
+	}
+	digest := sha256.Sum256([]byte(u.String()))
+	return "rt-" + hex.EncodeToString(digest[:16]) + ".execution.invalid", nil
 }
 
 // ValidateCSR does not authorize the binding. The caller must first establish

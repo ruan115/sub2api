@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -23,9 +24,10 @@ const maxStateBytes = 16 * 1024
 // Identity deliberately has no exported private-key field. Public() and CSR()
 // are the only export paths; JSON formatting of Identity cannot reveal a key.
 type Identity struct {
-	binding   Binding
-	machineID string
-	key       *ecdsa.PrivateKey
+	binding        Binding
+	machineID      string
+	key            *ecdsa.PrivateKey
+	certificatePEM []byte
 }
 
 type Public struct {
@@ -35,10 +37,11 @@ type Public struct {
 }
 
 type diskState struct {
-	Version    int     `json:"version"`
-	Binding    Binding `json:"binding"`
-	MachineID  string  `json:"machine_id"`
-	PrivateKey []byte  `json:"private_key_pkcs8"`
+	Version        int     `json:"version"`
+	Binding        Binding `json:"binding"`
+	MachineID      string  `json:"machine_id"`
+	PrivateKey     []byte  `json:"private_key_pkcs8"`
+	CertificatePEM []byte  `json:"certificate_pem,omitempty"`
 }
 
 func (i *Identity) Public() Public {
@@ -64,6 +67,20 @@ func (i *Identity) CSR() ([]byte, error) {
 // The parent must be an already provisioned, owner-only instance directory.
 // A trusted host/kernel and no hostile concurrent same-UID writer are assumed.
 func Open(directory string, binding Binding, create bool) (*Identity, error) {
+	return locked(directory, binding, func(root *os.Root, dir *os.File) (*Identity, error) {
+		_, err := root.Lstat(stateName)
+		if os.IsNotExist(err) && create {
+			if err = initialize(root, dir, binding); err != nil {
+				return nil, ErrIdentity
+			}
+		} else if err != nil {
+			return nil, ErrIdentity
+		}
+		return read(root, binding)
+	})
+}
+
+func locked(directory string, binding Binding, operation func(*os.Root, *os.File) (*Identity, error)) (*Identity, error) {
 	if binding.Validate() != nil || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return nil, ErrIdentity
 	}
@@ -111,15 +128,7 @@ func Open(directory string, binding Binding, create bool) (*Identity, error) {
 			return nil, ErrIdentity
 		}
 	}
-	_, err = root.Lstat(stateName)
-	if os.IsNotExist(err) && create {
-		if err = initialize(root, dir, binding); err != nil {
-			return nil, ErrIdentity
-		}
-	} else if err != nil {
-		return nil, ErrIdentity
-	}
-	identity, err := read(root, binding)
+	identity, err := operation(root, dir)
 	after, statErr := os.Lstat(directory)
 	if err != nil || statErr != nil || !safeInfo(after, true) || !os.SameFile(opened, after) {
 		return nil, ErrIdentity
@@ -155,7 +164,7 @@ func initialize(root *os.Root, dir *os.File, binding Binding) error {
 		return ErrIdentity
 	}
 	defer clear(der)
-	data, err := json.Marshal(diskState{1, binding, hex.EncodeToString(id), der})
+	data, err := json.Marshal(diskState{Version: 1, Binding: binding, MachineID: hex.EncodeToString(id), PrivateKey: der})
 	if err != nil {
 		return ErrIdentity
 	}
@@ -235,5 +244,78 @@ func read(root *os.Root, binding Binding) (*Identity, error) {
 	if !ok || key.Curve != elliptic.P256() {
 		return nil, ErrIdentity
 	}
-	return &Identity{binding, state.MachineID, key}, nil
+	return &Identity{binding: binding, machineID: state.MachineID, key: key, certificatePEM: state.CertificatePEM}, nil
+}
+
+// InstallCertificate installs the first certificate only. Trust comes from the
+// caller's authenticated configuration, never from the submitted leaf. This
+// operation is not a signing/enrollment authorization endpoint or rotation API.
+func InstallCertificate(directory string, binding Binding, certificatePEM, trustPEM []byte) error {
+	_, err := locked(directory, binding, func(root *os.Root, dir *os.File) (*Identity, error) {
+		identity, err := read(root, binding)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		if _, err := identity.ServerTLS(certificatePEM, trustPEM); err != nil {
+			return nil, ErrIdentity
+		}
+		if len(identity.certificatePEM) != 0 {
+			if !bytes.Equal(identity.certificatePEM, certificatePEM) {
+				return nil, ErrIdentity
+			}
+			return identity, nil
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(identity.key)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		defer clear(der)
+		data, err := json.Marshal(diskState{Version: 1, Binding: binding, MachineID: identity.machineID, PrivateKey: der, CertificatePEM: certificatePEM})
+		if err != nil || len(data) > maxStateBytes {
+			return nil, ErrIdentity
+		}
+		defer clear(data)
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return nil, ErrIdentity
+		}
+		name := ".identity-install-" + hex.EncodeToString(id)
+		file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		defer root.Remove(name) // only this call's temporary state
+		if n, err := file.Write(data); err != nil || n != len(data) {
+			file.Close()
+			return nil, ErrIdentity
+		}
+		if err := file.Sync(); err != nil {
+			file.Close()
+			return nil, ErrIdentity
+		}
+		if err := file.Close(); err != nil {
+			return nil, ErrIdentity
+		}
+		// The same private key/identity remains in a single atomic state file.
+		// locked() excludes other cooperating initializers/installers. A trusted
+		// host and no malicious same-UID writer remain explicit assumptions.
+		if err := root.Rename(name, stateName); err != nil {
+			return nil, ErrIdentity
+		}
+		if err := dir.Sync(); err != nil {
+			return nil, ErrIdentity
+		}
+		return read(root, binding)
+	})
+	return err
+}
+
+// LoadServerTLS requires a preinstalled certificate; it never initializes or
+// enrolls an identity and never exports its private key.
+func LoadServerTLS(directory string, binding Binding, trustPEM []byte) (*tls.Config, error) {
+	identity, err := Open(directory, binding, false)
+	if err != nil || len(identity.certificatePEM) == 0 {
+		return nil, ErrIdentity
+	}
+	return identity.ServerTLS(identity.certificatePEM, trustPEM)
 }

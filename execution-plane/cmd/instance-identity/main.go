@@ -17,11 +17,17 @@ import (
 var errCommand = errors.New("instance identity operation rejected")
 
 func run(args []string, input io.Reader, output io.Writer) error {
-	if len(args) != 2 || (args[0] != "init" && args[0] != "show" && args[0] != "request") {
+	install := len(args) == 3 && args[0] == "install"
+	if !install && (len(args) != 2 || (args[0] != "init" && args[0] != "show" && args[0] != "request")) {
 		return errCommand
 	}
-	data, err := io.ReadAll(io.LimitReader(input, 4097))
-	if err != nil || len(data) == 0 || len(data) > 4096 {
+	limit := 4096
+	fieldCount := 5
+	if install {
+		limit, fieldCount = 16*1024, 6
+	}
+	data, err := io.ReadAll(io.LimitReader(input, int64(limit+1)))
+	if err != nil || len(data) == 0 || len(data) > limit {
 		return errCommand
 	}
 	var binding runtimeidentity.Binding
@@ -42,6 +48,10 @@ func run(args []string, input io.Reader, output io.Writer) error {
 		}
 		switch name {
 		case "account_hash", "slot_id", "node_id", "epoch", "generation":
+		case "certificate_pem":
+			if !install {
+				return errCommand
+			}
 		default:
 			return errCommand
 		}
@@ -52,8 +62,15 @@ func run(args []string, input io.Reader, output io.Writer) error {
 		fields[name] = value
 	}
 	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || len(fields) != 5 {
+	if err != nil || end != json.Delim('}') || len(fields) != fieldCount {
 		return errCommand
+	}
+	var certificate string
+	if install {
+		if json.Unmarshal(fields["certificate_pem"], &certificate) != nil || certificate == "" {
+			return errCommand
+		}
+		delete(fields, "certificate_pem")
 	}
 	canonical, err := json.Marshal(fields)
 	if err != nil || json.Unmarshal(canonical, &binding) != nil || binding.Validate() != nil {
@@ -62,6 +79,12 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	var extra any
 	if decoder.Decode(&extra) != io.EOF {
 		return errCommand
+	}
+	if install {
+		trust, err := runtimeidentity.ReadTrustFile(args[2])
+		if err != nil || runtimeidentity.InstallCertificate(args[1], binding, []byte(certificate), trust) != nil {
+			return errCommand
+		}
 	}
 	identity, err := runtimeidentity.Open(args[1], binding, args[0] == "init")
 	if err != nil {

@@ -71,8 +71,9 @@ func TestIssueRuntimeExactServerIdentityAndUsesInstancePublicKey(t *testing.T) {
 	}
 	leaf := issued.Certificate
 	identity, _ := binding.URI()
+	serverName, _ := binding.ServerName()
 	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != identity.String() || len(leaf.Subject.Names) != 0 ||
-		len(leaf.DNSNames) != 0 || len(leaf.IPAddresses) != 0 || len(leaf.EmailAddresses) != 0 {
+		len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != serverName || len(leaf.IPAddresses) != 0 || len(leaf.EmailAddresses) != 0 {
 		t.Fatal("issued certificate contains an unexpected identity")
 	}
 	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth ||
@@ -92,7 +93,7 @@ func TestIssueRuntimeExactServerIdentityAndUsesInstancePublicKey(t *testing.T) {
 		t.Fatal("certificate TTL was not enforced")
 	}
 	options := x509.VerifyOptions{Roots: authority.CertificatePool(), CurrentTime: now,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+		DNSName: serverName, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	if _, err := leaf.Verify(options); err != nil {
 		t.Fatalf("verify runtime server certificate: %v", err)
 	}
@@ -105,6 +106,9 @@ func TestIssueRuntimeExactServerIdentityAndUsesInstancePublicKey(t *testing.T) {
 	}
 	if _, err := ServiceIDFromCertificate(leaf); err == nil {
 		t.Fatal("runtime certificate was accepted as an internal service client")
+	}
+	if _, err := runtimeidentity.ValidateCertificate(binding, issued.CertificatePEM, authority.CertificatePEM(), now); err != nil {
+		t.Fatalf("issued runtime certificate failed the runtime TLS policy: %v", err)
 	}
 }
 
