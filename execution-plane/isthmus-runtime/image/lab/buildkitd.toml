@@ -1,0 +1,11 @@
+insecure-entitlements = []
+
+[worker.oci]
+  max-parallelism = 1
+  gc = true
+  reservedSpace = "256MB"
+  maxUsedSpace = "4GB"
+  minFreeSpace = "20GB"
+
+[worker.containerd]
+  enabled = false

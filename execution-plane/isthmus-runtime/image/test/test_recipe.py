@@ -29,9 +29,11 @@ class RecipeTests(unittest.TestCase):
 
     def test_home_intermediate_directories_have_explicit_private_ownership(self):
         recipe = render_recipe(fixture()).decode()
+        self.assertIn("--no-create-home --home-dir /home/claude", recipe)
+        self.assertNotIn("--create-home", recipe)
         install = recipe.split("install -d -o 1000 -g 1000 -m 0700", 1)[1].split("&&", 1)[0]
         targets = install.replace("\\", " ").split()
-        for path in ("/home/claude/.cache", "/home/claude/.cache/isthmus", "/home/claude/.local",
+        for path in ("/home/claude", "/home/claude/.cache", "/home/claude/.cache/isthmus", "/home/claude/.local",
                      "/home/claude/.local/bin", "/home/claude/.claude"):
             self.assertIn(path, targets)
 

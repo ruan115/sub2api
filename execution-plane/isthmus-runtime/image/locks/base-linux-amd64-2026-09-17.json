@@ -1,0 +1,89 @@
+{
+  "base_image": "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f",
+  "kind": "isthmus-base-build-inputs",
+  "packages": [
+    {
+      "architecture": "all",
+      "file": "ca-certificates_20250419_all.deb",
+      "name": "ca-certificates",
+      "sha256": "ef590f89563aa4b46c8260d49d1cea0fc1b181d19e8df3782694706adf05c184",
+      "size": 161704,
+      "source_url": "https://deb.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_20250419_all.deb",
+      "version": "20250419"
+    },
+    {
+      "architecture": "amd64",
+      "file": "libncursesw6_6.5+20250216-2_amd64.deb",
+      "name": "libncursesw6",
+      "sha256": "47baa2e11579583654583a066b69bd5a5d2f22423081f707ed6c0c3ba6d538b7",
+      "size": 135484,
+      "source_url": "https://deb.debian.org/debian/pool/main/n/ncurses/libncursesw6_6.5+20250216-2_amd64.deb",
+      "version": "6.5+20250216-2"
+    },
+    {
+      "architecture": "amd64",
+      "file": "libproc2-0_4.0.4-9_amd64.deb",
+      "name": "libproc2-0",
+      "sha256": "c9d61caab1b2ddfc3f17edb95be31b9809fcb2daf27d853dff615bc4ebd08b4b",
+      "size": 65596,
+      "source_url": "https://deb.debian.org/debian/pool/main/p/procps/libproc2-0_4.0.4-9_amd64.deb",
+      "version": "2:4.0.4-9"
+    },
+    {
+      "architecture": "amd64",
+      "file": "libssl3t64_3.5.7-1~deb13u2_amd64.deb",
+      "name": "libssl3t64",
+      "sha256": "916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d",
+      "size": 2453872,
+      "source_url": "https://deb.debian.org/debian/pool/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_amd64.deb",
+      "version": "3.5.7-1~deb13u2"
+    },
+    {
+      "architecture": "amd64",
+      "file": "openssl-provider-legacy_3.5.7-1~deb13u2_amd64.deb",
+      "name": "openssl-provider-legacy",
+      "sha256": "f155c8191ae6d41da73d792f4182680aeafeb85c3dd223934ee9fdd115c4f1fa",
+      "size": 316132,
+      "source_url": "https://deb.debian.org/debian/pool/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u2_amd64.deb",
+      "version": "3.5.7-1~deb13u2"
+    },
+    {
+      "architecture": "amd64",
+      "file": "openssl_3.5.7-1~deb13u2_amd64.deb",
+      "name": "openssl",
+      "sha256": "4ff006f431d8c2e69fa736885a3b6e779f2448535f69dbde821d9f0ff87ad8ea",
+      "size": 1507300,
+      "source_url": "https://deb.debian.org/debian/pool/main/o/openssl/openssl_3.5.7-1~deb13u2_amd64.deb",
+      "version": "3.5.7-1~deb13u2"
+    },
+    {
+      "architecture": "amd64",
+      "file": "passwd_4.17.4-2_amd64.deb",
+      "name": "passwd",
+      "sha256": "c5eaef41c6947d2888fa3462f787a7e02158b997bd0119154283f425ba57b8b8",
+      "size": 1228860,
+      "source_url": "https://deb.debian.org/debian/pool/main/s/shadow/passwd_4.17.4-2_amd64.deb",
+      "version": "1:4.17.4-2"
+    },
+    {
+      "architecture": "amd64",
+      "file": "procps_4.0.4-9_amd64.deb",
+      "name": "procps",
+      "sha256": "4db90bb6776772fc52585d6b1fbfc52ec2a85480e1b4363b743fbb2ffa2a5375",
+      "size": 882088,
+      "source_url": "https://deb.debian.org/debian/pool/main/p/procps/procps_4.0.4-9_amd64.deb",
+      "version": "2:4.0.4-9"
+    },
+    {
+      "architecture": "amd64",
+      "file": "util-linux_2.41.5-0+deb13u1_amd64.deb",
+      "name": "util-linux",
+      "sha256": "7d5b1176cc3d8cc6b290b3ec17af458f362d9200845f30da22057a8198744430",
+      "size": 1242392,
+      "source_url": "https://deb.debian.org/debian/pool/main/u/util-linux/util-linux_2.41.5-0+deb13u1_amd64.deb",
+      "version": "2.41.5-0+deb13u1"
+    }
+  ],
+  "platform": "linux/amd64",
+  "schema_version": 1
+}

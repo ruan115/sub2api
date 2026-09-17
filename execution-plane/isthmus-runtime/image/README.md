@@ -1,10 +1,11 @@
 # isthmus-vm-base: offline base-image build inputs
 
-This module implements **S1a**, the base-only recipe and private build-context
-staging. It does not download, build, start Docker/Colima, invoke a shell, or
-execute/unpack packages. The current runtime is still fake-only. This image
-recipe has **not been built**, and there is no committed complete release lock.
-An image called `isthmus-vm-base` is not by itself a working isthmus service.
+The offline **S1a** modules stage and verify base-only build contexts; they never
+download, run a shell or start Docker. **S1b** adds a separate, explicitly scoped
+[Linux lab](lab/README.md) and a real [amd64 base lock](locks/base-linux-amd64-2026-09-17.json).
+The base recipe has now been built on the approved test host. This is not a
+complete runtime release: app/Bun/CLI, instance identity and protocol integration
+remain unfinished. An image called `isthmus-vm-base` is not itself the service.
 
 ## Files and responsibility
 
@@ -18,6 +19,9 @@ An image called `isthmus-vm-base` is not by itself a working isthmus service.
 - `imagekit/context.py`: bounded file copy and private context verification.
 - `stage.py`: explicit paths and fixed JSON summary/error output.
 - `test/`: synthetic locks and ar-magic bytes, not installable Debian packages.
+- `lab/`: explicit approved-host preparation, trusted BuildKit build, bounded
+  subprocess handling, nonprivileged smoke and exact-owned-resource cleanup.
+- `locks/`: reviewed public metadata, never package binaries or credentials.
 
 The old online base did not contain app/Bun/CLI either. Those artifacts belong
 to a later derived runtime image, not mutable shared application volumes. Their
@@ -94,13 +98,13 @@ CLI errors expose only an exception class. Environment proxy/Docker settings
 are never consulted; staging does not connect to any daemon.
 
 Even success returns `image_built=false` and `execution_permitted=false`.
-`lab inspect` success is not build authorization. A later explicit dedicated
-builder must check VM mounts/forwarding, daemon identity, base availability,
-platform and network rules. Per the [Dockerfile reference](https://docs.docker.com/reference/dockerfile/),
+`lab inspect` success is not build authorization. S1b separately pins and checks
+the approved trusted builder; a future dedicated workload lab still needs VM
+mounts/forwarding and kernel network rules (N3/N4). Per the [Dockerfile reference](https://docs.docker.com/reference/dockerfile/),
 `RUN --network=none` controls RUN networking; it cannot establish that FROM or
 the builder itself made no network requests. No external syntax frontend is
 selected by this recipe. Only the staged [build context](https://docs.docker.com/build/concepts/context/)
-may be sent to that future builder, never the repository root or account home.
+may be sent to the explicit builder, never the repository root or account home.
 
 Real builds must additionally verify dpkg dependency/Pre-Depends ordering,
 base platform/contents, package identity and absence of inherited capabilities
@@ -115,7 +119,8 @@ worker or weaken provider restrictions to make it run.
 make -C recovery image
 ```
 
-Only synthetic offline tests. They cannot close I2/I3/I5, N3 or production
-compatibility. Stage mapping and progress reporting:
+This command runs synthetic offline tests, not remote builds. The separately
+recorded S1b run supplies actual I2 evidence; it does not close I3/I4/I5, N3 or
+production compatibility. Stage mapping and progress reporting:
 [focused stages](../../../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md),
 [fixed ledger](../../../../docs/plans/isthmus-container-delivery-v1.md).

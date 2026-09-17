@@ -18,10 +18,9 @@ RUN --network=none cd /tmp/isthmus-base-packages \
 # A conflicting pre-existing UID/name fails the build; do not delete users.
 # No standing SYS_ADMIN file capability or shared credential material.
 RUN --network=none groupadd --gid 1000 claude \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash claude \
-    && chmod 0700 /home/claude \
+    && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /home/claude --shell /bin/bash claude \
     && install -d -o 1000 -g 1000 -m 0700 \
-       /home/claude/.claude /home/claude/.cache /home/claude/.cache/isthmus \
+       /home/claude /home/claude/.claude /home/claude/.cache /home/claude/.cache/isthmus \
        /home/claude/.local /home/claude/.local/bin \
     && truncate -s 0 /etc/machine-id \
     && rm -f /var/lib/dbus/machine-id
