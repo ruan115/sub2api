@@ -15,6 +15,11 @@ import (
 var ErrBootstrap = errors.New("runtime bootstrap rejected")
 var ErrNotReady = errors.New("runtime bootstrap not ready")
 
+// ErrInstallRejected means the exact worker install command completed and
+// explicitly refused its input. Transport and inspection failures must never
+// produce this signal or be accepted as successful negative test evidence.
+var ErrInstallRejected = errors.New("runtime bootstrap install explicitly rejected")
+
 const DefaultTimeout = 45 * time.Second
 const MaxPublicBytes = 24 * 1024
 const MaxEncodedBundleBytes = 32 * 1024

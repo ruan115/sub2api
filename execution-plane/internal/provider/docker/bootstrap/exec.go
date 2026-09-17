@@ -24,7 +24,7 @@ type createRequest struct {
 }
 
 func Request(ctx context.Context, cid string, uid uint32, call Call) ([]byte, error) {
-	return execute(ctx, cid, uid, []string{"/worker", "bootstrap-request"}, call)
+	return execute(ctx, cid, uid, []string{"/worker", "bootstrap-request"}, call, false)
 }
 
 func Install(ctx context.Context, cid string, uid uint32, bundle runtimebootstrap.PublicBundle, call Call) error {
@@ -32,7 +32,7 @@ func Install(ctx context.Context, cid string, uid uint32, bundle runtimebootstra
 	if err != nil {
 		return runtimebootstrap.ErrBootstrap
 	}
-	output, err := execute(ctx, cid, uid, []string{"/worker", "bootstrap-install", argument}, call)
+	output, err := execute(ctx, cid, uid, []string{"/worker", "bootstrap-install", argument}, call, true)
 	if err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func Install(ctx context.Context, cid string, uid uint32, bundle runtimebootstra
 	return nil
 }
 
-func execute(ctx context.Context, cid string, uid uint32, command []string, call Call) ([]byte, error) {
+func execute(ctx context.Context, cid string, uid uint32, command []string, call Call, install bool) ([]byte, error) {
 	if ctx == nil || ctx.Err() != nil || !idPattern.MatchString(cid) || uid == 0 || call == nil {
 		return nil, runtimebootstrap.ErrBootstrap
 	}
@@ -72,12 +72,15 @@ func execute(ctx context.Context, cid string, uid uint32, command []string, call
 		Running     *bool  `json:"Running"`
 		ExitCode    *int   `json:"ExitCode"`
 	}
-	if call(ctx, "GET", "/exec/"+created.ID+"/json", nil, &inspected) != nil || inspected.Running == nil || inspected.ExitCode == nil ||
+	if call(ctx, "GET", "/exec/"+created.ID+"/json", nil, &inspected) != nil || ctx.Err() != nil || inspected.Running == nil || inspected.ExitCode == nil ||
 		*inspected.Running || inspected.ID != created.ID || inspected.ContainerID != cid {
 		return nil, runtimebootstrap.ErrBootstrap
 	}
 	if *inspected.ExitCode == 75 && len(stdout) == 0 && string(stderr) == "runtime bootstrap rejected\n" {
 		return nil, runtimebootstrap.ErrNotReady
+	}
+	if install && *inspected.ExitCode == 2 && len(stdout) == 0 && string(stderr) == "runtime bootstrap rejected\n" {
+		return nil, runtimebootstrap.ErrInstallRejected
 	}
 	if *inspected.ExitCode != 0 || len(stderr) != 0 || len(stdout) == 0 {
 		return nil, runtimebootstrap.ErrBootstrap
