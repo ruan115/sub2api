@@ -26,6 +26,7 @@ import (
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/credential"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimebootstrap"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeidentity"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/ticket"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker/fixedtransport"
@@ -46,6 +47,7 @@ type ProcessConfig struct {
 	RuntimeGeneration   uint64
 	IdentityDirectory   string
 	RuntimeTrustFile    string
+	BootstrapCASHA256   string
 	ListenAddress       string
 	Identity            Identity
 	TicketPublicKey     ed25519.PublicKey
@@ -96,6 +98,7 @@ func LoadProcessConfig(getenv func(string) string) (ProcessConfig, error) {
 		RuntimeGeneration: generation,
 		IdentityDirectory: getenv("EXECUTION_IDENTITY_DIRECTORY"),
 		RuntimeTrustFile:  getenv("EXECUTION_RUNTIME_TRUST_FILE"),
+		BootstrapCASHA256: getenv("EXECUTION_BOOTSTRAP_CA_SHA256"),
 		ListenAddress:     strings.TrimSpace(getenv("EXECUTION_LISTEN_ADDRESS")),
 		Identity: Identity{
 			AccountID: strings.TrimSpace(getenv("EXECUTION_ACCOUNT_HASH")),
@@ -158,12 +161,20 @@ func (c ProcessConfig) Validate() error {
 			return runtimeidentity.ErrIdentity
 		}
 	}
+	if c.BootstrapCASHA256 != "" && c.BootstrapConfig().Validate() != nil {
+		return runtimebootstrap.ErrBootstrap
+	}
 	return nil
 }
 
 func (c ProcessConfig) runtimeBinding() runtimeidentity.Binding {
 	return runtimeidentity.Binding{AccountHash: c.Identity.AccountID, SlotID: c.Identity.SlotID,
 		NodeID: c.Identity.NodeID, Epoch: c.Identity.Epoch, Generation: c.RuntimeGeneration}
+}
+
+func (c ProcessConfig) BootstrapConfig() runtimebootstrap.Config {
+	return runtimebootstrap.Config{IdentityDirectory: c.IdentityDirectory, TrustFile: c.RuntimeTrustFile,
+		TrustSHA256: c.BootstrapCASHA256, Binding: c.runtimeBinding(), Timeout: runtimebootstrap.DefaultTimeout}
 }
 
 func decodePublicKey(encoded string) (ed25519.PublicKey, error) {
@@ -276,8 +287,19 @@ func copySafeRequestHeaders(target http.Header, source map[string]string) {
 }
 
 func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) error {
+	if ctx == nil {
+		return errors.New("worker context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := config.Validate(); err != nil {
 		return err
+	}
+	if config.BootstrapCASHA256 != "" {
+		if err := runtimebootstrap.Wait(ctx, config.BootstrapConfig()); err != nil {
+			return runtimebootstrap.ErrBootstrap
+		}
 	}
 	trust, err := runtimeidentity.ReadTrustFile(config.RuntimeTrustFile)
 	if err != nil {
@@ -340,6 +362,9 @@ func RunProcess(ctx context.Context, config ProcessConfig, logger *slog.Logger) 
 		HealthSource: lifecycle, ImageDigest: config.ImageDigest,
 	})
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp", config.ListenAddress)

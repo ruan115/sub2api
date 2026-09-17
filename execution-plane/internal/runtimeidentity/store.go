@@ -44,6 +44,9 @@ type diskState struct {
 	CertificatePEM []byte  `json:"certificate_pem,omitempty"`
 }
 
+// HasCertificate exposes only installation state, never private key material.
+func (i *Identity) HasCertificate() bool { return i != nil && len(i.certificatePEM) != 0 }
+
 func (i *Identity) Public() Public {
 	der, _ := x509.MarshalPKIXPublicKey(&i.key.PublicKey)
 	hash := sha256.Sum256(der)

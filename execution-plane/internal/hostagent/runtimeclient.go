@@ -33,6 +33,13 @@ type ControllerConfig struct {
 	ReadyTimeout    time.Duration
 	RuntimeTrustPEM []byte
 	NodeCertificate tls.Certificate
+	Bootstrap       RuntimeBootstrap
+}
+
+// RuntimeBootstrap runs before readiness checks. A nil value retains the
+// explicitly pre-installed certificate mode; it never enables plaintext.
+type RuntimeBootstrap interface {
+	Prepare(context.Context, provider.SlotSpec, provider.Instance) error
 }
 
 type TicketRequest struct {
@@ -69,6 +76,7 @@ type Controller struct {
 	readyTimeout    time.Duration
 	runtimeTrustPEM []byte
 	nodeCertificate tls.Certificate
+	bootstrap       RuntimeBootstrap
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -93,6 +101,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	return &Controller{
 		provider: config.Provider, ticketSource: config.TicketSource, nodeID: config.NodeID,
 		readyTimeout:    config.ReadyTimeout,
+		bootstrap:       config.Bootstrap,
 		runtimeTrustPEM: append([]byte(nil), config.RuntimeTrustPEM...), nodeCertificate: validatedTLS.Certificates[0],
 	}, nil
 }
@@ -186,6 +195,11 @@ func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtim
 	}
 	readyContext, cancel := context.WithTimeout(ctx, c.readyTimeout)
 	defer cancel()
+	if c.bootstrap != nil {
+		if err := c.bootstrap.Prepare(readyContext, spec, instance); err != nil {
+			return nil, errors.New("worker certificate bootstrap failed")
+		}
+	}
 	if err := c.waitReady(readyContext, instance.ProviderRef, spec); err != nil {
 		return nil, err
 	}

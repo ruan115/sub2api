@@ -8,10 +8,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimebootstrap"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/worker"
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "bootstrap-request" || os.Args[1] == "bootstrap-install") {
+		if err := runBootstrap(os.Args[1:], os.Getenv, os.Stdout); err != nil {
+			_, _ = os.Stderr.WriteString("runtime bootstrap rejected\n")
+			if err == runtimebootstrap.ErrNotReady {
+				os.Exit(75)
+			}
+			os.Exit(2)
+		}
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
 		address := os.Getenv("EXECUTION_HEALTHCHECK_ADDRESS")

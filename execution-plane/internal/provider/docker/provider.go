@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	base "github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimebootstrap"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/slot"
 )
 
@@ -50,6 +51,7 @@ type WorkerBootstrap struct {
 	// provider never generates, embeds or mounts a shared server private key.
 	IdentityDirectory string
 	RuntimeTrustFile  string
+	TrustSHA256       string
 }
 
 const WorkerIdentityDirectory = "/run/execution/identity"
@@ -90,8 +92,11 @@ func (c Config) Validate() error {
 }
 
 func (c WorkerBootstrap) Validate() error {
+	if c.TrustSHA256 != "" && !runtimebootstrap.ValidTrustPin(c.TrustSHA256) {
+		return errors.New("worker bootstrap CA pin is invalid")
+	}
 	if c.IdentityDirectory != WorkerIdentityDirectory || c.RuntimeTrustFile != WorkerRuntimeTrustFile {
-		return errors.New("worker TLS bootstrap requires the fixed per-instance identity and trust paths; certificate installation is not implemented by the Docker provider")
+		return errors.New("worker TLS bootstrap requires the fixed per-instance identity and trust paths")
 	}
 	if strings.TrimSpace(c.NodeID) == "" || strings.TrimSpace(c.TicketPublicKey) == "" {
 		return errors.New("node id and ticket public key are required")
@@ -176,6 +181,12 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 	}
 
 	tmpfsBytes := sandboxTmpfsBytes(spec.Resources.TmpfsBytes)
+	runtimeTmpfs := "rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(tmpfsBytes, 10)
+	if p.config.WorkerBootstrap != nil && p.config.WorkerBootstrap.TrustSHA256 != "" {
+		// Root-owned sticky tmpfs lets the non-root worker create its private
+		// 0700 parent without running a privileged key-generation helper.
+		runtimeTmpfs += ",mode=1777"
+	}
 	initProcess := true
 	stopTimeout := int(math.Ceil(p.config.StopTimeout.Seconds()))
 	environment := []string{
@@ -202,6 +213,9 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 			"EXECUTION_IDENTITY_DIRECTORY="+bootstrap.IdentityDirectory,
 			"EXECUTION_RUNTIME_TRUST_FILE="+bootstrap.RuntimeTrustFile,
 		)
+		if bootstrap.TrustSHA256 != "" {
+			environment = append(environment, "EXECUTION_BOOTSTRAP_CA_SHA256="+bootstrap.TrustSHA256)
+		}
 		exposedPorts = map[string]struct{}{containerPort: {}}
 	}
 	response, err := p.engine.CreateContainer(ctx, name, CreateContainerRequest{
@@ -236,7 +250,7 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 			NanoCPUs:  spec.Resources.CPUMilli * 1_000_000,
 			Tmpfs: map[string]string{
 				"/tmp": "rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(tmpfsBytes, 10),
-				"/run": "rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(tmpfsBytes, 10),
+				"/run": runtimeTmpfs,
 			},
 			Init:          &initProcess,
 			RestartPolicy: RestartPolicy{Name: "unless-stopped"},

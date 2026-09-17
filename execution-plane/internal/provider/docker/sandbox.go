@@ -136,11 +136,15 @@ func (p *Provider) validateSandbox(container Container) error {
 			"EXECUTION_ALLOW_FAKE_ACTIVATION": strconv.FormatBool(bootstrap.AllowFakeActivation),
 			"EXECUTION_IDENTITY_DIRECTORY":    bootstrap.IdentityDirectory,
 			"EXECUTION_RUNTIME_TRUST_FILE":    bootstrap.RuntimeTrustFile,
+			"EXECUTION_BOOTSTRAP_CA_SHA256":   bootstrap.TrustSHA256,
 		}
 		for name, value := range expected {
 			if env[name] != value {
 				return errors.New("container worker bootstrap does not match this node and instance")
 			}
+		}
+		if bootstrap.TrustSHA256 != "" && !contains(strings.Split(host.Tmpfs["/run"], ","), "mode=1777") {
+			return errors.New("container bootstrap runtime tmpfs mode is invalid")
 		}
 	}
 	return nil
@@ -199,11 +203,15 @@ func validSandboxTmpfs(raw string) bool {
 			if !hasValue || err != nil || n == 0 || strconv.FormatUint(n, 10) != value {
 				return false
 			}
+		case "mode":
+			if !hasValue || value != "1777" {
+				return false
+			}
 		default:
 			return false
 		}
 	}
-	return len(seen) == 5 && seen["rw"] && seen["noexec"] && seen["nosuid"] && seen["nodev"] && seen["size"]
+	return (len(seen) == 5 || (len(seen) == 6 && seen["mode"])) && seen["rw"] && seen["noexec"] && seen["nosuid"] && seen["nodev"] && seen["size"]
 }
 
 func sandboxTmpfsBytes(total int64) int64 {
