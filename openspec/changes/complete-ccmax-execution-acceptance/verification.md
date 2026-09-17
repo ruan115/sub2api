@@ -1,5 +1,83 @@
 # 验证记录
 
+## S2b2-live：双实例真实Docker证书管理通道
+
+2026-09-18，规划`09e3b99`，精确拒绝信号/真实HTTP回归`477925c`，按模块实现
+实验协调器与双容器实验`2cf0fe9`。本轮补上此前mock的Docker CSR/证书传输，不是
+完整host-agent、跨容器mTLS或CLI桥接验收；固定总分仍32%、镜像40%、身份20%。
+
+### 实现及review
+
+- `test/dockerbootstrap/`按输入协议、容器策略、控制面夹具、验证流程拆分；
+  `image/lab/livebootstrap/`独立管理制品校验、profile、有界IPC与创建/清理。
+- 实际Unix socket `HTTPEngine`执行固定UID1000 CSR导出/公开证书安装。控制面使用
+  真实bufconn TLS、Node enrollment及活Control session，签发调用实际RPC；
+  assignment、双lease和公开receipt仍为Memory，并非SQL/Redis实证。
+- 修复验收误报风险：只有准确exec/CID、已完成、exit2、空stdout、固定拒绝stderr
+  才算 `ErrInstallRejected`。Docker错误、输出错误、取消、身份不符不能算负例PASS。
+  Request语义不变；inspect返回后再次核取消，busy75仍只允许限时重试。
+- 独立review还关闭迟到IPC仍被接受、清理回执覆盖旧阶段文件两个P2；增加
+  capacity/select/read/parse后超时复核、独立live回执和未知B创建只清已知A的回归。
+  两位代理审查与root复验后，无未处理P1/P2。
+
+### 原生Linux实跑
+
+仅170测试机，43为跳板；未访问216生产。root实验根
+`/var/tmp/isthmus-s1b.ZZoFXYUK`，使用原S1b固定base：
+`sha256:3f7a9a38c6ae0a779eb563ceb98cd70db6ae62243bf19ffbaa35587fa15ab807`。
+预检MemAvailable约4.30GiB，入口要求至少3GiB；两个同时存在的worker各UID1000、
+1CPU/1GiB/swap0/pids128/core0、cap0/NNP、只读根、network-none、私有tmpfs。
+实际容器内回读cgroup、仅lo、挂载只读/noexec、UID/权限和worker SHA全部通过。
+
+明确实验例外：唯一host bind是当前实验根的root所有、0555公开worker文件，只读
+挂载`/worker`；无目录/socket/home/凭据挂载，不放松生产provider禁bind规则。
+可信宿主管理协调器有Docker管理员权限，不冒称安全沙箱；CA/node/ticket私钥仅在
+该进程RAM，worker私钥仅各自tmpfs；没有私钥通过管理通道或证据输出。
+
+Go1.26.0、linux/amd64、CGO0、trimpath/buildvcs=false；345项Go/proto/module
+源码摘要、24项公开helper/锁和两ELF制品保全，上传后逐项校验：
+
+| 制品 | 字节 | SHA256 |
+| --- | ---: | --- |
+| worker | 18867914 | `35fed251c55fad10e83396c40bcdef2f079adf0ec0d6128a3588237d81f6b4f9` |
+| bootstrap-driver | 20182744 | `4ef25361e31e8ea67f11e1c727666bcec0c6a86663cb1b0f4d34d6d9be7b52fb` |
+
+一次双实例真实Docker流程2.01秒，包含创建、核查、实际管理exec及清理，exit0：
+
+- A/B公钥不同；同key新ECDSA CSR重试返回原叶证，不另发新证。
+- 安装前不监听；A证书装B、错CA装A均收到精确worker拒绝，仍不监听。
+- 正确证书安装、相同公开bundle重装均成功，既有UID65532固定TCP healthcheck通过。
+  这里只证明TCP就绪，不冒称TLS握手通过。
+- A撤销独立lease、B撤销DB侧Memory lease后，新的签发RPC均PermissionDenied；
+  不代表已经建立的TLS/业务连接已被撤销。
+- `real_model_requests=0`、`private_keys_exported=false`；
+  `cross_container_mtls/production_provider_adoption/cli_bridge/production_ready=false`。
+
+已删除且仅删除本轮两个已核owner的准确CID，tmpfs/home/测试私钥随之销毁：
+`f39c9b2df5ffb618b59da91dae8bca56d7925a6ef3a02ddc8faab0a988355d44`、
+`af1b47608c065158629c00a7a6e9ccafff7af80a08de799764853f9bfc59a76f`。
+cleanup_complete=true、unresolved_create=false，原4业务容器ID/image/start/restarts/
+mount元数据相同，未读其Env/Cmd/logs。保留公开制品/实验记录，不删除已有镜像、卷、
+网络；生产、UI、业务DB、防火墙、宿主Bun均未改，无push/部署。
+
+### 回归、证据及剩余门槛
+
+全execution-plane离线race/vet通过（清除真实DB/Redis测试变量）；新driver与
+provider/bootstrap另有race三遍。最终`make -C recovery check`：236恢复Python、
+150 Bun/1027断言、186镜像Python全部通过。新lab8项测试包含真实本地pipe，
+但其余Docker操作mock；不能用这些本地测试代替上面的真实Docker实跑。
+
+仓库外0700保全目录：
+`/Users/ruanyang/My-project/api/z/isthmus-live-bootstrap.Cc5UqoAH`。
+上传包SHA256 `9e16c7b16ec74ec2bc7077a5c58f2f99d677ec30072b63a8e5a09730075973ef`；
+Go源码清单 `147e7b250d614f045c16dd3acaacb53e6716d7afe3d2e514cd9512a5a57b4fb8`；
+实跑结果 `d846d7b4eea69c728d23c791d9b29aeda575a5f7a12c1b923c7775c63785866d`；
+清理回执 `5a2047f72db894492aa6fa930d27aeb973d22c7256d6c0f43ae269b2d0b62609`。
+
+下一门槛：正式host-agent/provider与实际双实例mTLS/在途lease失效组合，再桥接
+isthmus/真实CLI。仍需专用internal网络与受限出口拒绝矩阵、真实SQL并发、
+持久home/恢复/轮换和最终不可变runtime镜像。仅完成Docker管理通道不能关闭K3/K4。
+
 ## S2b2：受认证签发与启动前bootstrap
 
 2026-09-18，先规划`6b228c0`；签发及公开receipt提交`a347da8`，实例启动接线提交

@@ -63,8 +63,9 @@
 
 2026-09-18 [S2b2受认证签发与启动前bootstrap](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b2受认证签发与启动前bootstrap)
 已在170受限容器中三轮通过：受认证签发、实例内安装、原worker/Controller就绪闭环。
-Docker管理通道仍为mock合同，SQL为mock而非真实MySQL并发；仍缺实际Docker投递、
-生产host-agent装配、跨容器和lease失效组合，
+后续[S2b2-live双实例实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b2-live双实例真实docker证书管理通道)
+已通过实际Docker CSR导出/公开证书安装、交叉/错CA拒绝和lease撤销后拒绝签发。
+SQL仍为mock而非真实MySQL并发；仍缺生产host-agent/provider装配、跨容器mTLS和在途lease失效组合，
 因此K3/K4不提前勾选，总体仍32%。这不是代码无进展，而是完整验收门槛尚未关闭。
 
 - [ ] K1 稳定机器/逻辑实例标识生命周期，重启/升级/恢复/换账号的保留与换代规则。
