@@ -1,0 +1,172 @@
+{
+  "capability": "fake-only",
+  "file_count": 23,
+  "files": [
+    {
+      "git_blob_oid": "a830415902ec1a09faa4fd338498476d96765e0b",
+      "mode": "100644",
+      "path": "contracts/grpc/messages.proto",
+      "sha256": "c582535f7620ea07a7a2de5957f50903a97eabe13579ce739127ff9e6329a369",
+      "size_bytes": 4433
+    },
+    {
+      "git_blob_oid": "1a006e80dae6515591c30468c959cba15f319e40",
+      "mode": "100644",
+      "path": "package.json",
+      "sha256": "17deac459e645c6835e0957863ebbf1e492a686901b959ba45acac771043cb56",
+      "size_bytes": 321
+    },
+    {
+      "git_blob_oid": "956fa3767f8585621c328b9262240737ff398e96",
+      "mode": "100644",
+      "path": "src/app/fake.ts",
+      "sha256": "95fdb5aa87764b156bd9c650f3e78abac8c6690f5a41d1a825cd1cb9169b8d00",
+      "size_bytes": 2004
+    },
+    {
+      "git_blob_oid": "f80d8e285b8b440706229950923d4886d0f51ff0",
+      "mode": "100644",
+      "path": "src/app/serve.ts",
+      "sha256": "0057c00e3646985defc737c92eaedf342d6d33ad6c01c7ca539009f0222816f1",
+      "size_bytes": 4420
+    },
+    {
+      "git_blob_oid": "641727fb762e949d20bf2267957921e3e7ae8096",
+      "mode": "100644",
+      "path": "src/app/shutdown.ts",
+      "sha256": "c9b28aa34533ed09bb4980967f4ce1d682d297ce24d5609aa276e19884784bdd",
+      "size_bytes": 1541
+    },
+    {
+      "git_blob_oid": "93c811b968bfce31ebfe4e8cce0294c9779b8460",
+      "mode": "100644",
+      "path": "src/protocol/websocket/codec.ts",
+      "sha256": "635b888444936b3b773e6bc5da1c6bb681f257586d5f29652839fa5650f1258c",
+      "size_bytes": 1192
+    },
+    {
+      "git_blob_oid": "c026b056f1f43d3fd7b42bebb7daab2e703941e5",
+      "mode": "100644",
+      "path": "src/protocol/websocket/errors.ts",
+      "sha256": "e6a95fa081e14f0f3196af9a24707946c2f0a97936532e00f2eadabf14b5826f",
+      "size_bytes": 446
+    },
+    {
+      "git_blob_oid": "3935fcb862637d609f3c778b2d359afee4d62f1a",
+      "mode": "100644",
+      "path": "src/protocol/websocket/index.ts",
+      "sha256": "82d7808227ea43468c3ab4f59119214c6ffdf003ebaab41e482837a82e38e67a",
+      "size_bytes": 386
+    },
+    {
+      "git_blob_oid": "35e6356ab196d2947fbd879804c936bbbc56b8b8",
+      "mode": "100644",
+      "path": "src/protocol/websocket/tags.ts",
+      "sha256": "8083e27cb840d8269e3ae69f6e8148e135522a0526e81168753039a55bcb73e6",
+      "size_bytes": 705
+    },
+    {
+      "git_blob_oid": "2394bbd8c19ef8e1f36e0633d4012abc1f64f475",
+      "mode": "100644",
+      "path": "src/protocol/websocket/validation.ts",
+      "sha256": "731e1d98186be24b2be62257576a1b7b466327c28b365e7f59d206e78c9e47f8",
+      "size_bytes": 1618
+    },
+    {
+      "git_blob_oid": "52a05eeeacf2db4f6bb685798719fd79696bf22b",
+      "mode": "100644",
+      "path": "src/runtime/turn/cancellation.ts",
+      "sha256": "1a9b24b1ee0bceff6910c3100d30b8f6c24aabcc8df2f8381c72d8768ae53346",
+      "size_bytes": 694
+    },
+    {
+      "git_blob_oid": "bdab61865d6ae30f1bd9e537fe9a642df2e25386",
+      "mode": "100644",
+      "path": "src/runtime/turn/errors.ts",
+      "sha256": "784506120203b7d289aa42114dfe115508874025544b5fe2776ed76007d80dc7",
+      "size_bytes": 482
+    },
+    {
+      "git_blob_oid": "aa384235bb25122ade0201d4092aa52f243ae7b8",
+      "mode": "100644",
+      "path": "src/runtime/turn/fake.ts",
+      "sha256": "2996699237392c26f93c4ff4c5f4df83851e1deb0371b8447d3b78d9911b5665",
+      "size_bytes": 6424
+    },
+    {
+      "git_blob_oid": "5e235f20c2c13c5566b2fd68eeacec062aa45a93",
+      "mode": "100644",
+      "path": "src/runtime/turn/request.ts",
+      "sha256": "7ba30e534f3e8bd40ece926c8f0757dbff55a6b4a58a2e7fe693d4fa7fd06602",
+      "size_bytes": 1315
+    },
+    {
+      "git_blob_oid": "187e160602f87d693a4a5a8ce8c6bff59984b789",
+      "mode": "100644",
+      "path": "src/runtime/turn/types.ts",
+      "sha256": "2623221b8a5c8c9efe3271ea64949b59a0ee2f14c46356ac7086f3b2b8c53bd3",
+      "size_bytes": 1068
+    },
+    {
+      "git_blob_oid": "dab642e4edc392a9de03cbb14c413ba6af49b4c2",
+      "mode": "100644",
+      "path": "src/transport/http/handler.ts",
+      "sha256": "b6d9224df2e4b3941e9f0cd4be748f46a5070a70800f6237155a75a9c8cc53d8",
+      "size_bytes": 2837
+    },
+    {
+      "git_blob_oid": "5ec8abdf432568224721fd8539bb2ed9b8eae381",
+      "mode": "100644",
+      "path": "src/transport/http/local-access.ts",
+      "sha256": "7c684c87ec417b65624d19232702430f38e36d8ec34d92a4a9a55606f8d9364f",
+      "size_bytes": 1033
+    },
+    {
+      "git_blob_oid": "02059f25c287e2430609934dcc269c23bdf216ad",
+      "mode": "100644",
+      "path": "src/transport/http/response.ts",
+      "sha256": "2e8c752751ccfc17e9e6c5d719b86e43289a97666cc6b3a1c747a3b9af52e75b",
+      "size_bytes": 1966
+    },
+    {
+      "git_blob_oid": "69342d9895274aa613075ba32d8ea7d2107f5ab9",
+      "mode": "100644",
+      "path": "src/transport/shared/body.ts",
+      "sha256": "d486b23d7f5774b653ea73e545a2239a3a44c09d449a06a258eadc76407cb824",
+      "size_bytes": 3520
+    },
+    {
+      "git_blob_oid": "1107f8a25d61cc62d193e019d9588fc5fec87eaf",
+      "mode": "100644",
+      "path": "src/transport/shared/errors.ts",
+      "sha256": "b05147bb4322c334d7774c947dcf6d9c28bb62cc70f9c0f4c577332689bb13e7",
+      "size_bytes": 1523
+    },
+    {
+      "git_blob_oid": "34f16f2098090ba735ecd5b0b6ef677f2d8d20d7",
+      "mode": "100644",
+      "path": "src/transport/websocket/controls.ts",
+      "sha256": "8da1819412e91666c43be4d397e2945357668249365d3af86f3d8b837e66cbb5",
+      "size_bytes": 1796
+    },
+    {
+      "git_blob_oid": "c775c4aa01bce29f063bddb19e42c0bb233ae848",
+      "mode": "100644",
+      "path": "src/transport/websocket/session.ts",
+      "sha256": "56ea98caf74a787449785fe92ce2d81021036d5d334b5411b24f30cc4c656ed7",
+      "size_bytes": 5614
+    },
+    {
+      "git_blob_oid": "38b9becdc8e56ba47efb4c3ccdb3da2a85099c9d",
+      "mode": "100644",
+      "path": "src/transport/websocket/writer.ts",
+      "sha256": "46e202ed9dc49572c78f91bfd80b091f9300f168644ffa4935bf3b52f59a8d29",
+      "size_bytes": 2212
+    }
+  ],
+  "kind": "isthmus-fake-source",
+  "schema_version": 1,
+  "source_commit": "e2715b6e7f968e638c2f4fd68467c56fa0151c72",
+  "source_root": "execution-plane/isthmus-runtime",
+  "total_bytes": 47550
+}

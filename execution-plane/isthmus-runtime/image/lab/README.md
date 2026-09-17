@@ -85,3 +85,48 @@ Cleanup prevalidates every recorded ID/label and exact cache volume, then
 rechecks ownership before each deletion. No prune, image removal or directory
 deletion; exported images and source/evidence remain. Existing business container
 ID/image/start time/restart count/mount metadata must remain unchanged.
+# S1c toolchain probe extension
+
+`toolchain.py acquire|payload|probe <private-root>` is a separate manual phase
+entrypoint on the same exact approved daemon. It retains the `isthmus-s1b.<run>`
+private-root guard; that naming does not imply another base build. Use a fresh
+root for a rerun and the explicitly reviewed source-file upload list, never a
+whole repository or account directory. On cross-machine tar transfers use
+`--no-same-owner` into a new root-owned directory: macOS UID501 must not become
+the owner of a Linux release bundle. Do not replay over partial evidence.
+
+1. Locally call `artifacts.source.stage_source` with the reviewed app lock and
+   `lab.payload.tests_from_git` with the explicit repository path. Upload only
+   their private outputs as `frozen-source` / `frozen-tests` plus reviewed helper
+   modules, required recoverykit evidence helpers and public locks.
+2. `acquire` fetches only fixed official public artifacts. Claude's detached
+   manifest signature/key fingerprint and both architecture hashes/sizes are
+   checked before amd64 downloads. Bun PGP is not asserted. No ambient proxy,
+   installer, host installation, API credentials or unbounded download; POSIX
+   main-thread SIGALRM enforces each300s download deadline and restores handlers.
+3. `payload` copies40 paths bound to repository-reviewed locks:23 source,
+   14 synthetic tests,3 binaries. Root-owned0755/0644 public copies are inside
+   an enclosing0700 task directory, separate from private release-source output.
+4. `probe` first checks exact inventory/hashes, AVX2 and host memory reserve.
+   It creates the fixed S1b image ID with UID1000/dropALL/NNP/networknone,2GiB
+   memory and swap=memory,1CPU,pids128,core0,no host mounts or ports. Root is
+   read-only; private home and/tmp are writable noexec. Only the512MiB
+   `/opt/isthmus-probe` tmpfs is executable. A bounded stdin upload feeds a
+   generated40-file USTAR to fixed system shell/tar as UID0, still capless/NNP
+   and networknone (checked before extraction). No external tar, links, PAX or
+   new binary executes as root. UID1000 must prove the resulting root-owned
+   tree is unwritable before execution. Docker29 rejects cp into readonly
+   rootfs even for tmpfs destinations, so Docker cp is not used.
+5. PID1 is only a240s timeout/sleep watchdog. The test command has its own120s
+   watchdog,150s client deadline and bounded logs. It checks actual kernel
+   cgroup/mount options, nonwritability and all40 hashes before CLI--version,
+   Bun offline tests and synthetic loopback gates. Networknone forbids upstream
+   traffic even though local loopback sockets work. No model requests.
+6. Finally stop/remove only the verified owned ID and compare original container
+   metadata; only then publish a successful result. Keep failures/logs for
+   diagnosis, no prune/image/volume/business deletion. A lost SSH client is
+   bounded by PID1; reconnect to inspect and remove any stopped owned container.
+
+This is not a composed immutable runtime image, a general workload sandbox,
+an I3/I4/I5 or N3 acceptance shortcut. Signature/hash checks do not make copied
+home directories safe. Do not add real accounts or extra mounts to this probe.

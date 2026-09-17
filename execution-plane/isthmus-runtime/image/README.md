@@ -22,6 +22,9 @@ remain unfinished. An image called `isthmus-vm-base` is not itself the service.
 - `lab/`: explicit approved-host preparation, trusted BuildKit build, bounded
   subprocess handling, nonprivileged smoke and exact-owned-resource cleanup.
 - `locks/`: reviewed public metadata, never package binaries or credentials.
+- `artifacts/`: [S1c fixed Bun/CLI inputs and23-file fake source](artifacts/README.md),
+  separate from Debian package locks. Expanded binary hashes and14 synthetic
+  test inputs have separate reviewed locks; tests are not release-source files.
 
 The old online base did not contain app/Bun/CLI either. Those artifacts belong
 to a later derived runtime image, not mutable shared application volumes. Their

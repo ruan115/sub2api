@@ -18,8 +18,8 @@ BUILDKIT = "docker.io/moby/buildkit@sha256:a461e7f0ce921972028acfbed628d45663d83
 LABEL = "org.sub2api.isthmus.lab-run"
 
 
-def bounded_process(argv, env, timeout, limit, sink=None, check_budget=None):
-    process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+def bounded_process(argv, env, timeout, limit, sink=None, check_budget=None, input_fd=None):
+    process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL if input_fd is None else input_fd,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     result, total, start = {"stdout": [], "stderr": []}, 0, time.monotonic()
     try:

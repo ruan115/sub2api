@@ -1,0 +1,75 @@
+{
+  "commit": "e2715b6e7f968e638c2f4fd68467c56fa0151c72",
+  "files": [
+    {
+      "path": "src/app/fake.test.ts",
+      "sha256": "cf4a89878081cffbcdf907cbfd7ad0a3c58656c36c43ddaac30d486b6d7e8765",
+      "size": 4100
+    },
+    {
+      "path": "src/app/serve.test.ts",
+      "sha256": "5c87e586c1d4ea45b1d969958e424a50e25723924f0e54397462fb36419df823",
+      "size": 9571
+    },
+    {
+      "path": "src/app/shutdown.test.ts",
+      "sha256": "ea3d526f6b1f8040e4cc346cef61fc82b2633975b5cfc278ed01c510469bae66",
+      "size": 2298
+    },
+    {
+      "path": "src/protocol/websocket/codec.test.ts",
+      "sha256": "f4f5cbaa25e567b500924d219a4feed25ee503ecef7de5b52b14937efffdbd20",
+      "size": 5632
+    },
+    {
+      "path": "src/protocol/websocket/limits.test.ts",
+      "sha256": "fe1cd85edf86c2408965caa48a0ccbc1ef690f5b1fc6542d78e6459e076c6f9a",
+      "size": 1746
+    },
+    {
+      "path": "src/runtime/turn/fake.test.ts",
+      "sha256": "51373233b8494b96da3802b56b649f588e97a8465d164a009bcf34bc74835965",
+      "size": 4112
+    },
+    {
+      "path": "src/transport/http/handler.test.ts",
+      "sha256": "58c6e604da0ead1783296acb6a794b3b0df4a15b8565de496dbd4a3b6bb769b8",
+      "size": 8817
+    },
+    {
+      "path": "src/transport/http/local-access.test.ts",
+      "sha256": "c31a266b4e9f262bf853211460e2eb5167de259bae51c8634947ccf06958a0a0",
+      "size": 2046
+    },
+    {
+      "path": "src/transport/websocket/controls.test.ts",
+      "sha256": "4aeca39d084cc6da300d1f975b756d39948d31be004bec5c7d1f79c621a7e4b3",
+      "size": 1848
+    },
+    {
+      "path": "src/transport/websocket/session.test.ts",
+      "sha256": "c3f843931d0584fae446ef9c5ff94bd3760593c4a9de7e0b5882917be4e0f316",
+      "size": 9841
+    },
+    {
+      "path": "src/transport/websocket/writer.test.ts",
+      "sha256": "9920ac8bccebb041535e481197e3f7df3270eeb2cd95d5529a8d91b52a75ed71",
+      "size": 2701
+    },
+    {
+      "path": "test/fixtures.ts",
+      "sha256": "d876072a0236b1c4e997df534509a6584ad8f0a77ea913a13fbf9c6ca3a42447",
+      "size": 2212
+    },
+    {
+      "path": "test/loopback.smoke.ts",
+      "sha256": "5211c45999e9205862c34874a896ea39122221020eb48e8af908b7afc6033d9f",
+      "size": 3465
+    },
+    {
+      "path": "test/shutdown-regression.smoke.ts",
+      "sha256": "943b019032965a3cfc0bddf3fb6287d671b08eb3418334e985c8bcf7aeb43007",
+      "size": 2559
+    }
+  ]
+}

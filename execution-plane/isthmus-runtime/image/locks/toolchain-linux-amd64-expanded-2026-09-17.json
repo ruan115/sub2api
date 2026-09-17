@@ -1,0 +1,8 @@
+{
+  "platform": "linux/amd64",
+  "binaries": [
+    {"file": "bun-1.3.9", "size": 102367640, "sha256": "d8be80879a4aae10bf8dfd842ee99e69dd8effd832b2f83b026aa2c8c50cbb3c"},
+    {"file": "bun-1.4.2", "size": 79500640, "sha256": "a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c"},
+    {"file": "claude", "size": 215473560, "sha256": "704f1334ac65d3e89e1c6c1d7663293ad786a6166afdb71b5075337df630f976"}
+  ]
+}
