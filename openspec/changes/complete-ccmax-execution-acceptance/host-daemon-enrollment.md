@@ -7,7 +7,8 @@
 
 1. `internal/hostagent/daemon/`：独立 config / identity / composition / run /
    health 文件及对应测试。显式 `EXECUTION_HOST_AGENT_RUNTIME_ENABLED=true` 才启用；
-   关闭时不加载证书、不访问 Docker 或控制面。`service/bootstrap.go` 仅做角色分流。
+   关闭时不加载证书、不访问 Docker 或控制面。`cmd/host-agent` 显式注入 daemon
+   selector，`service/bootstrap.go` 仅保留通用入口钩子，不反向依赖 host-agent。
    使用预签发的专属 node 证书、私钥和固定 CA；节点不持有 CA/票据签名私钥。
    配置固定本地 Unix Docker socket、私网/回环控制地址、TLS 验证名、无凭据 HTTPS
    upstream 与内部固定出口代理。校验在外部操作前完成，错误/日志不输出配置值。
@@ -15,6 +16,7 @@
    只启用生命周期命令，不接 credential activation、业务票据或数据面，不广告 docker
    生产调度/镜像能力；明确 lifecycle-only 标签与能力。健康接口只监听回环，
    `/readyz` 明确 503 / production_ready=false，不把控制连接或 TCP 存活当业务就绪。
+   placement 对 lifecycle-only 标签或能力明确排除，含无能力要求及 sticky 请求。
    节点证书到期结束本次运行；无自动签发/自动替换身份。取消后封闭新命令并有界等待
    在途命令，先停控制工作再关闭依赖；不得静默留下继续修改实例的后台工作。
 3. `internal/config/runtime_enrollment.go` 与 `internal/service/runtimeenrollment/`：

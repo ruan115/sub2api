@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/nodepolicy"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtime/store"
 )
 
@@ -152,6 +153,9 @@ func validate(snapshot Snapshot, request Request) error {
 }
 
 func eligible(node store.Node, snapshot Snapshot, request Request, requiredCapabilities []string, existing bool) bool {
+	if nodepolicy.LifecycleOnly(node.Labels, node.Capabilities) {
+		return false
+	}
 	if node.Status != "connected" || node.LastSeenAt == nil || snapshot.Now.Sub(*node.LastSeenAt) > snapshot.OfflineAfter {
 		return false
 	}
