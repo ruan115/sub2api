@@ -23,8 +23,17 @@ type SlotCommandProvider interface {
 	provider.SlotInspector
 }
 
+// SlotStartup is the authenticated existing-instance START boundary. It must
+// not create a replacement, activate credentials or fall back to raw Start.
+type SlotStartup interface {
+	Start(context.Context, provider.SlotSpec, provider.Instance) error
+}
+
 type SlotCommandExecutorConfig struct {
-	Provider     SlotCommandProvider
+	Provider SlotCommandProvider
+	// Nil preserves the legacy component path. New runtime composition uses
+	// hostagent/lifecycle.New, which always installs an authenticated startup.
+	Startup      SlotStartup
 	Resources    provider.ResourceLimits
 	Security     provider.SecurityPolicy
 	Network      provider.NetworkPolicy
@@ -45,6 +54,7 @@ type NodeSnapshot struct {
 
 type SlotCommandExecutor struct {
 	provider     SlotCommandProvider
+	startup      SlotStartup
 	resources    provider.ResourceLimits
 	security     provider.SecurityPolicy
 	network      provider.NetworkPolicy
@@ -56,6 +66,7 @@ type SlotCommandExecutor struct {
 	mu             sync.RWMutex
 	observations   map[string]*executionv1.SlotObservation
 	revokedThrough map[string]uint64
+	startupProofs  map[string]startupProof // operationMu; not a lease or TLS session cache
 }
 
 func NewSlotCommandExecutor(config SlotCommandExecutorConfig) (*SlotCommandExecutor, error) {
@@ -67,9 +78,10 @@ func NewSlotCommandExecutor(config SlotCommandExecutorConfig) (*SlotCommandExecu
 		config.Now = time.Now
 	}
 	return &SlotCommandExecutor{
-		provider: config.Provider, resources: config.Resources, security: config.Security, network: config.Network,
+		provider: config.Provider, startup: config.Startup, resources: config.Resources, security: config.Security, network: config.Network,
 		drainTimeout: config.DrainTimeout, maxSlots: config.MaxSlots, now: config.Now,
 		observations: make(map[string]*executionv1.SlotObservation), revokedThrough: make(map[string]uint64),
+		startupProofs: make(map[string]startupProof),
 	}, nil
 }
 
@@ -89,6 +101,9 @@ func (e *SlotCommandExecutor) ExecuteSlotCommand(ctx context.Context, command *e
 	}
 	e.operationMu.Lock()
 	defer e.operationMu.Unlock()
+	if err := commandContext.Err(); err != nil {
+		return failedCommandResult(command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), classifyCommandError(err), "slot command expired before operation", observation)
+	}
 	if e.epochRevoked(command.GetSlotId(), command.GetExecutionEpoch()) &&
 		(command.GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_CREATE || command.GetAction() == executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START) {
 		return failedCommandResult(command.GetCommandId(), command.GetSlotId(), command.GetExecutionEpoch(), "execution_epoch_revoked", "execution epoch is revoked", observation)
@@ -111,7 +126,13 @@ func (e *SlotCommandExecutor) ExecuteSlotCommand(ctx context.Context, command *e
 	default:
 		err = errors.New("unsupported slot action")
 	}
+	if commandContext.Err() != nil {
+		err = commandContext.Err()
+	}
 	if err != nil {
+		if proof, ok := e.startupProofs[command.GetSlotId()]; e.startup != nil && ok && proof.matches(command) {
+			e.forgetStartup(command.GetSlotId())
+		}
 		code := classifyCommandError(err)
 		if inspected, inspectErr := e.inspect(commandContext, command); inspectErr == nil {
 			observation = inspected
@@ -138,6 +159,9 @@ func (e *SlotCommandExecutor) RevokeEpoch(ctx context.Context, command *executio
 		e.revokedThrough[command.GetSlotId()] = command.GetExecutionEpoch()
 	}
 	e.mu.Unlock()
+	if proof, ok := e.startupProofs[command.GetSlotId()]; ok && proof.instance.Epoch <= command.GetExecutionEpoch() {
+		e.forgetStartup(command.GetSlotId())
+	}
 	status, err := e.provider.InspectSlot(ctx, command.GetSlotId())
 	if errors.Is(err, provider.ErrNotFound) {
 		observation := missingObservation(command.GetSlotId(), command.GetExecutionEpoch(), "")
@@ -154,6 +178,7 @@ func (e *SlotCommandExecutor) RevokeEpoch(ctx context.Context, command *executio
 		return &executionv1.CommandResult{CommandId: command.GetCommandId(), Succeeded: true, Slot: observation}
 	}
 	deadline := e.now().UTC().Add(e.drainTimeout)
+	e.forgetStartup(status.SlotID)
 	_ = e.provider.Drain(ctx, status.ProviderRef, deadline)
 	stopErr := e.provider.Stop(ctx, status.ProviderRef)
 	if stopErr != nil {
@@ -213,9 +238,33 @@ func (e *SlotCommandExecutor) create(ctx context.Context, command *executionv1.S
 }
 
 func (e *SlotCommandExecutor) start(ctx context.Context, command *executionv1.SlotCommand) (*executionv1.SlotObservation, error) {
+	if proof, ok := e.startupProofs[command.GetSlotId()]; e.startup != nil && ok && proof.matches(command) {
+		e.forgetStartup(command.GetSlotId())
+	}
 	status, err := e.inspectExact(ctx, command)
 	if err != nil {
 		return nil, err
+	}
+	if e.startup != nil {
+		e.forgetStartup(status.SlotID)
+		if status.RuntimeID == "" {
+			return nil, errEpochConflict
+		}
+		if err := e.startup.Start(ctx, e.spec(command), status.Instance); err != nil {
+			return observationFromStatus(status), err
+		}
+		after, err := e.inspectExact(ctx, command)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if after.RuntimeID != status.RuntimeID || after.ProviderRef != status.ProviderRef || !after.Healthy {
+			return nil, errEpochConflict
+		}
+		e.startupProofs[status.SlotID] = startupProof{instance: after.Instance, accountID: command.GetAccountId(), image: after.ImageDigest}
+		return observationFromStatus(after), nil
 	}
 	if err := e.provider.Start(ctx, status.ProviderRef); err != nil {
 		return observationFromStatus(status), err
@@ -228,6 +277,7 @@ func (e *SlotCommandExecutor) drain(ctx context.Context, command *executionv1.Sl
 	if err != nil {
 		return nil, err
 	}
+	e.forgetStartup(status.SlotID)
 	if err := e.provider.Drain(ctx, status.ProviderRef, command.GetDeadline().AsTime()); err != nil {
 		return observationFromStatus(status), err
 	}
@@ -245,6 +295,7 @@ func (e *SlotCommandExecutor) stop(ctx context.Context, command *executionv1.Slo
 	if err != nil {
 		return nil, err
 	}
+	e.forgetStartup(status.SlotID)
 	if err := e.provider.Stop(ctx, status.ProviderRef); err != nil {
 		return observationFromStatus(status), err
 	}
@@ -262,6 +313,7 @@ func (e *SlotCommandExecutor) destroy(ctx context.Context, command *executionv1.
 	if err != nil {
 		return nil, err
 	}
+	e.forgetStartup(status.SlotID)
 	if err := e.provider.Destroy(ctx, status.ProviderRef); err != nil {
 		return observationFromStatus(status), err
 	}
@@ -273,10 +325,15 @@ func (e *SlotCommandExecutor) destroy(ctx context.Context, command *executionv1.
 func (e *SlotCommandExecutor) inspect(ctx context.Context, command *executionv1.SlotCommand) (*executionv1.SlotObservation, error) {
 	status, err := e.inspectExact(ctx, command)
 	if errors.Is(err, provider.ErrNotFound) {
+		e.forgetStartup(command.GetSlotId())
 		return missingObservation(command.GetSlotId(), command.GetExecutionEpoch(), command.GetImageDigest()), nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if e.startup != nil && !e.hasStartup(command, status) {
+		status.Healthy = false
+		status.Reason = "authenticated_start_required"
 	}
 	return observationFromStatus(status), nil
 }
@@ -284,6 +341,12 @@ func (e *SlotCommandExecutor) inspect(ctx context.Context, command *executionv1.
 func (e *SlotCommandExecutor) inspectExact(ctx context.Context, command *executionv1.SlotCommand) (provider.Status, error) {
 	status, err := e.provider.InspectSlot(ctx, command.GetSlotId())
 	if err != nil {
+		return provider.Status{}, err
+	}
+	if proof, ok := e.startupProofs[command.GetSlotId()]; e.startup != nil && ok && !proof.matchesStatus(status) {
+		e.forgetStartup(command.GetSlotId())
+	}
+	if err := ctx.Err(); err != nil {
 		return provider.Status{}, err
 	}
 	if status.SlotID != command.GetSlotId() || status.Epoch != command.GetExecutionEpoch() ||

@@ -16,9 +16,15 @@ bootstrap/mTLS，但会调用Create，不能直接用于只能针对既有CID的
    instance/spec，在任何Start前、bootstrap后、TLS就绪后核对CID/slot/epoch/gen/image。
    禁止Create/recreate/delete；缺失/漂移/取消拒绝，错误不含证书或原始底层输出。
    使用原bootstrap、只接受准确身份的真实mTLS；不申请激活/业务票据。
+   `provider.Instance.RuntimeID`单独记录真实物理ID，保留原ProviderRef逻辑名称，
+   不改原Destroy命名语义。Docker独立`existing.go`只读复用完整existingSlot核验；
+   不能仅比较slot/代号而漏掉账号、资源、用户和出口spec。
 2. `internal/hostagent/command_executor.go`仅增加可选认证启动接口及调用，不堆入证书
    逻辑。严格路径失败不回落到provider.Start、不发布健康成功；核后置CID及deadline。
    原nil路径仅为已有组件兼容，不能作为新正式装配入口。
+   `command_start_proof.go`记录进程内准确binding的启动验证结果：从未认证、失败、
+   CID漂移或停机/撤销后，INSPECT不能只凭TCP恢复健康；只有重新成功START才能恢复。
+   这不是持续mTLS监控、活lease授权或业务runtime缓存，重启进程后不恢复旧proof。
 3. `internal/hostagent/lifecycle/`：唯一provider实例组合原Coordinator、Controller与
    命令执行器；必须提供认证EnrollmentClient、trust和node certificate，固定使用
    StartExisting。按composition/adapter/test分文件；不增加ticket私钥或凭据持有。

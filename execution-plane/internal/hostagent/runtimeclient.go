@@ -200,12 +200,24 @@ func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtim
 			return nil, errors.New("worker certificate bootstrap failed")
 		}
 	}
-	if err := c.waitReady(readyContext, instance.ProviderRef, spec); err != nil {
+	if err := c.waitReady(readyContext, instance.ProviderRef, spec, instance.RuntimeID); err != nil {
 		return nil, err
 	}
-	endpoint, err := c.provider.RuntimeEndpoint(readyContext, instance.ProviderRef)
+	return c.connectRuntime(readyContext, spec, instance, tlsConfig)
+}
+
+// connectRuntime proves a real authenticated HTTP/2 transport without using a
+// business ticket. Every failure after NewClient closes its connection.
+func (c *Controller) connectRuntime(ctx context.Context, spec provider.SlotSpec, instance provider.Instance, tlsConfig *tls.Config) (*Runtime, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errors.New("worker runtime context is unavailable")
+	}
+	endpoint, err := c.provider.RuntimeEndpoint(ctx, instance.ProviderRef)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worker endpoint: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil, errors.New("worker runtime context is unavailable")
 	}
 	host, _, err := net.SplitHostPort(endpoint)
 	ip := net.ParseIP(host)
@@ -221,10 +233,14 @@ func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtim
 	// and does not broaden a command's one-shot, scope-specific authorization.
 	connection.Connect()
 	for state := connection.GetState(); state != connectivity.Ready; state = connection.GetState() {
-		if state == connectivity.Shutdown || !connection.WaitForStateChange(readyContext, state) {
+		if state == connectivity.Shutdown || !connection.WaitForStateChange(ctx, state) {
 			_ = connection.Close()
 			return nil, errors.New("worker authenticated transport did not become ready")
 		}
+	}
+	if ctx.Err() != nil {
+		_ = connection.Close()
+		return nil, errors.New("worker runtime context is unavailable")
 	}
 	runtime := &Runtime{
 		Instance: instance, client: executionv1.NewWorkerRuntimeServiceClient(connection), connection: connection,
@@ -237,7 +253,7 @@ func (c *Controller) Start(ctx context.Context, spec provider.SlotSpec) (*Runtim
 	return runtime, nil
 }
 
-func (c *Controller) waitReady(ctx context.Context, providerRef string, spec provider.SlotSpec) error {
+func (c *Controller) waitReady(ctx context.Context, providerRef string, spec provider.SlotSpec, runtimeID string) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	var lastReason string
@@ -245,10 +261,14 @@ func (c *Controller) waitReady(ctx context.Context, providerRef string, spec pro
 		status, err := c.provider.Inspect(ctx, providerRef)
 		if err == nil {
 			lastReason = status.Reason
-			if status.SlotID != spec.SlotID || status.Epoch != spec.Epoch || status.RuntimeGeneration != spec.RuntimeGeneration || status.ImageDigest != spec.ImageDigest {
+			if status.SlotID != spec.SlotID || status.Epoch != spec.Epoch || status.RuntimeGeneration != spec.RuntimeGeneration || status.ImageDigest != spec.ImageDigest ||
+				(runtimeID != "" && status.RuntimeID != runtimeID) {
 				return errors.New("worker readiness returned a mismatched runtime binding")
 			}
 			if status.Healthy {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return nil
 			}
 		} else if !errors.Is(err, provider.ErrNotFound) {
