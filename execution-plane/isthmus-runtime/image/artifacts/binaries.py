@@ -130,6 +130,14 @@ def _zip_member(reader, size, metadata):
             or not 1 <= cd_size <= 8192 or cd_offset + cd_size != end_offset
             or index + 22 + comment != len(tail)):
         raise ArtifactError("binary_zip_directory_rejected")
+    # ZipFile lets an immediately preceding ZIP64 locator override these
+    # bounded legacy fields. Reject it before the parser can allocate a larger
+    # directory. Read its fixed position separately: with a 65535-byte comment
+    # the locator lies just outside the EOCD tail buffer above.
+    if end_offset >= 20:
+        reader.seek(end_offset - 20)
+        if reader.read(4) == b"PK\x06\x07":
+            raise ArtifactError("binary_zip_directory_rejected")
     zipped = zipfile.ZipFile(reader, "r")
     try:
         members = zipped.infolist()

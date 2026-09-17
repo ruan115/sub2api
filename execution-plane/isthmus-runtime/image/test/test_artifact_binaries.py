@@ -25,9 +25,10 @@ def elf(machine=62):
 
 
 def archive(payload=None, *, member="bun-linux-x64/bun", directory=False, extra=None,
-            mode=stat.S_IFREG | 0o755, compression=zipfile.ZIP_DEFLATED):
+            mode=stat.S_IFREG | 0o755, compression=zipfile.ZIP_DEFLATED, comment=b""):
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", compression=compression) as zipped:
+        zipped.comment = comment
         if directory:
             info = zipfile.ZipInfo(member.rsplit("/", 1)[0] + "/")
             info.create_system = 3
@@ -43,6 +44,24 @@ def archive(payload=None, *, member="bun-linux-x64/bun", directory=False, extra=
                 warnings.simplefilter("ignore", UserWarning)
                 zipped.writestr(extra, b"unexpected")
     return out.getvalue()
+
+
+def zip64_override_archive(comment=b""):
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zipped:
+        for index in range(200):
+            zipped.writestr("synthetic-%03d" % index, b"x")
+    raw = out.getvalue()
+    end = raw.rindex(b"PK\x05\x06")
+    count, size, offset = struct.unpack_from("<4s4H2IH", raw, end)[4:7]
+    extended = struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+                           count, count, size, offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    # The legacy fields satisfy the preflight budget, but Python's ZIP64
+    # handling overrides them with the larger 200-entry central directory.
+    legacy = struct.pack("<4s4H2IH", b"PK\x05\x06", 0, 0, 1, 1,
+                         len(extended) + len(locator), end, len(comment))
+    return raw[:end] + extended + locator + legacy + comment
 
 
 def spec(payload, *, name="bun", version="1.4.2", platform="linux/amd64"):
@@ -199,6 +218,24 @@ class BinaryStagingTests(unittest.TestCase):
         with patch.object(module, "MAX_BINARY_BYTES", 128), self.assertRaises(module.ArtifactError):
             self.stage(payload)
         self.assertFalse(self.dest.exists())
+
+    def test_zip64_override_is_rejected_before_zipfile_constructor(self):
+        for comment in (b"", b"x" * 65535):
+            payload = zip64_override_archive(comment)
+            original = zipfile.ZipFile
+            with self.subTest(comment_length=len(comment)), \
+                 patch.object(module.zipfile, "ZipFile", wraps=original) as constructor:
+                with self.assertRaises(module.ArtifactError):
+                    self.stage(payload)
+                constructor.assert_not_called()
+            self.assertFalse(self.dest.exists())
+
+    def test_ordinary_zip_with_maximum_comment_remains_supported(self):
+        # A ZIP64 signature *inside a comment* is not an active locator.
+        payload = archive(directory=True, comment=b"PK\x06\x07" + b"x" * 65531)
+        receipt = self.stage(payload)
+        self.assertEqual(self.dest.read_bytes(), elf())
+        self.assertEqual(receipt["sha256"], hashlib.sha256(elf()).hexdigest())
 
     def test_nul_name_and_concatenated_archives_cannot_hide_extra_data(self):
         payload = archive(member="bun-linux-x64/bun/hidden")
