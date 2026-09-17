@@ -159,7 +159,10 @@ func immutableImageReference(reference string) bool {
 }
 
 type Instance struct {
-	ProviderRef       string
+	ProviderRef string
+	// RuntimeID pins the physical instance for authenticated existing-runtime
+	// operations. ProviderRef retains its logical lifecycle/name semantics.
+	RuntimeID         string
 	SlotID            string
 	Epoch             uint64
 	RuntimeGeneration uint64

@@ -290,6 +290,7 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 	now := p.config.Now().UTC()
 	return base.Instance{
 		ProviderRef:       name,
+		RuntimeID:         response.ID,
 		SlotID:            spec.SlotID,
 		Epoch:             spec.Epoch,
 		RuntimeGeneration: spec.RuntimeGeneration,
@@ -490,6 +491,7 @@ func (p *Provider) statusFromContainer(container Container, providerRef string) 
 	return base.Status{
 		Instance: base.Instance{
 			ProviderRef:       providerRef,
+			RuntimeID:         container.ID,
 			SlotID:            container.Config.Labels[labelSlotID],
 			Epoch:             epoch,
 			RuntimeGeneration: generation,
