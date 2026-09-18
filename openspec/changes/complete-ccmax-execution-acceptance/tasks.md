@@ -8,7 +8,7 @@
 
 ## 当前优先门槛：VM 隔离与 TLS
 
-后续开发及Claude接手从[2026-09-18时间命名规划](../../../docs/plans/2026-09-18_13-17-37-isthmus-claude-handoff.md)继续：P1/S2b5a已提交，下一项P2真实provider双实例实验；不跳过停止线、不重做计费/UI。
+后续开发及Claude接手从[2026-09-18时间命名规划](../../../docs/plans/2026-09-18_13-17-37-isthmus-claude-handoff.md)继续：P1/S2b5a已提交；P2 已完成本地实验合同/真实provider双槽位Internal网与精确清理（无本机Docker socket，实跑skip）。下一步是专用Linux只读预检后的双实例mTLS/cgroup，不跳过停止线、不重做计费/UI。
 
 按用户要求，先处理 [VM 隔离优先计划](vm-isolation-design.md)，暂停后续业务接线；未通过不得用 B2b2a 的局部 PASS 放行整链。
 
@@ -23,6 +23,7 @@
     - [x] S2b2组件：分目录实现受认证签发、SQL公开receipt、实例CA pin安装、Controller启动接线；本地race/vet、独立review及170单容器9组×3遍通过；[实证](verification.md#s2b2受认证签发与启动前bootstrap)。
     - [x] S2b2-live：双实例真实Docker CSR/证书投递，独立key、交叉/错CA精确拒绝、幂等安装、lease撤销后拒绝签发；清理后原4业务容器不变；[实证](verification.md#s2b2-live双实例真实docker证书管理通道)。
     - [ ] 剩余：生产host-agent/provider装配、真实SQL幂等并发、双实例mTLS连接及lease失效整链；当前不宣称CLI整链/生产可用。
+      - [x] S2b5b 本地：实验资源/拒绝矩阵、真实 `provider/docker` 双槽位独占 Internal 网 Create/Inspect、交叉CID拒绝、仅清单清理、派生镜像配方；live Docker 默认 skip。[合同](s2b5b-provider-lifecycle.md)，[实证](verification.md#s2b5b真实provider双实例实验合同)。未关闭 K3/K4/N3。
   - [x] S2b3组件：严格START经准确物理CID核验→认证bootstrap→实际mTLS，失败/漂移不被普通INSPECT复活；真实ControlClient/Dispatch与worker回环组合通过；[实证](verification.md#s2b3正式start命令的已有实例认证装配)。仅组件装配，host-agent二进制与orchestrator签发入口仍未启用。
   - [x] S2b4入口：cmd/host-agent 默认关闭生命周期服务，专属node身份/控制TLS、退出收敛、业务placement排除；orchestrator显式SQL receipt + 独立Redis lease校验装配；[实证](verification.md#s2b4默认关闭的服务入口与持久化签发装配)。只接生命周期，不启业务/出口，缺权威lease writer时签发拒绝；K3/K4/H5保持开放。
 - [ ] VM0d 当前组件实际隔离整链，不复用旧 VM/旧凭据或局部 PASS 冒充完成。

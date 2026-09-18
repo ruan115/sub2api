@@ -1,5 +1,31 @@
 # 验证记录
 
+## S2b5b：真实 provider 双实例实验合同
+
+2026-09-18。规划入口
+[2026-09-18_13-17-37-isthmus-claude-handoff.md](../../../docs/plans/2026-09-18_13-17-37-isthmus-claude-handoff.md)
+P2；合同 [s2b5b-provider-lifecycle.md](s2b5b-provider-lifecycle.md)。不重做 P1
+swap 策略，不纳入暂停的 `build.py`/`runtimekit` WIP。
+
+### 本轮实现
+
+- 固定槽位 `slot-p2-a`/`slot-p2-b`、独立账号 hash、派生镜像 digest 合同，以及
+  host bind/非 Internal/MemorySwap 漂移/交叉 CID/公网 endpoint 拒绝矩阵。
+- `internal/providerlifecycle` 通过真实 `provider/docker` Create/Inspect：两槽位
+  各自独占 Internal=true bridge，创建请求 `MemorySwap=Memory`、无 bind/volume、
+  监听 `0.0.0.0:8093`、环境不含原始账号；交叉 slot 与替换物理 CID 的
+  `ValidateExisting` 失败。清理只 Destroy 清单内 ProviderRef，未跟踪 ID 事先拒绝。
+- 实验派生 Dockerfile 只 `FROM` 已有 digest 并 `COPY /worker`；live Docker 仅在
+  `EXECUTION_PROVIDER_LIFECYCLE_DOCKER=1` 下运行，默认 skip。
+
+### 验证与剩余
+
+本机 `go test`/`go test -race`/`go vet` 覆盖 `internal/providerlifecycle` 与
+`test/providerlifecycle` 通过。只读预检：本机 `/var/run/docker.sock` **不存在**，
+因此未创建网络/容器，未声称 cgroup swap 或跨容器 mTLS。未 SSH 216/170，未打开
+业务开关，分数仍 32%；K3/K4/N3 保持开放。下一步：在专用 Linux 上先重核业务容器
+基线，再按合同实跑双 Internal 网 START/mTLS 与 cgroup。
+
 ## S2b5a：禁止swap策略与时间命名交接规划
 
 2026-09-18 13:26 +08:00。用户要求先按时间命名规划，再继续开发并准备交给Claude。

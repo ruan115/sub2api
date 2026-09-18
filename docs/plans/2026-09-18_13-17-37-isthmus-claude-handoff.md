@@ -197,7 +197,9 @@ git diff --check
 ## 8. 本轮执行记录（交接前更新）
 
 - 规划创建：2026-09-18 13:17:37 +08:00，基线 `d1e722a`；规划提交 `4cbb6df`。
-- 记录更新：2026-09-18 13:26:17 +08:00。
+- 记录更新：2026-09-18 15:50:00 +08:00。P2 本地合同与真实 provider 双槽位
+  Internal 网/精确清理已实现；本机无 Docker socket，live mTLS/cgroup 未跑。
+  暂停 WIP 仍未提交。未 SSH、未打开业务开关、分数仍 32%。
 - P1/S2b5a：**本地策略切片已完成**，代码提交 `2b41e90`；不需要Claude再重写。
   核心变更是 Engine字段、Create等值赋值、shared sandbox门禁；独立
   `memory_swap_test.go` 与原实验协调器的 `memory_policy_test.go` 补齐负测。
@@ -208,8 +210,9 @@ git diff --check
   Engine验证，不声称kernel/cgroup通过。bootstrap执行中漂移可拒绝后续成功返回，
   不能回滚已经发生的exec/安装/签发；这是瞬时核验，不是持续租约/隔离监控。
 - 总体仍32%、镜像40%，K3/K4/N3/H5未因本轮源码门禁而加分。暂停WIP继续保留。
-- P2–P5：未在本轮执行，必须按入口条件逐项推进。
-- **Claude第一项任务**：重核HEAD/工作区并读取
-  [S2b5a验证记录](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b5a禁止swap策略与时间命名交接规划)，
-  然后实施P2：先写准确实验资源/镜像/双Internal网/清理与拒绝矩阵，再做只读预检，
-  通过后才按权限边界运行；不直接运行旧Docker实验脚本，不重做P1，不推进计费/UI。
+- P2–P5：P2 本地合同/真实 provider 双槽位 Internal 网与精确清理已落地，本机无
+  Docker socket，live mTLS/cgroup 未跑。P3–P5 未执行。
+- **Claude 下一项**：专用 Linux 只读预检（170 先重核 4 个业务容器元数据，不符
+  即停；216 禁止）。通过后按
+  [S2b5b合同](../../openspec/changes/complete-ccmax-execution-acceptance/s2b5b-provider-lifecycle.md)
+  实跑双 Internal 网 Create/START/mTLS 与 cgroup swap；不重做 P1，不推进计费/UI。
