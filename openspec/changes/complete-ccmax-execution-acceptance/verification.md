@@ -1,5 +1,54 @@
 # 验证记录
 
+## P3b：实例身份生命周期合同与持久 home 边界
+
+2026-09-19。规划入口
+[2026-09-18_13-17-37-isthmus-claude-handoff.md](../../../docs/plans/2026-09-18_13-17-37-isthmus-claude-handoff.md)
+P3 后两条；设计与边界 [p3b-identity-lifecycle.md](p3b-identity-lifecycle.md)。
+
+### 本轮实现
+
+`internal/identitylifecycle` 纯规则集（不存储、不是第二份状态权威，当前无生产调用方）：
+
+- 事件 `adopt`/`restart`/`upgrade`/`account-change`/`destroy`。只有 adopt（接管仍在
+  运行的同一容器）保留私钥并要求绑定完全相同；其余丢失私钥的事件必须 **epoch 与
+  generation 同时严格前进**。generation 每槽只增不复位，换回旧账号也不回退。
+  `SlotID`/`NodeID` 非 destroy 事件不得变更。事件由调用方给出，不从绑定反推。
+- `ValidateHistory(floor, steps)` 要求首步不低于 floor（该槽历史最高 epoch/generation，
+  含已销毁者），否则销毁后可从 generation 1 重生，而旧证书仍在有效期内。
+- `ValidatePersistentPaths` 为**白名单**（`/home` 之下），因为 Debian 基础镜像
+  `/var/run` 是 `/run` 的符号链接，黑名单会放行 `/var/run/execution/identity`；
+  身份重叠检查先于白名单执行以给出精确原因。不挂载任何东西。
+
+三条依据均已核实：身份在 `/run` tmpfs、停止即毁；对端校验是 URI 精确匹配无 CRL；
+回执唯一键 `(slot_id, execution_epoch)` 且比对 `PublicKeySHA256`。
+
+### 发现的既有缺陷（未修复）
+
+**被停止的 runtime 容器目前无法重新 bootstrap。** `reconcile.go:218` 把
+`ActualStopped + DesiredReady` 路由为 `ActionStart`，`control_executor.go:36-41`
+用原 epoch 下发且 generation 不变，`bootstrap/coordinator.go:52-63` 按同一 binding
+再签发；但停止已抹掉 tmpfs 身份，实例呈递新公钥，而 `(slot, epoch)` 回执钉住旧的
+`PublicKeySHA256`，`SameReceiptIdentity` 比对失败即 `ErrRejected`。关闭它要把
+stopped 路由成 destroy→release→place 以分配新 epoch，属控制面行为变更，本切片
+刻意不做，仅以 `TestResumeAtTheSameBindingStaysRejected` 固化冲突。
+
+### 验证与剩余
+
+每个拒绝断言具体原因串而非仅 `errors.Is`；覆盖 floor 半回退（epoch 高于 floor 但
+generation 低于 floor）、历史链接、destroy 终结性、`/var/run` 别名、`/home` 本身、
+`/homework` 段边界、控制字符与超长路径。两轮独立 adversarial review 共 8 项缺陷
+全部已修（含与回执唯一键矛盾、销毁后重生未锚定、测试空跑、别名绕过、分层污染、
+身份重叠检查被遮蔽成死代码）。`go list -deps` 确认生产包只依赖 `runtimeidentity`。
+
+本机离线全量 `go test -race`、`go vet`、linux/amd64 编译通过，本包 race ×5 通过；
+`make -C recovery check` 为 236 Python / 150 Bun / 186 镜像 Python，与基线一致。
+
+**仍未做**：无生产调用方；未实现轮换（`InstallCertificate` 仍拒绝替换，仓库中
+`Epoch`/`Generation` 依旧无任何代码递增）；撤销传播未做——lease 撤销仍只标记 DB，
+不拆除身份或已建立的 worker mTLS 连接（P3a 只回收了出口 tunnel，那是代理绑定），
+归 P4。未 SSH、未连 Docker、未请求模型、未部署。分数仍 32%，VM0b/VM0c/N3 开放。
+
 ## P3a：出口 CONNECT 结构性拒绝矩阵与在途回收
 
 2026-09-19。规划入口

@@ -224,9 +224,28 @@ git diff --check
   全仓离线 race/vet、linux/amd64 编译、race×10、236/150/186 恢复与镜像回归通过。
   未 SSH、未连 Docker、未请求模型、未部署，暂停 WIP 未动，分数仍 32%。
   **这不是内核网络门**；VM0b/N3 保持开放。
-- **Claude 下一项**：P3b —— 实例身份生命周期合同（重启/升级/换账号/销毁/恢复时
-  机器标识、home、私钥、证书的保留与换代），含 tmpfs-only provider 与最终持久 home
-  的明确设计；不临时加宿主目录挂载。之后若用户授权再做专用 Linux 只读预检
+- **P3b**（2026-09-19，Claude）：实例身份生命周期合同已落地为纯规则集
+  `internal/identitylifecycle`（不存储、非第二份状态权威、当前无生产调用方）。
+  依据三个已核实的既有事实：身份在 `/run` tmpfs 停止即毁；对端校验是 SPIFFE URI
+  精确匹配且无 CRL；证书回执唯一键是 `(slot_id, execution_epoch)` 并比对
+  `PublicKeySHA256`。因此凡丢失私钥的事件必须 **epoch 与 generation 同时前进**，
+  generation 每槽只增不复位；`ValidateHistory` 用 floor 锚定，挡住销毁后从
+  generation 1 重生。持久 home 采用**白名单**（`/home` 之下）而非黑名单，因为
+  Debian 基础镜像 `/var/run` 是 `/run` 的符号链接。未加任何挂载。
+  [设计](../../openspec/changes/complete-ccmax-execution-acceptance/p3b-identity-lifecycle.md)，
+  [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p3b实例身份生命周期合同与持久-home-边界)。
+  两轮独立 adversarial review 共修 8 项。全仓离线 race/vet、linux/amd64 编译、
+  本包 race×5、236/150/186 回归通过。分数仍 32%。
+- **本轮发现、待用户决定的既有缺陷**：被停止的 runtime 容器**目前无法重新
+  bootstrap**。`reconcile.go:218` 把 `ActualStopped + DesiredReady` 路由为
+  `ActionStart`，用原 epoch 且 generation 不变；但停止已抹掉 tmpfs 身份，实例呈递
+  新公钥，与 `(slot, epoch)` 回执钉住的 `PublicKeySHA256` 不符即 `ErrRejected`。
+  关闭它需把 stopped 路由成 destroy→release→place 以分配新 epoch，属控制面行为
+  变更，**未擅自修改**；已用 `TestResumeAtTheSameBindingStaysRejected` 固化冲突。
+- **Claude 下一项**：先请用户就上条缺陷定夺（改 reconcile 路由 / 扩回执唯一键 /
+  暂不处理）。之后 P4 权威租约与 registry，其中撤销传播仍缺——lease 撤销目前只标记
+  DB，不拆除身份或已建立的 worker mTLS 连接（P3a 只回收了出口 tunnel）。
+  若用户授权再做专用 Linux 只读预检
   （170 先重核 4 个业务容器元数据，不符即停；216 禁止），通过后按
   [S2b5b合同](../../openspec/changes/complete-ccmax-execution-acceptance/s2b5b-provider-lifecycle.md)
   实跑双 Internal 网 Create/START/mTLS 与 cgroup swap；不重做 P1/P2，不推进计费/UI。
