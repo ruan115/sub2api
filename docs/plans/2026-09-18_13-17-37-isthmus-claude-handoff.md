@@ -15,6 +15,7 @@ Claude 继续。本文件为本轮及后续的接手入口，不要求读取整�
   - `d1e722a`：S2b4 review、测试和剩余门槛。
 - 本文件末尾的执行记录会补上本轮后续提交。以上是基线，不表示最新 HEAD；接手
   必须重新执行 `git status --short`、`git branch --show-current`、`git log -8 --oneline`。
+  当前成果是本地提交，未push；不等于已有异地备份。换电脑前的同步/备份另行授权。
 - 以下是已有、暂停且未提交的工作，不是垃圾文件，不得覆盖/清理/偷偷提交：
   - `execution-plane/isthmus-runtime/image/lab/build.py`
   - `execution-plane/isthmus-runtime/image/runtimekit/`
@@ -25,6 +26,8 @@ Claude 继续。本文件为本轮及后续的接手入口，不要求读取整�
 目标是恢复可维护的 **isthmus-vm-base + isthmus/CLI 执行容器 + host-agent + CCMAX
 桥接**。这里的“VM”是 Docker/runc 隔离容器，不开发虚拟机内核，不换成 KVM。
 Sub2API 已有登录、权限、计价、模型价格、用户倍率和账务继续沿用，只回传执行 usage。
+Sub2终端用户账与CCMAX已有服务账户/成本账分别保留，不能擅删CCMAX quota/balance
+扣减，也不能增加执行侧结算；遵循[既有双层账务归属合同](../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md)。
 不恢复 Portunex 全业务，不重做控制台视觉，不更改既有调用方 HTTP/WS/gRPC 合同。
 
 基础镜像不等于完整运行服务。基础镜像构建通过、固定真实 CLI 单实例合成调用通过，
@@ -42,14 +45,14 @@ Sub2API 已有登录、权限、计价、模型价格、用户倍率和账务继
 | 功能 | 当前入口/目录（相对仓库根） | 已有能力 / 不得误认完成的部分 |
 | --- | --- | --- |
 | 基础镜像与制品锁 | `execution-plane/isthmus-runtime/image/` | 基础构建/固定部分制品；完整派生 runtime 与恢复冷启动未完成 |
-| CLI 执行 | `execution-plane/isthmus-runtime/src/runtime/cli/`、`src/app/cli/` | 固定真实 CLI 单轮文本/JSON/SSE合成上游；非完整会话池 |
-| Docker/runc 隔离 | `execution-plane/internal/provider/docker/` | 严格镜像/资源/用户/独占 Internal bridge 接纳；swap配置缺口为本轮首项 |
-| 实例本地身份 | `execution-plane/internal/runtimeidentity/`、`runtimebootstrap/` | 实例内私钥/CSR与原子公开证书安装；不向宿主输出实例私钥 |
-| 认证签发 | `execution-plane/internal/runtimeenrollment/`、`internal/service/runtimeenrollment/` | 认证RPC、SQL receipt、独立Redis校验；生产权威lease writer仍缺 |
-| 宿主启动 | `execution-plane/cmd/host-agent/`、`internal/hostagent/daemon/`、`lifecycle/` | 预签发node身份→TLS控制→严格START；仅生命周期，无业务数据/出口服务 |
-| 节点调度边界 | `execution-plane/internal/nodepolicy/`、`placement/` | lifecycle-only 节点明确排除业务调度，含sticky和无约束请求 |
-| 控制面与任务状态 | `execution-plane/internal/control/`、`runtime/store/`、`service/` | 有现成binding/命令/租约结构；不另起第二份状态权威 |
-| 实际管理通道实验 | `execution-plane/test/dockerbootstrap/`、`image/lab/livebootstrap/` | 已做真实Docker CSR/公开证书传递；不是实际跨容器mTLS验收 |
+| CLI 执行 | `execution-plane/isthmus-runtime/src/runtime/cli/`、`execution-plane/isthmus-runtime/src/app/cli/` | 固定真实 CLI 单轮文本/JSON/SSE合成上游；非完整会话池 |
+| Docker/runc 隔离 | `execution-plane/internal/provider/docker/` | 严格镜像/资源/用户/独占 Internal bridge 接纳；本轮已补swap策略，内核实证待P2 |
+| 实例本地身份 | `execution-plane/internal/runtimeidentity/`、`execution-plane/internal/runtimebootstrap/` | 实例内私钥/CSR与原子公开证书安装；不向宿主输出实例私钥 |
+| 认证签发 | `execution-plane/internal/runtimeenrollment/`、`execution-plane/internal/service/runtimeenrollment/` | 认证RPC、SQL receipt、独立Redis校验；生产权威lease writer仍缺 |
+| 宿主启动 | `execution-plane/cmd/host-agent/`、`execution-plane/internal/hostagent/daemon/`、`execution-plane/internal/hostagent/lifecycle/` | 预签发node身份→TLS控制→严格START；仅生命周期，无业务数据/出口服务 |
+| 节点调度边界 | `execution-plane/internal/nodepolicy/`、`execution-plane/internal/placement/` | lifecycle-only 节点明确排除业务调度，含sticky和无约束请求 |
+| 控制面与任务状态 | `execution-plane/internal/control/`、`execution-plane/internal/runtime/store/`、`execution-plane/internal/service/` | 有现成binding/命令/租约结构；不另起第二份状态权威 |
+| 实际管理通道实验 | `execution-plane/test/dockerbootstrap/`、`execution-plane/isthmus-runtime/image/lab/livebootstrap/` | 已做真实Docker CSR/公开证书传递；不是实际跨容器mTLS验收 |
 
 `cmd/host-agent → daemon.SelectRunner → 同一 Docker provider + lifecycle.New +
 ControlClient → 严格已有 CID START → CSR → 认证签发 → 实例安装 → worker mTLS`
@@ -71,26 +74,30 @@ ControlClient → 严格已有 CID START → CSR → 认证签发 → 实例安�
 
 ### P1 / S2b5a — 先补 provider 的禁止 swap 策略（本轮先开发）
 
-- [ ] 创建请求显式 `MemorySwap = Memory = spec.Resources.MemoryBytes`，两者为正。
-- [ ] Engine JSON读写字段完整；省略/null/0/-1/不等于Memory全部拒绝。
-- [ ] 共同只读接纳门禁覆盖 Inspect/InspectSlot/Create-adoption/START/endpoint/
+- [x] 创建请求显式 `MemorySwap = Memory = spec.Resources.MemoryBytes`，两者为正。
+- [x] Engine JSON读写字段完整；省略/null/0/-1/不等于Memory全部拒绝。
+- [x] 共同只读接纳门禁覆盖 Inspect/InspectSlot/Create-adoption/START/endpoint/
   ValidateExisting/bootstrap 前后复核；失败不自动更新/重建/清理旧容器。
-- [ ] 新测试放 `provider/docker/` 的独立 swap 文件；已有资源序列化/正向fixture
+- [x] 新测试放 `execution-plane/internal/provider/docker/` 的独立 swap 文件；已有资源序列化/正向fixture
   作最小更新。不新增可关闭此安全策略的开关，不改 host swap/sysctl/daemon配置。
-- [ ] 正向用例、各类漂移/缺字段拒绝、零写入、实际本地 HTTP 编解码、review、race/vet。
+- [x] 正向用例、各类漂移/缺字段拒绝、预检拒绝时零写入、实际本地 HTTP 编解码、review、race/vet。
 
 依据：[Docker官方资源限制](https://docs.docker.com/engine/containers/resource_constraints/#--memory-swap-details)，
 `MemorySwap` 表示内存与swap总量，等于正Memory才禁止swap；0不是禁止，-1不是禁止。
 这是请求和接纳策略，不证明宿主内核执行；Linux cgroup 实证留在 P2。现有不满足新
 策略的容器只会被拒绝，不执行在线迁移或修复，不把旧实验PASS升级为新策略实测。
+范围不扩到直接provider Stop/Drain/Destroy：它们原有清理语义保持不变，不能把本轮
+称作所有底层方法都经过swap门禁；正式命令路径仍须其既有前置Inspect和准确归属。
 
 ### P2 / S2b5b — 当前 provider 两实例真实管理与 mTLS
 
 入口条件：P1完成、只读预检通过、实验镜像内容/摘要明确、仅本任务资源可证明归属。
 
 1. 复用既有基础镜像/固定制品与认证组件，采用最小不可变实验派生镜像，公开程序
-   放镜像内，不用host bind绕过provider。必要时只建聚焦 `test/providerlifecycle/`
-   和 `image/lab/providerlifecycle/`，已有功能直接复用；不要提前建空目录。
+   放镜像内，不用host bind绕过provider。必要时只建聚焦
+   `execution-plane/test/providerlifecycle/` 和
+   `execution-plane/isthmus-runtime/image/lab/providerlifecycle/`，已有功能直接复用；
+   不要提前建空目录。
 2. 两个测试slot，各自独占 Internal bridge、独立tmpfs/实例身份；所有Docker操作
    固定实验CID和network ID。真实provider的Create/只读接纳/认证START走相同代码。
 3. 从可信宿主分别连接真实worker端点完成mTLS；错node/CA/slot/epoch/generation、
@@ -129,7 +136,8 @@ ControlClient → 严格已有 CID START → CSR → 认证签发 → 实例安�
 ### P5 — CCMAX现有调用端接入与可恢复交付
 
 - 最后接既有gateway dispatch；HTTP/WS/gRPC协议、usage、错误、取消与legacy默认
-  行为都要组合测试。计费仍只有Sub2原权威，防双重记账。
+  行为都要组合测试。Sub2用户结算与CCMAX原服务账户/成本账保持原归属，执行侧只
+  回usage，不新增结算、不删除CCMAX现有扣减，防同一用户请求重复计费。
 - 完成实际运行制品/版本/摘要清单、空白环境重建与冷启动；无账号、凭据、私钥进入
   镜像或Git。现有base-only镜像或Go-only实验worker不能称作完整isthmus运行制品。
 - 补故障/恢复与稳定性证据，然后按K/H/C/L/E门槛逐项加分。生产部署、真实账号
@@ -188,8 +196,20 @@ git diff --check
 
 ## 8. 本轮执行记录（交接前更新）
 
-- 规划创建：2026-09-18 13:17:37 +08:00，基线 `d1e722a`。
-- P1/S2b5a：计划阶段，尚未把源码/实测计为通过。
+- 规划创建：2026-09-18 13:17:37 +08:00，基线 `d1e722a`；规划提交 `4cbb6df`。
+- 记录更新：2026-09-18 13:26:17 +08:00。
+- P1/S2b5a：**本地策略切片已完成**，代码提交 `2b41e90`；不需要Claude再重写。
+  核心变更是 Engine字段、Create等值赋值、shared sandbox门禁；独立
+  `memory_swap_test.go` 与原实验协调器的 `memory_policy_test.go` 补齐负测。
+- 三位代理分工实现/交叉review，最终本轮无未处理P1/P2；文档review已修模块路径
+  和双层账务归属。完整Go离线race/vet、Linux amd64编译通过；相关模块race三遍，
+  swap定向race二十遍；恢复236 Python、150 Bun/1027断言、镜像186 Python通过。
+- 本轮无SSH、实际Docker运行、模型调用、迁移、部署或push。仅本地合成HTTP/typed
+  Engine验证，不声称kernel/cgroup通过。bootstrap执行中漂移可拒绝后续成功返回，
+  不能回滚已经发生的exec/安装/签发；这是瞬时核验，不是持续租约/隔离监控。
+- 总体仍32%、镜像40%，K3/K4/N3/H5未因本轮源码门禁而加分。暂停WIP继续保留。
 - P2–P5：未在本轮执行，必须按入口条件逐项推进。
-- 下一接手动作：先检查最新执行记录，避免重复已提交的P1；若P1通过，先做P2实验
-  设计与安全预检，不直接运行旧Docker实验脚本。
+- **Claude第一项任务**：重核HEAD/工作区并读取
+  [S2b5a验证记录](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#s2b5a禁止swap策略与时间命名交接规划)，
+  然后实施P2：先写准确实验资源/镜像/双Internal网/清理与拒绝矩阵，再做只读预检，
+  通过后才按权限边界运行；不直接运行旧Docker实验脚本，不重做P1，不推进计费/UI。

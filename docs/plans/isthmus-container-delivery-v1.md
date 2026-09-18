@@ -114,6 +114,11 @@
 
 ## 实施顺序与文件职责
 
+2026-09-18新增[时间命名开发/Claude交接规划](2026-09-18_13-17-37-isthmus-claude-handoff.md)。
+首切片P1/S2b5a已补provider禁止swap请求/接纳策略及本地review/race；不重复计N1分、
+不替代N3真实内核验收。下一项为当前provider两实例实验，后续沿隔离→租约/CLI→CCMAX，
+保留以下历史顺序记录及固定100分权重。
+
 2026-09-17用户确认[收敛顺序](../../openspec/changes/complete-ccmax-execution-acceptance/single-instance-cli-first.md)：先真实CLI单实例，再双实例隔离/身份，最后CCMAX桥接。该顺序覆盖下列原始排序，暂停S1d新增构建工具，保留其WIP；验收门槛和100分权重不变。R3和S2a的K2已通过，当前总体32%、运行服务60%、身份20%、镜像40%。
 
 用户再次明确沿用Sub2价格/倍率/计费，CCMAX保留现有业务模板；[S1–S6收敛阶段及本轮S1a设计](../../openspec/changes/complete-ccmax-execution-acceptance/isthmus-focused-stages.md)规定分阶段交付。这里的C3仅回传usage和防重复归属，不实现第二套计价；L是执行凭据/实例生命周期，不是Sub2用户业务。权重不变；S1b后总体26%、镜像40%，S1c部分交付不重复加分。

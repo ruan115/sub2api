@@ -1,5 +1,47 @@
 # 验证记录
 
+## S2b5a：禁止swap策略与时间命名交接规划
+
+2026-09-18 13:26 +08:00。用户要求先按时间命名规划，再继续开发并准备交给Claude。
+[接手入口](../../../docs/plans/2026-09-18_13-17-37-isthmus-claude-handoff.md) 规划提交
+`4cbb6df`；本地策略切片 `2b41e90`。文档包含分支/基线、暂停WIP、完整模块位置、
+P1–P5顺序/停止线、离线验证命令和逐阶段执行记录；保留CCMAX原服务账户/成本账，
+不把Sub2终端用户计费权威误解为删除CCMAX现有扣减。未创建/启动新的Claude任务。
+
+### 本轮实现
+
+- Docker Engine `HostConfig.MemorySwap` 完整投影/序列化；创建时显式等于正Memory。
+- shared sandbox只读门禁拒绝missing/null/0/-1/-2及不等于Memory，覆盖既有实例
+  接纳、Inspect/InspectSlot、Start、RuntimeEndpoint、ValidateExisting及bootstrap
+  执行前后核验。不更新、重建或清理不满足新规则的旧容器；无安全策略豁免开关。
+- 原Docker管理实验的Go协调器也核验相同swap字段，Python外层原有规则不变；
+  只读worker bind仍是原实验的特定例外，不允许到生产provider。
+- 直接provider Stop/Drain/Destroy原本不是接纳门禁，本轮保持其清理语义不变，
+  不声称所有底层操作都通过此规则；新的创建响应仍不是内核执行证明。
+
+依据：[Docker官方文档](https://docs.docker.com/engine/containers/resource_constraints/#--memory-swap-details)。
+只限制Memory不能代替显式禁止swap；内核能力/cgroup有效值仍须专用Linux实测。
+不以“宿主没配置swap”、容器内free、旧network-none实验或本次HTTP夹具代替该证据。
+
+### Review、测试、剩余
+
+独立 `provider/docker/memory_swap_test.go` 用真实本地HTTP Engine编解码检查请求字段
+和返回投影；每个负例先验证原正向fixture。覆盖缺失/null/默认/无限/负值/上下漂移、
+错误JSON类型/溢出、非正Memory、所有接纳入口及Request/Install前后漂移。预检失败
+时不exec/修改Docker；exec期间漂移时准确记录已exec一次，返回拒绝而非可重试就绪。
+不能撤销已发生的exec/安装或已签证书，仍是point-in-time，不是持续监控。
+
+三位代理分工和交叉review，限定改动无未处理P1/P2；root实验协调器也有独立review。
+最终全execution-plane离线race/vet、Linux/amd64 CGO=0命令编译通过；provider/
+hostagent/control/worker相关race三遍，swap定向race二十遍通过，实验协调器race
+三遍通过。`make -C recovery check`：236恢复Python、150 Bun/1027断言、186镜像
+Python通过。未SSH、真实Docker运行、下载/替换工具、模型请求、线上配置/UI/数据
+写入、迁移、部署或push；原build.py/runtimekit WIP保留且未提交。
+
+本轮只完成P1源码/Engine策略，不关闭N3/K3/K4/H5或镜像完整交付；总体32%、镜像40%
+不变。Claude下一步按时间命名规划P2，完成实验设计/只读预检后，用当前provider验证
+两独占Internal网络实例、准确mTLS与真实cgroup策略；不要重写已完成的P1。
+
 ## S2b4：默认关闭的服务入口与持久化签发装配
 
 2026-09-18，规划 `4e3826b`，持久化签发装配 `67e3b77`，host-agent 入口

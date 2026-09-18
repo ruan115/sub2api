@@ -44,8 +44,9 @@ Optional resource limits default to CPU 500m, memory 512 MiB, 128 PIDs and
 64 MiB tmpfs (`CPU_MILLI`, `MEMORY_BYTES`, `PIDS`, `TMPFS_BYTES`). Security is
 fixed: UID 1000, readonly root, no-new-privileges, all caps dropped, builtin
 seccomp, docker-default AppArmor. Configured capacity is a ceiling, not live
-free-host capacity discovery. The provider still needs its outstanding swap
-and actual kernel/egress isolation acceptance before production use.
+free-host capacity discovery. The provider now requests and rejects drift from
+explicit no-swap policy; actual kernel/cgroup and egress isolation acceptance
+is still required before production use.
 
 `EGRESS_PROXY_URL` defaults to `http://host-agent.execution.internal:8094`;
 only the fixed internal hostname with canonical port is allowed. No proxy
