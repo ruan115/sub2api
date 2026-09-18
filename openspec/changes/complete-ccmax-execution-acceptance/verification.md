@@ -1,5 +1,41 @@
 # 验证记录
 
+## P3a：出口 CONNECT 结构性拒绝矩阵与在途回收
+
+2026-09-19。规划入口
+[2026-09-18_13-17-37-isthmus-claude-handoff.md](../../../docs/plans/2026-09-18_13-17-37-isthmus-claude-handoff.md)
+P3 前两条；设计与边界 [p3a-egress-deny-matrix.md](p3a-egress-deny-matrix.md)。
+不重做 P1/P2，不改 provider，不纳入暂停的 `build.py`/`runtimekit` WIP。
+
+### 本轮实现
+
+- `internal/hostagent/egress_deny.go`：`classifyEgressTarget` 在每槽 allowlist
+  **之前**拒绝 metadata（IMDS/ECS/阿里云/`metadata.*` 主机名）、链路本地、未指定、
+  组播广播、IPv6 字面量（含 `::ffff:` 映射形）与名称解析端口 53/853/5353。
+  注册时命中即整个 binding 失败（槽位无出口，而非部分规则生效），请求时再复判。
+  无可关闭该策略的开关。
+- `validTargetHost` 要求非 IP 字面量主机的最右标签以字母开头，堵住
+  `2852039166`/`0251.0376.0251.0376`/`0xa9fea9fe` 这类经上游代理解析回
+  169.254.169.254 的编码规避。
+- 每个拒绝返回 403 + `X-Execution-Egress-Deny` 原因头，不是静默挂起。
+- `EgressRegistry` 发布撤销事件，`EgressGateway` 关闭同槽且代次不高于撤销代的
+  在途 tunnel：`Unregister` 与 epoch 换代都真正回收 relay，不再只拒下一次 CONNECT。
+  撤销只在成功路径发布；`Serve` 返回（含 nil listener 早退）时注销订阅。
+
+### 验证与剩余
+
+`internal/hostagent` 全量通过，race ×10 通过；全仓离线 `go test -race`、`go vet`、
+linux/amd64 `go build ./cmd/...` 通过；`make -C recovery check` 为 236 Python /
+150 Bun / 186 镜像 Python，与基线一致。两轮独立 adversarial review：先发现数字
+编码 IPv4 绕过（HIGH）、失败注册误发撤销、监听器泄漏；复核后再发现 nil-listener
+早退漏注销；四项均已修并补回归用例。
+
+**这不是内核网络门**：容器内进程直接建 socket、DNS rebinding 到 metadata/私网、
+DoH 共用 443 都不在本层覆盖；宿主与跨槽可达性仍须 VM0b 在专用 Linux 上做 netns/
+防火墙实证。loopback/私网目标刻意仍由 allowlist 管辖，不等于宿主隔离已完成。
+本切片尚未接进 host-agent daemon（`AllowedTargets` 无非测试生产者）。未 SSH、未
+连 Docker、未请求模型、未部署，未打开业务开关。分数仍 32%，VM0b/N3 保持开放。
+
 ## S2b5b：真实 provider 双实例实验合同
 
 2026-09-18。规划入口

@@ -212,7 +212,21 @@ git diff --check
 - 总体仍32%、镜像40%，K3/K4/N3/H5未因本轮源码门禁而加分。暂停WIP继续保留。
 - P2–P5：P2 本地合同/真实 provider 双槽位 Internal 网与精确清理已落地，本机无
   Docker socket，live mTLS/cgroup 未跑。P3–P5 未执行。
-- **Claude 下一项**：专用 Linux 只读预检（170 先重核 4 个业务容器元数据，不符
-  即停；216 禁止）。通过后按
+- **P3a**（2026-09-19，Claude）：P2 live 两条路都被前置条件挡住——本机
+  `/var/run/docker.sock` 是 Docker Desktop 符号链接但 daemon 未运行；170 只读预检
+  需用户单独授权外连。用户选择先走 P3 本地。已完成出口 CONNECT **结构性拒绝矩阵**
+  （metadata/链路本地/未指定/组播广播/IPv6字面量/解析端口，在每槽 allowlist 之前
+  生效，注册期命中即整绑定失败）、数字编码 IPv4 规避封堵，以及**在途 tunnel 回收**
+  （绑定撤销/epoch 换代不再只拒下一次 CONNECT）。每个拒绝带精确原因头，不用超时
+  冒充隔离。[设计](../../openspec/changes/complete-ccmax-execution-acceptance/p3a-egress-deny-matrix.md)，
+  [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p3a出口connect结构性拒绝矩阵与在途回收)。
+  两轮独立 adversarial review 共修 4 个缺陷，其中数字编码 IPv4 绕过为 HIGH。
+  全仓离线 race/vet、linux/amd64 编译、race×10、236/150/186 恢复与镜像回归通过。
+  未 SSH、未连 Docker、未请求模型、未部署，暂停 WIP 未动，分数仍 32%。
+  **这不是内核网络门**；VM0b/N3 保持开放。
+- **Claude 下一项**：P3b —— 实例身份生命周期合同（重启/升级/换账号/销毁/恢复时
+  机器标识、home、私钥、证书的保留与换代），含 tmpfs-only provider 与最终持久 home
+  的明确设计；不临时加宿主目录挂载。之后若用户授权再做专用 Linux 只读预检
+  （170 先重核 4 个业务容器元数据，不符即停；216 禁止），通过后按
   [S2b5b合同](../../openspec/changes/complete-ccmax-execution-acceptance/s2b5b-provider-lifecycle.md)
-  实跑双 Internal 网 Create/START/mTLS 与 cgroup swap；不重做 P1，不推进计费/UI。
+  实跑双 Internal 网 Create/START/mTLS 与 cgroup swap；不重做 P1/P2，不推进计费/UI。

@@ -15,6 +15,7 @@
 - [x] VM0a 已发现的 provider 接纳/隔离漂移与 worker 环境代理/明文上游缺口修复，独立 review、全模块离线 race/vet、关键三包十轮 race 和本地 CONNECT/TLS 测试通过；仅源码前置门槛，不含真实 VM 或每实例证书签发。
   - [x] S2b5a provider请求/接纳明确要求正Memory与MemorySwap等值；JSON投影和bootstrap前后漂移负例、review/race/vet通过；[实证](verification.md#s2b5a禁止swap策略与时间命名交接规划)。仅本地策略，真实kernel/cgroup仍归VM0b/N3，不重复加分。
 - [ ] VM0b Linux 实际出口防火墙/namespace、宿主/跨槽/metadata/DNS/IPv6 拒绝及失效回收。
+  - [x] P3a 应用层前置：CONNECT 结构性拒绝矩阵（metadata/链路本地/未指定/组播广播/IPv6字面量/解析端口/数字编码地址规避）在每槽 allowlist 之前生效，注册期命中即整绑定失败，每个拒绝带精确原因头而非超时；绑定撤销与 epoch 换代回收在途 tunnel。两轮独立 adversarial review（含一处 HIGH 绕过）、全仓离线 race/vet、`internal/hostagent` race×10 通过。[设计](p3a-egress-deny-matrix.md)，[实证](verification.md#p3a出口connect结构性拒绝矩阵与在途回收)。**不是内核门**：未做 netns/防火墙，未接 host-agent daemon，DNS rebinding/DoH/容器内直连 socket 未覆盖；不勾选 VM0b/N3、不加分。
   - 局部前置：`recoverykit lab inspect` 只读专用端点检查已实现并 review；45项合成用例/十轮重复及236项完整Python回归通过。没有连接实际Docker、启动VM或验证防火墙，不勾选VM0b/N3、不增加23%分数。见 [预检结果](verification.md#n3前置专用实验端点只读预检)。
 - [ ] VM0c 每实例身份材料、生产 worker mTLS 与换代/重放拒绝；按明确客户端版本验证 TLS 特征。
   - [x] S2a 两实际实例本地独立私钥/CSR，K2通过。

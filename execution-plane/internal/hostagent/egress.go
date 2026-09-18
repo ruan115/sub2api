@@ -68,16 +68,82 @@ type registeredEgressBinding struct {
 	policy  targetPolicy
 }
 
+// EgressRevocation describes a binding that has stopped being authoritative.
+// Listeners must treat it as a command to tear down matching in-flight egress,
+// not merely to refuse the next request.
+type EgressRevocation struct {
+	SourceIP       netip.Addr
+	SlotID         string
+	ExecutionEpoch uint64
+	ProxyLeaseID   string
+	Reason         string
+}
+
+const (
+	egressRevokedByUnregister = "binding-unregistered"
+	egressRevokedBySupersede  = "binding-superseded-by-newer-epoch"
+)
+
 type EgressRegistry struct {
-	mu       sync.RWMutex
-	bySource map[netip.Addr]registeredEgressBinding
-	bySlot   map[string]netip.Addr
+	mu             sync.RWMutex
+	bySource       map[netip.Addr]registeredEgressBinding
+	bySlot         map[string]netip.Addr
+	listeners      map[uint64]func(EgressRevocation)
+	nextListenerID uint64
 }
 
 func NewEgressRegistry() *EgressRegistry {
 	return &EgressRegistry{
-		bySource: make(map[netip.Addr]registeredEgressBinding),
-		bySlot:   make(map[string]netip.Addr),
+		bySource:  make(map[netip.Addr]registeredEgressBinding),
+		bySlot:    make(map[string]netip.Addr),
+		listeners: make(map[uint64]func(EgressRevocation)),
+	}
+}
+
+// WatchRevocations subscribes to binding revocations and returns the
+// unsubscribe function. Listeners are invoked outside the registry lock and
+// must not call back into the registry.
+func (r *EgressRegistry) WatchRevocations(listener func(EgressRevocation)) func() {
+	if listener == nil {
+		return func() {}
+	}
+	r.mu.Lock()
+	r.nextListenerID++
+	id := r.nextListenerID
+	r.listeners[id] = listener
+	r.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			delete(r.listeners, id)
+			r.mu.Unlock()
+		})
+	}
+}
+
+func (r *EgressRegistry) revoked(binding EgressBinding, reason string) EgressRevocation {
+	return EgressRevocation{
+		SourceIP: binding.SourceIP.Unmap(), SlotID: binding.Claim.SlotID,
+		ExecutionEpoch: binding.Claim.ExecutionEpoch, ProxyLeaseID: binding.ProxyLeaseID, Reason: reason,
+	}
+}
+
+// notify must be called after the registry lock is released.
+func (r *EgressRegistry) notify(events []EgressRevocation) {
+	if len(events) == 0 {
+		return
+	}
+	r.mu.RLock()
+	listeners := make([]func(EgressRevocation), 0, len(r.listeners))
+	for _, listener := range r.listeners {
+		listeners = append(listeners, listener)
+	}
+	r.mu.RUnlock()
+	for _, event := range events {
+		for _, listener := range listeners {
+			listener(event)
+		}
 	}
 }
 
@@ -87,8 +153,13 @@ func (r *EgressRegistry) Register(binding EgressBinding) error {
 		return err
 	}
 	source := binding.SourceIP.Unmap()
+	var revocations []EgressRevocation
+	defer func() { r.notify(revocations) }()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Collected separately and only published on the success path: a rejected
+	// registration must never tear down the binding it failed to replace.
+	var superseded []EgressBinding
 	if current, exists := r.bySource[source]; exists {
 		if current.binding.Claim.SlotID != binding.Claim.SlotID || binding.Claim.ExecutionEpoch < current.binding.Claim.ExecutionEpoch {
 			return ErrEgressBindingConflict
@@ -100,21 +171,30 @@ func (r *EgressRegistry) Register(binding EgressBinding) error {
 			}
 			return nil
 		}
+		superseded = append(superseded, current.binding)
 	}
 	if previousSource, exists := r.bySlot[binding.Claim.SlotID]; exists && previousSource != source {
-		previous := r.bySource[previousSource]
-		if binding.Claim.ExecutionEpoch <= previous.binding.Claim.ExecutionEpoch {
-			return ErrEgressBindingConflict
+		previous, tracked := r.bySource[previousSource]
+		if tracked {
+			if binding.Claim.ExecutionEpoch <= previous.binding.Claim.ExecutionEpoch {
+				return ErrEgressBindingConflict
+			}
+			superseded = append(superseded, previous.binding)
 		}
 		delete(r.bySource, previousSource)
 	}
 	r.bySource[source] = stored
 	r.bySlot[binding.Claim.SlotID] = source
+	for _, replaced := range superseded {
+		revocations = append(revocations, r.revoked(replaced, egressRevokedBySupersede))
+	}
 	return nil
 }
 
 func (r *EgressRegistry) Unregister(sourceIP netip.Addr, slotID string, epoch uint64) error {
 	source := sourceIP.Unmap()
+	var revocations []EgressRevocation
+	defer func() { r.notify(revocations) }()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	current, exists := r.bySource[source]
@@ -125,7 +205,29 @@ func (r *EgressRegistry) Unregister(sourceIP netip.Addr, slotID string, epoch ui
 	if r.bySlot[slotID] == source {
 		delete(r.bySlot, slotID)
 	}
+	revocations = append(revocations, r.revoked(current.binding, egressRevokedByUnregister))
 	return nil
+}
+
+// isCurrent reports whether the exact binding a request resolved is still the
+// authoritative one. It closes the window between resolve and admission.
+func (r *EgressRegistry) isCurrent(key egressBindingKey) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	current, exists := r.bySource[key.source]
+	if !exists {
+		return false
+	}
+	return current.binding.Claim.SlotID == key.slotID &&
+		current.binding.Claim.ExecutionEpoch == key.epoch &&
+		current.binding.ProxyLeaseID == key.proxyLeaseID
+}
+
+type egressBindingKey struct {
+	source       netip.Addr
+	slotID       string
+	epoch        uint64
+	proxyLeaseID string
 }
 
 func (r *EgressRegistry) resolve(remoteAddress string) (registeredEgressBinding, error) {
@@ -160,9 +262,11 @@ type EgressGateway struct {
 	revalidateInterval time.Duration
 	maxTunnelDuration  time.Duration
 
+	unwatch func()
+
 	mu      sync.Mutex
 	server  *http.Server
-	tunnels map[*protectedTunnel]struct{}
+	tunnels map[*protectedTunnel]egressBindingKey
 }
 
 func NewEgressGateway(config EgressGatewayConfig) (*EgressGateway, error) {
@@ -179,15 +283,23 @@ func NewEgressGateway(config EgressGatewayConfig) (*EgressGateway, error) {
 		config.MaxTunnelDuration <= 0 || config.MaxTunnelDuration > 24*time.Hour {
 		return nil, errors.New("egress gateway timing is invalid")
 	}
-	return &EgressGateway{
+	gateway := &EgressGateway{
 		registry: config.Registry, fencer: config.Fencer,
 		revalidateInterval: config.RevalidateInterval, maxTunnelDuration: config.MaxTunnelDuration,
-		tunnels: make(map[*protectedTunnel]struct{}),
-	}, nil
+		tunnels: make(map[*protectedTunnel]egressBindingKey),
+	}
+	// Losing the proxy binding must reclaim egress that is already relaying,
+	// not only refuse the next CONNECT. The execution lease fencer is a
+	// separate authority on a slower poll and does not cover this.
+	gateway.unwatch = config.Registry.WatchRevocations(gateway.revokeTunnels)
+	return gateway, nil
 }
 
 func (g *EgressGateway) Serve(ctx context.Context, listener net.Listener) error {
 	if listener == nil {
+		// This gateway can never serve, so release its registry subscription
+		// rather than pinning it for the process lifetime.
+		g.unwatch()
 		return errors.New("egress listener is required")
 	}
 	server := &http.Server{
@@ -216,6 +328,7 @@ func (g *EgressGateway) Serve(ctx context.Context, listener net.Listener) error 
 	go g.revalidate(ctx, shutdownDone)
 	err := server.Serve(listener)
 	close(shutdownDone)
+	g.unwatch()
 	g.closeAllTunnels()
 	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
 		return nil
@@ -236,9 +349,16 @@ func (g *EgressGateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	target, err := parseConnectTarget(request.Host)
-	if err != nil || !binding.policy.allows(target) {
-		response.Header().Set("Connection", "close")
-		http.Error(response, "egress target denied", http.StatusForbidden)
+	if err != nil {
+		denyEgress(response, "malformed-connect-target")
+		return
+	}
+	if reason := classifyEgressTarget(target.host, target.port); reason.denied() {
+		denyEgress(response, string(reason))
+		return
+	}
+	if !binding.policy.allows(target) {
+		denyEgress(response, string(denyReasonOutsideAllowed))
 		return
 	}
 	hijacker, ok := response.(http.Hijacker)
@@ -250,12 +370,22 @@ func (g *EgressGateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 	if err != nil {
 		return
 	}
+	key := egressBindingKey{
+		source: binding.binding.SourceIP, slotID: binding.binding.Claim.SlotID,
+		epoch: binding.binding.Claim.ExecutionEpoch, proxyLeaseID: binding.binding.ProxyLeaseID,
+	}
 	tunnel := &protectedTunnel{client: client}
-	g.trackTunnel(tunnel)
+	g.trackTunnel(tunnel, key)
 	defer func() {
 		g.untrackTunnel(tunnel)
 		tunnel.Close()
 	}()
+	// Tracking happens before this recheck, so a revocation racing the hijack
+	// either finds the tunnel here or is caught by the listener.
+	if !g.registry.isCurrent(key) {
+		_ = writeHijackedStatus(buffered, http.StatusForbidden)
+		return
+	}
 	release, err := g.fencer.Admit(request.Context(), binding.binding.Claim, tunnel.Close)
 	if err != nil {
 		writeHijackedStatus(buffered, http.StatusServiceUnavailable)
@@ -297,10 +427,40 @@ func (g *EgressGateway) revalidate(ctx context.Context, shutdown <-chan struct{}
 	}
 }
 
-func (g *EgressGateway) trackTunnel(tunnel *protectedTunnel) {
+// denyEgress reports the precise policy class back to the instance. A refusal
+// is always an explicit status, never a silent hang that a caller could mistake
+// for isolation.
+func denyEgress(response http.ResponseWriter, reason string) {
+	response.Header().Set("Connection", "close")
+	response.Header().Set(EgressDenyReasonHeader, reason)
+	http.Error(response, "egress target denied: "+reason, http.StatusForbidden)
+}
+
+// EgressDenyReasonHeader carries the deny classification on a refused CONNECT.
+const EgressDenyReasonHeader = "X-Execution-Egress-Deny"
+
+func (g *EgressGateway) trackTunnel(tunnel *protectedTunnel, key egressBindingKey) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.tunnels[tunnel] = struct{}{}
+	g.tunnels[tunnel] = key
+}
+
+// revokeTunnels closes every tracked tunnel whose binding generation is at or
+// below the revoked one. A newer epoch that already re-registered survives.
+func (g *EgressGateway) revokeTunnels(event EgressRevocation) {
+	g.mu.Lock()
+	doomed := make([]*protectedTunnel, 0, len(g.tunnels))
+	for tunnel, key := range g.tunnels {
+		if key.slotID != event.SlotID || key.epoch > event.ExecutionEpoch {
+			continue
+		}
+		doomed = append(doomed, tunnel)
+		delete(g.tunnels, tunnel)
+	}
+	g.mu.Unlock()
+	for _, tunnel := range doomed {
+		tunnel.Close()
+	}
 }
 
 func (g *EgressGateway) untrackTunnel(tunnel *protectedTunnel) {
@@ -315,7 +475,7 @@ func (g *EgressGateway) closeAllTunnels() {
 	for tunnel := range g.tunnels {
 		tunnels = append(tunnels, tunnel)
 	}
-	g.tunnels = make(map[*protectedTunnel]struct{})
+	g.tunnels = make(map[*protectedTunnel]egressBindingKey)
 	g.mu.Unlock()
 	for _, tunnel := range tunnels {
 		tunnel.Close()
@@ -445,6 +605,12 @@ func newTargetPolicy(values []string) (targetPolicy, error) {
 		if err != nil || port == 0 {
 			return targetPolicy{}, errors.New("allowed egress target port is invalid")
 		}
+		if reason := classifyEgressTarget(plainHost, uint16(port)); reason.denied() {
+			// A rule that names a structurally denied target fails the whole
+			// binding; the slot is left without egress rather than with a
+			// partially applied allowlist.
+			return targetPolicy{}, fmt.Errorf("allowed egress target %q is structurally denied: %s", value, reason)
+		}
 		if wildcard {
 			if net.ParseIP(plainHost) != nil {
 				return targetPolicy{}, errors.New("IP egress targets cannot use wildcards")
@@ -476,7 +642,8 @@ func validTargetHost(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return true
 	}
-	for _, label := range strings.Split(host, ".") {
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
 		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
@@ -486,7 +653,13 @@ func validTargetHost(host string) bool {
 			}
 		}
 	}
-	return true
+	// A name that is not a dotted-quad but still encodes an address — decimal
+	// (2852039166), octal (0251.0376.0251.0376) or hex (0xa9fea9fe) — would be
+	// resolved to that address by the upstream proxy while reaching this
+	// classifier as an opaque hostname. RFC 1123 requires the rightmost label
+	// of a real host name to begin with a letter, so that is the cut.
+	rightmost := labels[len(labels)-1]
+	return rightmost[0] >= 'a' && rightmost[0] <= 'z'
 }
 
 func validateEgressBinding(binding EgressBinding) (registeredEgressBinding, error) {
