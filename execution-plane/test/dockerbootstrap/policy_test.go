@@ -15,7 +15,7 @@ func containerFixture(config initialInput, public publicConfig, cid string, inde
 	for k, v := range expectedEnvironment(index, public) {
 		c.Config.Env = append(c.Config.Env, k+"="+v)
 	}
-	c.HostConfig = docker.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"}, IpcMode: "private", CgroupnsMode: "private", Memory: 1 << 30, NanoCPUs: 1_000_000_000, PidsLimit: 128, RestartPolicy: docker.RestartPolicy{Name: "no"}, Binds: []string{config.WorkerPath + ":/worker:ro"}, Tmpfs: map[string]string{}}
+	c.HostConfig = docker.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"}, IpcMode: "private", CgroupnsMode: "private", Memory: 1 << 30, MemorySwap: 1 << 30, NanoCPUs: 1_000_000_000, PidsLimit: 128, RestartPolicy: docker.RestartPolicy{Name: "no"}, Binds: []string{config.WorkerPath + ":/worker:ro"}, Tmpfs: map[string]string{}}
 	for k, v := range tmpfs {
 		c.HostConfig.Tmpfs[k] = v
 	}
@@ -37,7 +37,11 @@ func TestContainerPolicyRejectsDriftBeforeAnyOperation(t *testing.T) {
 			c.HostConfig.PortBindings = map[string][]docker.PortBinding{"80/tcp": {{HostPort: "80"}}}
 		},
 		"cpu": func(c *docker.Container) { c.HostConfig.NanoCPUs++ }, "memory": func(c *docker.Container) { c.HostConfig.Memory++ }, "pids": func(c *docker.Container) { c.HostConfig.PidsLimit++ },
-		"cap": func(c *docker.Container) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} }, "capdrop": func(c *docker.Container) { c.HostConfig.CapDrop = nil }, "nnp": func(c *docker.Container) { c.HostConfig.SecurityOpt = nil },
+		"swap-default":      func(c *docker.Container) { c.HostConfig.MemorySwap = 0 },
+		"swap-unlimited":    func(c *docker.Container) { c.HostConfig.MemorySwap = -1 },
+		"swap-below-memory": func(c *docker.Container) { c.HostConfig.MemorySwap-- },
+		"swap-above-memory": func(c *docker.Container) { c.HostConfig.MemorySwap++ },
+		"cap":               func(c *docker.Container) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} }, "capdrop": func(c *docker.Container) { c.HostConfig.CapDrop = nil }, "nnp": func(c *docker.Container) { c.HostConfig.SecurityOpt = nil },
 		"namespace": func(c *docker.Container) { c.HostConfig.PidMode = "host" }, "mount": func(c *docker.Container) {
 			c.HostConfig.Binds = append(c.HostConfig.Binds, "/var/run/docker.sock:/docker.sock:ro")
 		},

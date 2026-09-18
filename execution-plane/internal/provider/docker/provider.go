@@ -245,9 +245,10 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 				"seccomp=" + spec.Security.SeccompProfile,
 				"apparmor=" + spec.Security.AppArmorProfile,
 			},
-			PidsLimit: spec.Resources.PIDs,
-			Memory:    spec.Resources.MemoryBytes,
-			NanoCPUs:  spec.Resources.CPUMilli * 1_000_000,
+			PidsLimit:  spec.Resources.PIDs,
+			Memory:     spec.Resources.MemoryBytes,
+			MemorySwap: spec.Resources.MemoryBytes,
+			NanoCPUs:   spec.Resources.CPUMilli * 1_000_000,
 			Tmpfs: map[string]string{
 				"/tmp": "rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(tmpfsBytes, 10),
 				"/run": runtimeTmpfs,

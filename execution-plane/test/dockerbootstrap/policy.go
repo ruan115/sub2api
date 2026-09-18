@@ -35,7 +35,8 @@ func expectedEnvironment(index int, public publicConfig) map[string]string {
 }
 
 // Python Lab additionally checks fields absent from the production Engine
-// projection (MemorySwap, core ulimit, entrypoint and command). Never mutate an
+// projection (core ulimit, entrypoint and command). MemorySwap is checked by
+// both layers. Never mutate an
 // inspect result to make the production provider accept this lab-only profile.
 func validateContainer(c docker.Container, config initialInput, public publicConfig, cid string, index int) error {
 	h := c.HostConfig
@@ -43,7 +44,7 @@ func validateContainer(c docker.Container, config initialInput, public publicCon
 	if c.ID != cid || !cidPattern.MatchString(cid) || c.Name != "/"+name || c.Config.Hostname != name || c.Image != baseImage || c.Config.Image != baseImage || c.Config.User != "1000:1000" || c.Config.Labels[ownerLabel] != config.Owner || !c.State.Running {
 		return rejected
 	}
-	if h.Privileged || !h.ReadonlyRootfs || h.NetworkMode != "none" || h.Memory != 1<<30 || h.NanoCPUs != 1_000_000_000 || h.PidsLimit != 128 ||
+	if h.Privileged || !h.ReadonlyRootfs || h.NetworkMode != "none" || h.Memory != 1<<30 || h.MemorySwap != h.Memory || h.NanoCPUs != 1_000_000_000 || h.PidsLimit != 128 ||
 		len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, []string{"ALL"}) || !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges"}) ||
 		(h.PidMode != "" && h.PidMode != "private") || h.IpcMode != "private" || h.CgroupnsMode != "private" || h.UTSMode != "" || h.UsernsMode != "" ||
 		h.RestartPolicy.Name != "no" || h.PublishAllPorts || len(h.PortBindings) != 0 || len(c.NetworkSettings.Ports) != 0 ||

@@ -407,6 +407,7 @@ type HostConfig struct {
 	SecurityOpt       []string                 `json:"SecurityOpt"`
 	PidsLimit         int64                    `json:"PidsLimit"`
 	Memory            int64                    `json:"Memory"`
+	MemorySwap        int64                    `json:"MemorySwap"`
 	NanoCPUs          int64                    `json:"NanoCpus"`
 	Tmpfs             map[string]string        `json:"Tmpfs"`
 	Init              *bool                    `json:"Init"`

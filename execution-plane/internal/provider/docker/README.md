@@ -4,7 +4,8 @@ This provider implements one Docker/runc account slot, not a separate-kernel
 hypervisor VM. The host, Docker daemon and shared kernel are trusted.
 
 `sandbox.go` is the read-only, point-in-time gate shared by existing-instance
-Create, Inspect, InspectSlot, Start and RuntimeEndpoint. It verifies:
+Create, Inspect, InspectSlot, Start, RuntimeEndpoint, ValidateExisting and
+bootstrap pre/post-exec verification. It verifies:
 
 - canonical instance labels, hostname, non-root UID/GID and bootstrap identity;
 - immutable Config.Image resolved through the Engine to the actual image ID
@@ -13,6 +14,8 @@ Create, Inspect, InspectSlot, Start and RuntimeEndpoint. It verifies:
   no other members or published ports;
 - read-only root, capability drop with no additions/privileged mode, approved
   runtime/security profiles, private namespace settings and bounded resources;
+- explicit `MemorySwap == Memory > 0`, both requested at creation and checked
+  at adoption; missing/null/zero/unlimited or unequal swap ceilings fail closed;
 - safe anonymous tmpfs only, no host/named-volume/device mounts, and explicit
   credential-free egress environment.
 
@@ -24,7 +27,17 @@ containers missing the new bootstrap/inspect requirements are not silently
 adopted. Their migration needs an explicit lifecycle operation after validation.
 Configuration rejects empty/malformed or `unconfined` profile allowlist entries;
 the provider copies the validated slices so later caller mutation cannot change
-that policy.
+that policy. Direct Stop, Drain and Destroy are not sandbox-adoption gates;
+this change does not widen or automatically invoke those cleanup operations.
+
+Docker interprets `MemorySwap` as the combined memory-plus-swap ceiling. Equal
+positive `Memory` and `MemorySwap` prevent swap; zero means unset and -1 means
+unlimited, not disabled. See [Docker's memory-swap documentation](https://docs.docker.com/engine/containers/resource_constraints/#--memory-swap-details).
+This provider checks the Engine policy, not whether a particular kernel/cgroup
+enforced it. Dedicated Linux cgroup verification is still required; a host with
+no swap configured or container `free` output is not that evidence. Old containers
+without explicit no-swap policy are rejected without updates, recreation or
+cleanup. There is no opt-out switch or host swap/sysctl modification.
 
 Tests use explicit typed Engine JSON fixtures, including both projected and
 omitted tmpfs Mounts and created-but-not-started network state. Negative cases

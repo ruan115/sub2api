@@ -182,7 +182,7 @@ func TestCreateAppliesSandboxAndDoesNotExposeAccountID(t *testing.T) {
 	if request.User != "65532:65532" || !request.HostConfig.ReadonlyRootfs || !strings.HasPrefix(request.HostConfig.NetworkMode, "execution-net-") {
 		t.Fatalf("sandbox identity/filesystem/network missing: %+v", request)
 	}
-	if len(request.HostConfig.CapDrop) != 1 || request.HostConfig.CapDrop[0] != "ALL" || request.HostConfig.PidsLimit != 128 || request.HostConfig.Memory != 512<<20 || request.HostConfig.NanoCPUs != 500_000_000 {
+	if len(request.HostConfig.CapDrop) != 1 || request.HostConfig.CapDrop[0] != "ALL" || request.HostConfig.PidsLimit != 128 || request.HostConfig.Memory != 512<<20 || request.HostConfig.MemorySwap != request.HostConfig.Memory || request.HostConfig.NanoCPUs != 500_000_000 {
 		t.Fatalf("sandbox resource controls missing: %+v", request.HostConfig)
 	}
 	encoded := strings.Join(append(request.Env, request.HostConfig.SecurityOpt...), " ")

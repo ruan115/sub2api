@@ -95,6 +95,11 @@ func (p *Provider) validateSandbox(container Container) error {
 	if host.PidsLimit <= 0 || host.Memory <= 0 || host.NanoCPUs <= 0 {
 		return errors.New("container sandbox resource limits are incomplete")
 	}
+	// Docker's MemorySwap is the combined memory+swap ceiling. Only equality
+	// with positive Memory disables swap; missing/null decode as zero and fail.
+	if host.MemorySwap != host.Memory {
+		return errors.New("container sandbox swap must be disabled")
+	}
 	if len(host.Tmpfs) != 2 || !validSandboxTmpfs(host.Tmpfs["/tmp"]) || !validSandboxTmpfs(host.Tmpfs["/run"]) {
 		return errors.New("container sandbox tmpfs mounts are unsafe")
 	}
