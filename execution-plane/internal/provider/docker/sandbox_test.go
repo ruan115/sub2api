@@ -36,6 +36,7 @@ func sandboxFixture(t *testing.T) (Container, Network) {
 			"SecurityOpt":["no-new-privileges=true","seccomp=builtin","apparmor=docker-default"],
 			"Privileged":false,"PidMode":"","IpcMode":"private","UTSMode":"","UsernsMode":"","CgroupnsMode":"private",
 			"PidsLimit":128,"Memory":536870912,"MemorySwap":536870912,"NanoCpus":500000000,"Init":true,"Runtime":"runc",
+			"RestartPolicy":{"Name":"no","MaximumRetryCount":0},
 			"Tmpfs":{"/tmp":"rw,noexec,nosuid,nodev,size=67108864","/run":"rw,noexec,nosuid,nodev,size=67108864"},
 			"Binds":null,"Mounts":null,"VolumesFrom":null,"Devices":[],"DeviceRequests":null,"PortBindings":{},
 			"ExtraHosts":["host-agent.execution.internal:172.31.0.1"]},

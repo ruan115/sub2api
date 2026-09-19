@@ -100,6 +100,14 @@ func (p *Provider) validateSandbox(container Container) error {
 	if host.MemorySwap != host.Memory {
 		return errors.New("container sandbox swap must be disabled")
 	}
+	// A daemon-driven restart would bring the container back with a fresh
+	// tmpfs identity and no certificate, without the host agent ever running
+	// bootstrap, and would hide the crash from the reconciler. A container
+	// carrying any policy is refused here rather than rewritten; the provider
+	// has no update verb.
+	if !restartPolicyIsDisabled(host.RestartPolicy) {
+		return errors.New("container sandbox must not carry a docker restart policy")
+	}
 	if len(host.Tmpfs) != 2 || !validSandboxTmpfs(host.Tmpfs["/tmp"]) || !validSandboxTmpfs(host.Tmpfs["/run"]) {
 		return errors.New("container sandbox tmpfs mounts are unsafe")
 	}
@@ -153,6 +161,16 @@ func (p *Provider) validateSandbox(container Container) error {
 		}
 	}
 	return nil
+}
+
+// restartPolicyDisabled is what the provider requests and what every engine at
+// or above the minimum supported API version reports back. An empty name is
+// absent evidence, not a safe default, and is refused for the same reason a
+// missing MemorySwap is: the field has to be positively present.
+const restartPolicyDisabled = "no"
+
+func restartPolicyIsDisabled(policy RestartPolicy) bool {
+	return policy.Name == restartPolicyDisabled && policy.MaximumRetryCount == 0
 }
 
 func canonicalNonRootID(raw string) bool {

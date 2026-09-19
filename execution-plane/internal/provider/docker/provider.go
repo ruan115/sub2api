@@ -253,8 +253,14 @@ func (p *Provider) Create(ctx context.Context, spec base.SlotSpec) (base.Instanc
 				"/tmp": "rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(tmpfsBytes, 10),
 				"/run": runtimeTmpfs,
 			},
-			Init:          &initProcess,
-			RestartPolicy: RestartPolicy{Name: "unless-stopped"},
+			Init: &initProcess,
+			// Identity lives on tmpfs, so a daemon-driven restart would come
+			// back with a fresh key and no certificate, bootstrap would never
+			// re-run because nothing dispatched a START, and the crash would
+			// never surface as stopped for the reconciler to replace the slot
+			// at a new epoch. Requesting no policy is what prevents that;
+			// validateSandbox only detects drift at the next inspect.
+			RestartPolicy: RestartPolicy{Name: restartPolicyDisabled},
 			ExtraHosts:    []string{"host-agent.execution.internal:" + hostAgentGateway},
 			LogConfig: LogConfig{
 				Type: "json-file",

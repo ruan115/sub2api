@@ -1,5 +1,48 @@
 # 验证记录
 
+## P3d：禁用 Docker 自动重启策略
+
+2026-09-19。用户就 P3c 发现的相邻缺陷指示改为 `"no"`。
+
+### 本轮实现
+
+- `provider.go` 创建请求由 `RestartPolicy{Name: "unless-stopped"}` 改为
+  `{Name: "no"}`，并在 HTTP 线上显式序列化（不省略字段，免得未来引擎默认值说了算）。
+- 共同只读接纳门禁 `validateSandbox` 新增该字段校验（与 P1 的 no-swap 同一处）：
+  只接受 `Name == "no"` 且 `MaximumRetryCount == 0`。**缺失/null/空对象/空 Name
+  一律拒绝**——与「缺失证据不是安全默认」保持一致，正向 fixture 相应补上真实引擎
+  会报的 `{"Name":"no","MaximumRetryCount":0}`。
+- 不满足的既有容器只被**拒绝**，不修复、不重建：provider 没有 update 动词。
+
+理由：身份在 tmpfs，Docker 自行重启会绕过 host-agent——`bootstrap.Prepare` 不重跑，
+容器带着新私钥且无证书回来，永远不健康；而且崩溃不再表现为 `stopped`，P3c 新路由
+收不到信号。`test/dockerbootstrap/policy.go:50` 与 lab Python（`build.py`、
+`toolchain.py`、`livebootstrap/policy.py`）**原本就要求 `--restart no`**，生产
+provider 是唯一的例外，本轮消除该不一致。
+
+### 验证与剩余
+
+43 个子测试：创建请求的类型化与线上 JSON、7 类会被 Docker 执行的策略在**全部接纳
+入口**被拒、缺失证据 4 例被拒、bootstrap exec **前后**漂移各自拒绝且不把已发生的
+exec 说成可重试、拒绝时零写入、不静默修复。变异验证非空跑：禁用门禁即 FAIL，
+把 Create 改回 `unless-stopped` 亦 FAIL。
+
+独立 adversarial review 确认：`Engine` 接口**没有** update 动词，provider 无法修复；
+每个 `readSandbox` 调用方都会复检，bootstrap 前后各一次；既有 `unless-stopped`
+容器在 Create 的冲突接纳路径与 `ValidateExisting` 都被拒；Python lab 无冲突。
+
+全仓离线 `go test -race`、`go vet`、linux/amd64 编译通过，`internal/provider/docker`
+race ×10；`make -C recovery check` 236 / 150 / 186 与基线一致。
+
+**边界**：这是**创建时预防 + 接纳时检测**，不是持续强制。带外
+`docker update --restart=always` 对运行中的容器立即生效，只能在下一次 inspect 被
+发现，这是时间点核验而非持续监控。
+
+**已知运维缺口**：`reconcile.NewController` **目前没有非测试调用方**。因此 Docker
+守护进程重启或宿主重启后，runtime 容器会保持停止且**没有自动恢复路径**，直到
+reconciler 被接线。原先的 `unless-stopped` 只是用一个身份已损坏的容器掩盖了这一点，
+不是真正的恢复。此项属 P4 装配范围。
+
 ## P3c：reconcile 停止路由改为销毁→释放→重新放置
 
 2026-09-19。用户就 P3b 发现的缺陷选择方案 (a)「改 reconcile 路由」。

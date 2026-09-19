@@ -20,7 +20,8 @@
 - [ ] VM0c 每实例身份材料、生产 worker mTLS 与换代/重放拒绝；按明确客户端版本验证 TLS 特征。
   - [x] P3b 生命周期合同（设计，非实证）：`internal/identitylifecycle` 纯规则集，adopt/restart/upgrade/account-change/destroy 的换代要求、floor 锚定销毁后重生、持久 home 白名单边界。两轮独立 adversarial review 共 8 项缺陷已修，全仓 race/vet 通过。[设计](p3b-identity-lifecycle.md)，[实证](verification.md#p3b实例身份生命周期合同与持久-home-边界)。**无生产调用方、未实现轮换、未做撤销传播**；不勾选 VM0c、不加分。
   - [x] P3c 按用户选定方案 (a) 改 reconcile 路由：`DesiredReady` 下 `stopped→destroy`、`destroyed→release`，与既有过时代次分支一致，使被停止的容器走 destroy→release→place 取得新 epoch。同时修复本改动暴露的 CRITICAL——`ActionPlace` 幂等键在无 assignment 时恒等，而 Place 一经派发即 completed 且不可再 claim，会导致槽位永久无 assignment；改用 `NextExecutionEpoch` 作判别量并在缺失时拒绝放置。[实证](verification.md#p3creconcile-停止路由改为销毁释放重新放置)。
-  - [ ] **相邻缺陷待决**：`provider.go:257` `RestartPolicy: unless-stopped` 与 tmpfs 身份模型矛盾，Docker 绕过 host-agent 自动重启会产生无证书的僵尸容器，且崩溃不再表现为 `stopped`，P3c 新路由收不到信号。`sandbox.go` 未校验该字段。待用户决定。
+  - [x] P3d 按用户指示禁用 Docker 自动重启：创建请求改为 `RestartPolicy{Name:"no"}` 并显式序列化；共同只读接纳门禁新增该校验，只接受显式 `"no"` 且零重试，缺失/null/空 Name 一律拒绝；既有 `unless-stopped` 容器只被拒绝，不修复不重建（provider 无 update 动词）。消除了与 `test/dockerbootstrap/policy.go:50` 及 lab Python 原有 `--restart no` 要求的不一致。43 子测试含 bootstrap exec 前后漂移，变异验证非空跑。[实证](verification.md#p3d禁用-docker-自动重启策略)。**创建时预防 + 接纳时检测，非持续强制**；带外 `docker update --restart` 只能在下次 inspect 发现。
+  - [ ] **运维缺口**：`reconcile.NewController` 无非测试调用方，故守护进程/宿主重启后 runtime 容器无自动恢复路径，须待 reconciler 接线（P4 装配）。原 `unless-stopped` 只是用身份已损坏的容器掩盖该缺口，不是恢复。
   - [x] S2a 两实际实例本地独立私钥/CSR，K2通过。
   - [x] S2b1 原子证书安装、真实worker/Controller mTLS与票据负例，170单容器原生三遍及review/race/vet通过；[实证](verification.md#s2b1证书安装与实际组件mtls)。
   - [ ] S2b2 受认证签发/启动前证书投递、host-agent装配、双实例mTLS/lease失效组合；不以S2b1关闭VM0c。

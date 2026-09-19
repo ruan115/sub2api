@@ -244,12 +244,20 @@ git diff --check
   现以 `NextExecutionEpoch` 作判别量，缺失即拒绝放置。改动前**没有任何测试**覆盖
   `DesiredReady + ActualStopped`／`+ ActualDestroyed`。
   [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p3creconcile-停止路由改为销毁释放重新放置)。
-- **相邻缺陷待用户决定**：`provider.go:257` 的 `RestartPolicy: unless-stopped`
-  与 tmpfs 身份模型矛盾。Docker 会绕过 host-agent 自动重启崩溃容器，
-  `bootstrap.Prepare` 不重跑，容器换了新私钥却没有证书、永远不健康；而且崩溃不再
-  表现为 `stopped`，P3c 新路由收不到信号。`sandbox.go` 未校验该字段，也无测试依赖。
-  改成 `"no"` 是与新模型一致的选择，但会改变宿主重启后的运维行为，**未擅自修改**。
-- **Claude 下一项**：先请用户就 `RestartPolicy` 定夺。之后 P4 权威租约与 registry，
+- **P3d**（2026-09-19，用户指示改为 `"no"`）：创建请求禁用 Docker 自动重启并显式
+  序列化；共同只读接纳门禁（P1 no-swap 同一处）新增该校验，只接受显式 `"no"` 且
+  零重试，**缺失/null/空 Name 一律拒绝**。既有 `unless-stopped` 容器只被拒绝，
+  不修复不重建——provider 没有 update 动词。`test/dockerbootstrap/policy.go:50`
+  与 lab Python 原本就要求 `--restart no`，生产 provider 是唯一例外，本轮消除。
+  43 子测试含 bootstrap exec 前后漂移；变异验证确认非空跑。
+  [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p3d禁用-docker-自动重启策略)。
+  **边界**：创建时预防 + 接纳时检测，**不是持续强制**；带外
+  `docker update --restart=always` 只能在下一次 inspect 被发现。
+- **由此暴露的运维缺口**：`reconcile.NewController` **没有非测试调用方**，所以
+  Docker 守护进程或宿主重启后 runtime 容器会保持停止且**无自动恢复路径**，直到
+  reconciler 被接线。原先的 `unless-stopped` 只是用一个身份已损坏的容器掩盖了这点，
+  不是真正的恢复。归 P4 装配。
+- **Claude 下一项**：P4 权威租约与 registry，
   其中撤销传播仍缺——lease 撤销目前只标记 DB，不拆除身份或已建立的 worker mTLS
   连接（P3a 只回收了出口 tunnel）。若用户授权再做专用 Linux 只读预检
   （170 先重核 4 个业务容器元数据，不符即停；216 禁止），通过后按
