@@ -1,5 +1,46 @@
 # 验证记录
 
+## P5f：双库回收链路验收测试（已写、已编译，**尚未对真实库跑过**）
+
+2026-09-19。按用户指定的修复顺序，第 3 步。**状态：未验收。**
+
+### 本轮产出
+
+`internal/hostagent/lifecycle/leasechain_integration_test.go`，由
+`EXECUTION_MYSQL_TEST_DSN` + `EXECUTION_REDIS_TEST_URL` 双重门控，**默认 SKIP**
+（已本地确认两例均 SKIP）。放在 `lifecycle` 包内而非 `test/` 独立目录，是为了不把
+`Custody.take` 导出——「只有 START 能交付连接」这一性质比目录整齐更重要。
+
+链路：控制面 `Coordinator.Grant` 双写（真实 MySQL + 真实 Redis）→ 权威校验通过
+→ custody 托管一条**真实 gRPC 传输** → **仅撤销 MySQL 持久记录**（Redis 令牌
+故意保留并断言其仍然有效）→ 断言权威转为拒绝、custody 回收、且**传输真的被拆除**
+（回收后 RPC 失败且不再是 `Unimplemented`）。第二例覆盖反方向：令牌消失而持久行
+仍活动时同样拒绝。
+
+只创建本次运行自有的 node/slot/assignment/lease 与 run-scoped Redis 前缀，
+`t.Cleanup` 按 FK 安全顺序删除自建行并撤销自建令牌；不读取、不触碰任何非自建数据。
+
+### 独立 review 结论与采纳的硬化
+
+review 逐项核对了真实 store 的门禁（`ReserveAssignment` 要求 `status='connected'`、
+容量与 `chk_nodes_capacity`、`ImageDigest` 正则、`Provider`/`DesiredState` 取值、
+心跳新鲜度、FK 顺序、Redis 前缀唯一性与 `DEL` 幂等），结论是**应当能过且不留残留**。
+采纳两条会导致首跑失败的硬化：
+
+- Coordinator TTL 由 1 分钟改为 5 分钟——该测试断言令牌**仍然存活**，TTL 与 ctx
+  预算同为 60s 时慢库会让它误判失败；
+- `MaxRetries` 由 `0` 改为 `-1`——go-redis v9 里 `0` 表示「用默认值 3」，并非禁用。
+
+### 未完成的部分（不得记为通过）
+
+**该测试从未对真实 MySQL/Redis 执行过。** 本会话中 `ssh` 与 `colima start` 均被
+Claude Code 权限分类器拦截，**未绕过**。已从 HEAD 交叉编译 linux/amd64 测试二进制
+（sha256 前缀 `1d988191c05b707d`）备用。在真实执行并通过之前：
+
+- 第 3 步**未验收**，双库回收链路**未实证**；
+- 分数仍 32%，`/readyz` 保持 503、`production_ready=false`。
+
+
 ## P5e：托管与会话授权接进 daemon（不再是只有测试调用方的模块）
 
 2026-09-19。按用户指定的修复顺序，第 2 步。
