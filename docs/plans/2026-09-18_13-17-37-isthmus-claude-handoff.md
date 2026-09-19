@@ -269,11 +269,22 @@ git diff --check
   Review 修掉两个真缺陷：续期只刷 Redis 会让 SQL `expires_at` 变陈旧，而代理租约
   校验读的正是它，同一租约被两条路径判定相反；`Revalidate` 的 N+1 加共享超时会
   级联关闭全部 tunnel。全仓 race/vet/linux 编译、race×10、236/150/186 通过。
-- **Claude 下一项**：P4 主体仍未做——`Coordinator`/`FailoverController` **依旧
-  没有非测试调用方**，生产权威 writer 与续期循环未接线；**runtime registry 不
-  存在**；`control/server.go` 会话表按 NodeID 索引、不绑定 epoch 或租约，所以
-  撤销执行租约**不会**关闭 worker 的 mTLS 流。真实 Redis/MySQL 集成测试因环境
-  变量未设置而整体 skip，幂等/并发/超时未实证。继续 P4 权威租约与 registry，
+- **P4b**（2026-09-19，用户选定先做撤销传播）：撤销传播与 registry 本是同一件事，
+  能回收 worker 连接的机制就是注册表。核实到的缺口：每实例 worker mTLS 连接在
+  `hostagent/runtimeclient.go` 的 `Runtime` 里，创建后**直接交给调用方、无人持有**；
+  `lifecycle/startup.go` 自己就写着「未来的 runtime registry 必须取得自己的授权
+  生命期」。注意 orchestrator ↔ host-agent 的**控制流是节点级**的，按槽位租约去关
+  它是错的。新增 `internal/runtimeregistry`：只接管已建立连接、**绝不创建/拨号/
+  重启**；同一 generation 换容器一律拒绝（不论 epoch 是否前进）；四条回收路径含
+  `lease.Fencer` 回调，复用 P4a 合取校验；`Revoke` 是**屏障**而非仅关闭。
+  [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p4bruntime-registry-与撤销传播到-worker-连接)。
+  Review 修掉跨 epoch 身份漂移、Revoke 非屏障、Release 虚假报错，并补掉三个存活
+  变异体；五个守卫逐一变异验证。全仓 race/vet/linux 编译、race×10、236/150/186 通过。
+- **Claude 下一项**：**没有任何生产代码 import `runtimeregistry`**——
+  `hostagent.Controller.Start` 仍把连接直接返还调用方，需要把 `Runtime` 交由注册表
+  托管才算真正接上。`Coordinator`/`FailoverController` 依旧无非测试调用方，生产
+  权威 writer 与续期循环未接线。真实 Redis/MySQL 集成测试因环境变量未设置而整体
+  skip，幂等/并发/超时未实证。继续 P4 权威租约与 registry，
   其中撤销传播仍缺——lease 撤销目前只标记 DB，不拆除身份或已建立的 worker mTLS
   连接（P3a 只回收了出口 tunnel）。若用户授权再做专用 Linux 只读预检
   （170 先重核 4 个业务容器元数据，不符即停；216 禁止），通过后按

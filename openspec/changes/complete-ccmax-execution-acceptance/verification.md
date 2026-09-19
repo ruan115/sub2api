@@ -1,5 +1,63 @@
 # 验证记录
 
+## P4b：runtime registry 与撤销传播到 worker 连接
+
+2026-09-19。用户选定先做撤销传播。任务 1（撤销传播）与任务 2（registry）本是同一
+件事：能回收 worker 连接的机制**就是**注册表。
+
+### 核实到的缺口
+
+每实例 worker mTLS 连接在 `internal/hostagent/runtimeclient.go` 的 `Runtime`
+（持有 `*grpc.ClientConn`，TLS 绑定 `runtimeidentity.Binding{slot,epoch,generation}`），
+由 `Controller.Start`/`StartExisting` 创建后**直接交给调用方，无人持有**，因此撤销
+执行租约根本无从关闭它们。`internal/hostagent/lifecycle/startup.go` 自己就写着
+「START 只拥有短命的认证连接，**未来的 runtime registry 必须取得自己的授权生命期**」
+——当前 START 用完立即 Close，所以生产路径today没有长活连接，缺口是前瞻性的。
+
+注意区分：orchestrator ↔ host-agent 的**控制流是节点级**的，一个节点服务多个槽位，
+按槽位租约去关它是错的。要回收的是 host-agent → worker 容器的每实例连接。
+
+### 本轮实现
+
+`internal/runtimeregistry`：**只接管已建立的连接，绝不创建/拨号/重启**。
+
+- `Connection` 接口只有 `Close`；测试同时钉住 `Registry` 的导出方法集，使新增
+  create/dial 动词无法悄悄混入。
+- 每槽一条记录，按 `(epoch, generation, RuntimeID)` 排序与匹配。同一 generation
+  下换成另一个容器一律拒绝——**不论 epoch 是否前进**，因为这正是 URI 精确匹配的
+  对端校验看不出来的复用。
+- 回收路径四条：显式 `Revoke`、被更新代次顶替、`Release`、以及租约不再校验通过时
+  `lease.Fencer` 的回调。后者直接复用 [P4a](p4a-lease-authority.md) 的合取校验。
+- `Revoke` 是**屏障而非仅关闭**：同一临界区内抬高每槽撤销水位线，使「撤销前已通过
+  admit、撤销后才 store」的竞态无法把已撤销的 epoch 重新装回。
+- `Release` 在条目已被回收时返回 `ErrNotHeld` 并明确标注为良性，避免撤销风暴中
+  `defer Release` 产生虚假失败。
+
+### Review 发现并已修的缺陷
+
+1. **跨 epoch 的身份漂移未拦**：原实现仅在 epoch 相同时比对 RuntimeID，另一个容器
+   可以在更新的 epoch 下继承同一 generation——与包头声明的规则直接矛盾。
+2. **`Revoke` 只是关闭而非屏障**：admit 在前、store 在后的适配可在撤销返回后重新
+   装回该 epoch，直到下一次 revalidate 才被清掉。
+3. **`Release` 在正常失租路径上返回错误**，会让调用方的清理路径虚假报错。
+
+另有三个存活变异体（拒绝路径漏 `release()` 造成 admit 泄漏、`closeSlot` 去掉
+generation 守卫、`Revoke` 的 `<=` 改成 `==`）以及一个名不副实的并发测试。现已全部
+补测：五个守卫逐一做变异验证，去掉任一即 FAIL；并发测试改为 Adopt/Release/Revoke/
+Revalidate 四路真并发，断言任何连接至多关闭一次且结束时注册表与 fencer 均为空。
+为使 admit 泄漏可观测，`lease.Fencer` 增加 `Len()`。
+
+### 验证与剩余
+
+`internal/runtimeregistry` 与 `internal/lease` race ×10 通过；全仓离线
+`go test -race`、`go vet`、linux/amd64 编译通过；`make -C recovery check`
+236 / 150 / 186 与基线一致。
+
+**仍未做**：**没有任何生产代码 import 本包**——`hostagent` 的 `Runtime` 尚未交由
+注册表托管，`Controller.Start` 仍把连接直接返还调用方。权威 writer 与续期循环
+依旧未接线（`Coordinator`/`FailoverController` 无非测试调用方）。真实 Redis/MySQL
+集成测试仍整体 skip。分数仍 32%。
+
 ## P4a：执行租约权威的状态转换设计与两库合取校验
 
 2026-09-19。P4 第一条「先写状态转换设计」。设计与边界

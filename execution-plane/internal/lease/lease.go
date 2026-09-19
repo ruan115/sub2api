@@ -279,6 +279,14 @@ func (f *Fencer) Admit(ctx context.Context, claim Claim, closeConnection func())
 	}, nil
 }
 
+// Len reports how many protected connections are currently admitted. A count
+// that keeps climbing is an admission leak: every Admit must be released.
+func (f *Fencer) Len() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.connections)
+}
+
 // Revalidate closes every connection whose claim is no longer current. A
 // backend failure deliberately fences all protected egress (fail closed).
 func (f *Fencer) Revalidate(ctx context.Context) error {
