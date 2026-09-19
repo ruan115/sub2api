@@ -41,7 +41,7 @@ func (*compositionEnrollment) Enroll(context.Context, runtimebootstrap.Request) 
 
 type injectedStartup struct{}
 
-func (injectedStartup) Start(context.Context, provider.SlotSpec, provider.Instance) error {
+func (injectedStartup) Start(context.Context, provider.SlotSpec, provider.Instance, string) error {
 	panic("injected startup accepted")
 }
 

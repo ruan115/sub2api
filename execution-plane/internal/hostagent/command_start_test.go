@@ -13,10 +13,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/slot"
 )
 
-type startupFunc func(context.Context, provider.SlotSpec, provider.Instance) error
+type startupFunc func(context.Context, provider.SlotSpec, provider.Instance, string) error
 
-func (f startupFunc) Start(ctx context.Context, spec provider.SlotSpec, instance provider.Instance) error {
-	return f(ctx, spec, instance)
+func (f startupFunc) Start(ctx context.Context, spec provider.SlotSpec, instance provider.Instance, owner string) error {
+	return f(ctx, spec, instance, owner)
 }
 
 type strictCommandProvider struct {
@@ -46,7 +46,7 @@ func strictCommandFixture(t *testing.T) (*SlotCommandExecutor, *strictCommandPro
 		Healthy: true, ImageDigest: cmd.ImageDigest,
 	}}
 	e := newTestSlotCommandExecutor(t, p, now)
-	e.startup = startupFunc(func(context.Context, provider.SlotSpec, provider.Instance) error { return nil })
+	e.startup = startupFunc(func(context.Context, provider.SlotSpec, provider.Instance, string) error { return nil })
 	return e, p, cmd
 }
 
@@ -74,7 +74,7 @@ func TestAuthenticatedStartRejectsFailureDriftAndCancellationWithoutFallback(t *
 			if mode == "missing-id" {
 				p.status.RuntimeID = ""
 			}
-			e.startup = startupFunc(func(_ context.Context, spec provider.SlotSpec, instance provider.Instance) error {
+			e.startup = startupFunc(func(_ context.Context, spec provider.SlotSpec, instance provider.Instance, _ string) error {
 				calls++
 				if spec.AccountID != cmd.AccountId || instance.RuntimeID != strings.Repeat("a", 64) {
 					t.Fatal("wrong startup binding")
@@ -128,7 +128,7 @@ func TestAuthenticatedStartProofCannotSurviveFailedRestartOrContainerReplacement
 	if !e.ExecuteSlotCommand(context.Background(), cmd).GetSucceeded() {
 		t.Fatal("reauthentication failed")
 	}
-	e.startup = startupFunc(func(context.Context, provider.SlotSpec, provider.Instance) error {
+	e.startup = startupFunc(func(context.Context, provider.SlotSpec, provider.Instance, string) error {
 		for _, observation := range e.Snapshot().Slots {
 			if observation.GetHealthy() {
 				t.Fatal("START in progress retained healthy observation")

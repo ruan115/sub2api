@@ -86,6 +86,7 @@ type Registry struct {
 	// it an adoption admitted just before a revocation could store itself
 	// afterwards and re-arm the epoch that was just ended.
 	revokedThrough map[string]uint64
+	drained        bool
 }
 
 func New(fencer *lease.Fencer) (*Registry, error) {
@@ -132,7 +133,7 @@ func (r *Registry) Adopt(ctx context.Context, entry Entry) error {
 func (r *Registry) store(entry Entry, release func()) (*registered, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if entry.Claim.ExecutionEpoch <= r.revokedThrough[entry.Claim.SlotID] {
+	if r.drained || entry.Claim.ExecutionEpoch <= r.revokedThrough[entry.Claim.SlotID] {
 		return nil, ErrRevoked
 	}
 	current, exists := r.bySlot[entry.Claim.SlotID]
@@ -220,6 +221,31 @@ func (r *Registry) take(slotID string, matches func(registered) bool, revokeThro
 	}
 	delete(r.bySlot, slotID)
 	return &current
+}
+
+// Drain releases and closes everything the registry holds, and reports how many
+// runtimes it let go. It is for shutdown: leaving connections open when the
+// service stops would strand authenticated transports the fencer can no longer
+// revalidate.
+//
+// It also bars every later adoption. An Adopt that cleared the fencer just
+// before Drain took the lock would otherwise store itself into the drained
+// registry, and with the revalidation loop already stopped nothing would ever
+// close it — the exact stranding Drain exists to prevent.
+func (r *Registry) Drain() int {
+	r.mu.Lock()
+	r.drained = true
+	held := make([]registered, 0, len(r.bySlot))
+	for _, current := range r.bySlot {
+		held = append(held, current)
+	}
+	r.bySlot = make(map[string]registered)
+	r.mu.Unlock()
+	for _, current := range held {
+		current.release()
+		_ = current.entry.Connection.Close()
+	}
+	return len(held)
 }
 
 // Current reports what the slot holds. It never returns the connection.

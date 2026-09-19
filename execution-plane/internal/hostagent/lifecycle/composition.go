@@ -22,6 +22,11 @@ type Config struct {
 	NodeCertificate tls.Certificate
 	Enrollment      bootstrap.EnrollmentClient
 	ReadyTimeout    time.Duration
+	// Custody is optional. Without it START behaves exactly as before: it owns
+	// only a short-lived authenticated connection and closes it. With it, the
+	// connection is held for as long as the execution lease authority confirms
+	// the claim, and reclaimed when it stops confirming it.
+	Custody *Custody
 }
 
 type runtimeProvider interface {
@@ -53,7 +58,7 @@ func New(config Config) (*hostagent.SlotCommandExecutor, error) {
 		return nil, ErrComposition
 	}
 	commands := config.Commands
-	commands.Startup = &startup{controller: controller}
+	commands.Startup = &startup{controller: controller, custody: config.Custody}
 	executor, err := hostagent.NewSlotCommandExecutor(commands)
 	if err != nil {
 		return nil, ErrComposition

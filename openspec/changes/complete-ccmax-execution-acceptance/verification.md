@@ -1,5 +1,68 @@
 # 验证记录
 
+## P5a：连接托管进入真实 START 链路
+
+2026-09-19。规划入口
+[2026-09-19_16-31-04-isthmus-runtime-custody.md](../../../docs/plans/2026-09-19_16-31-04-isthmus-runtime-custody.md)
+阶段 1。把 P4b 的注册表从「有能力、无调用方」接进认证 START 路径。
+
+### 真实依赖基线（PASS / FAIL / SKIP）
+
+- 全仓 44 包 **PASS**、0 **FAIL**。
+- **Redis 真实依赖 PASS**：本轮新起项目专用实例 `127.0.0.1:63799`，独立目录、
+  `--save ''`、`--appendonly no`，起始 DBSIZE=0。`TestRedisBackendIntegration`
+  由 SKIP 转 **PASS**。未对任何共享 Redis 执行 FLUSHDB。
+- **MySQL 仍 SKIP**：本机无 `mysqld`，`colima start` 被权限策略拦截且**未绕过**。
+  `EXECUTION_MYSQL_TEST_DSN`/`EXECUTION_CCMAX_MYSQL_TEST_DSN` 未设置。
+
+### 本轮实现
+
+- `internal/hostagent/lifecycle/custody.go`：`Custody` 持有 `lease.Fencer` +
+  `runtimeregistry.Registry`。**host-agent 不签发租约**——它用命令里的
+  `(slot, epoch, owner)` 构造 claim，经 `Adopt → Fencer.Admit → Validator`
+  向权威求证；权威不确认就不托管，不存在可绕过的本地租约路径。
+- `startup.Start` 先校验实例绑定，再移交所有权。**未配置 custodian 时行为不变**
+  （仍是短命连接并关闭），因此默认关闭。
+- 所有权与关闭顺序：任何拒绝都由调用方关闭，托管**从不关闭它未接受的连接**；
+  被更新代次顶替时关闭旧连接；先摘除并释放 fencer 名额再关闭，全程锁外关闭。
+- **重复 START 保持幂等**：同一实例的重放命中 `ErrAlreadyHeld`，比对确认是同一
+  incumbent 后返回「未移交」，由调用方关闭本次多余连接，命令仍然成功。
+- `Registry.Drain()` 供停机释放，并**屏障后续 adopt**。
+
+### Review 发现并已修的缺陷
+
+1. **租约 owner 被伪造（HIGH）**：原实现把 owner 写成 `CustodyConfig` 的节点级
+   常量，而 `LeaseOwnerID` 在仓库中一贯是**按绑定**取值
+   （`runtimeprobe/runner.go:170`、`probe_binding.go:192`）。同一节点上不同槽位
+   的 owner 可以不同，写死会让 `Coordinator.Validate` 拒绝、START 反而失败。
+   已改为经**已认证的命令元数据** `lease_owner_id` 逐次传入
+   （`SlotStartup` 接口增加该参数）；该值不被单独信任，仍须通过权威校验。
+2. **`Drain` 未屏障在途 adopt（MEDIUM）**：先过 fencer、后 `store` 的适配会写进
+   已排空的注册表，而此时轮询已停止，连接将永不回收——正是 Drain 要避免的悬挂。
+   已加 `drained` 标志。
+3. **默认路径 ctx 检查顺序漂移（LOW）**：原实现在 `Close()` **之后**检查
+   `ctx.Err()`，新实现移到之前，会让「关闭期间被取消」由失败变成成功。已恢复。
+4. **重放 TOCTOU**：`Current()` 是第二次查询，若期间被回收则重放失败，与「重放
+   不得失败」矛盾。已改为一次有界重试。
+5. **`take` 无单元覆盖**：原签名吃 `*hostagent.Runtime`，包外无法构造。已改为接
+   `provider.Instance` + `Connection`，claim 构造与各重放分支现已直接覆盖。
+
+### 验证与剩余
+
+`TestAuthenticatedSTARTControlToWorkerAndRevokedLease` 现参数化为
+**without custody / with custody** 两条子测试，共用同一条真实链路（真实 TLS
+NodeControl + 签发 broker + `worker.RunProcess`）。托管子测试的权威是**真实的
+两库 `lease.Coordinator`**，并证明了本轮核心命题：**仅在持久层撤销**（Redis 令牌
+故意保持存活、`backend.Validate` 仍通过）即可回收 worker 连接。
+
+变异验证：托管不接管、owner 写死、Drain 不屏障——三者任一即 FAIL。全仓离线
+`go test -race`、`go vet`、linux/amd64 编译通过；hostagent 全家 + registry +
+lease race ×5；`make -C recovery check` 236 / 150 / 186 与基线一致。
+
+**仍未做**：`daemon` 尚未构造 `Custody`（`daemon.Config` 没有 Redis/持久库字段），
+因此 `Custody.Run` 的**周期校验在真实 daemon 中尚未运行**，显式撤销也未接命令路径
+——这是阶段 2。真实 MySQL 闭环是阶段 3，受阻于 MySQL 访问。分数仍 32%。
+
 ## P4b：runtime registry 与撤销传播到 worker 连接
 
 2026-09-19。用户选定先做撤销传播。任务 1（撤销传播）与任务 2（registry）本是同一

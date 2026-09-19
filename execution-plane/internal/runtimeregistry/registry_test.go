@@ -80,7 +80,8 @@ func TestNeitherConnectionNorRegistryCanResurrectARuntime(t *testing.T) {
 		}
 		t.Fatalf("Connection exposes %v, want only Close", names)
 	}
-	want := map[string]bool{"Adopt": true, "Release": true, "Revoke": true, "Current": true, "Len": true}
+	// Drain only lets runtimes go, so it cannot resurrect one either.
+	want := map[string]bool{"Adopt": true, "Release": true, "Revoke": true, "Current": true, "Len": true, "Drain": true}
 	registry := reflect.TypeOf(&Registry{})
 	got := make(map[string]bool, registry.NumMethod())
 	for index := 0; index < registry.NumMethod(); index++ {
@@ -448,6 +449,33 @@ func TestConcurrentAdoptReleaseRevokeAndRevalidateCloseAtMostOnce(t *testing.T) 
 		if got := connection.closes.Load(); got > 1 {
 			t.Fatalf("connection %d closed %d times", index, got)
 		}
+	}
+}
+
+// Shutdown must not strand authenticated transports that the fencer will no
+// longer revalidate.
+func TestDrainReleasesEverythingHeld(t *testing.T) {
+	t.Parallel()
+	registry, _, fencer := fixture(t, 1)
+	connection := &fakeConnection{}
+	if err := registry.Adopt(context.Background(), entryFor(1, 1, "cid-1", connection)); err != nil {
+		t.Fatal(err)
+	}
+	if drained := registry.Drain(); drained != 1 {
+		t.Fatalf("Drain() = %d, want 1", drained)
+	}
+	if !connection.closed() {
+		t.Fatal("drain left a runtime connected")
+	}
+	if registry.Len() != 0 || fencer.Len() != 0 {
+		t.Fatalf("after drain registry=%d fencer=%d, want 0/0", registry.Len(), fencer.Len())
+	}
+	// Draining twice must not close anything a second time.
+	if drained := registry.Drain(); drained != 0 {
+		t.Fatalf("second Drain() = %d, want 0", drained)
+	}
+	if got := connection.closes.Load(); got != 1 {
+		t.Fatalf("connection closed %d times, want exactly 1", got)
 	}
 }
 

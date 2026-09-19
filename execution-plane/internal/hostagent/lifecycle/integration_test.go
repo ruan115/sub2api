@@ -46,6 +46,15 @@ import (
 // Real TLS NodeControl + enrollment broker + worker.RunProcess; only the
 // physical container provider is fake. No Docker, CLI, account or model calls.
 func TestAuthenticatedSTARTControlToWorkerAndRevokedLease(t *testing.T) {
+	// Both paths run the same authenticated START. Without a custodian the
+	// connection is still short-lived and closed, which is the default; with
+	// one it is held under the execution lease authority and reclaimed when
+	// that authority stops confirming the claim.
+	t.Run("without custody", func(t *testing.T) { runAuthenticatedSTART(t, false) })
+	t.Run("with custody", func(t *testing.T) { runAuthenticatedSTART(t, true) })
+}
+
+func runAuthenticatedSTART(t *testing.T, withCustody bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
 	authority, _, err := pki.NewEphemeralAuthority(time.Now, time.Hour)
@@ -108,7 +117,18 @@ func TestAuthenticatedSTARTControlToWorkerAndRevokedLease(t *testing.T) {
 	enroller, err := bootstrap.NewRPCClient(client, authority.CertificatePEM())
 	startMust(t, err)
 	p := newStartProcessProvider(t, ctx, authority.CertificatePEM())
-	executor, err := New(Config{Commands: hostagent.SlotCommandExecutorConfig{Provider: p, Resources: p.spec.Resources, Security: p.spec.Security, Network: p.spec.Network, DrainTimeout: time.Second, MaxSlots: 2}, NodeID: "node-1", TrustPEM: authority.CertificatePEM(), NodeCertificate: certificate, Enrollment: enroller, ReadyTimeout: 3 * time.Second})
+	var custody *Custody
+	if withCustody {
+		// The authority is the real two-store coordinator: the fencing token
+		// and the durable record together, exactly as production would wire it.
+		// The host agent never mints a lease of its own.
+		coordinator, err := lease.NewCoordinator(backend, repository, time.Minute, time.Now)
+		startMust(t, err)
+		custody, err = NewCustody(CustodyConfig{Validator: coordinator, NodeID: "node-1", RevalidateInterval: 100 * time.Millisecond})
+		startMust(t, err)
+		t.Cleanup(func() { custody.Drain() })
+	}
+	executor, err := New(Config{Commands: hostagent.SlotCommandExecutorConfig{Provider: p, Resources: p.spec.Resources, Security: p.spec.Security, Network: p.spec.Network, DrainTimeout: time.Second, MaxSlots: 2}, NodeID: "node-1", TrustPEM: authority.CertificatePEM(), NodeCertificate: certificate, Enrollment: enroller, ReadyTimeout: 3 * time.Second, Custody: custody})
 	startMust(t, err)
 	controlClient, err := hostagent.NewControlClient(hostagent.ControlClientConfig{Client: client, Executor: executor, NodeID: "node-1", Capabilities: []string{"docker"}, Capacity: &executionv1.Capacity{MaxSlots: 2, MaxActiveCli: 1, MaxActiveApi: 1, MaxActiveTotal: 2, AllocatableCpuMillis: 2000, AllocatableMemoryBytes: 2 << 30}, HeartbeatInterval: time.Second, ReconnectMin: time.Millisecond, ReconnectMax: 10 * time.Millisecond, MaxConcurrentCommands: 1, CommandQueue: 4})
 	startMust(t, err)
@@ -142,7 +162,7 @@ func TestAuthenticatedSTARTControlToWorkerAndRevokedLease(t *testing.T) {
 	claim := lease.Claim{SlotID: p.spec.SlotID, NodeID: "node-1", ExecutionEpoch: 1, OwnerID: "owner-1"}
 	startMust(t, backend.Acquire(ctx, claim, time.Minute))
 	dispatch := func(id string, action executionv1.SlotCommandAction) store.CommandResult {
-		command := &executionv1.SlotCommand{CommandId: id, SlotId: p.spec.SlotID, AccountId: p.spec.AccountID, ExecutionEpoch: 1, ImageDigest: p.spec.ImageDigest, Action: action, Deadline: timestamppb.New(time.Now().Add(4 * time.Second)), Metadata: map[string]string{"desired_generation": "1", "target_runtime_generation": "1"}}
+		command := &executionv1.SlotCommand{CommandId: id, SlotId: p.spec.SlotID, AccountId: p.spec.AccountID, ExecutionEpoch: 1, ImageDigest: p.spec.ImageDigest, Action: action, Deadline: timestamppb.New(time.Now().Add(4 * time.Second)), Metadata: map[string]string{"desired_generation": "1", "target_runtime_generation": "1", "lease_owner_id": "owner-1"}}
 		startMust(t, server.Dispatch(ctx, "node-1", &executionv1.NodeControlServiceControlResponse{Event: &executionv1.NodeControlServiceControlResponse_SlotCommand{SlotCommand: command}}))
 		var result store.CommandResult
 		startEventually(t, ctx, func() bool { var ok bool; result, ok = repository.GetCommandResult(id); return ok })
@@ -152,6 +172,29 @@ func TestAuthenticatedSTARTControlToWorkerAndRevokedLease(t *testing.T) {
 		result := dispatch(id, executionv1.SlotCommandAction_SLOT_COMMAND_ACTION_START)
 		if !result.Succeeded || result.Observation == nil || !result.Observation.Healthy || result.Observation.ProviderRef != p.instance.ProviderRef {
 			t.Fatalf("authenticated START failed: %s", result.ErrorCode)
+		}
+	}
+	if withCustody {
+		// One entry after two STARTs: the replay found an identical incumbent,
+		// kept it, and closed its own duplicate connection.
+		held, exists := custody.Held(p.spec.SlotID)
+		if custody.Len() != 1 || !exists || held.Claim != claim ||
+			held.Generation != p.spec.RuntimeGeneration || held.RuntimeID != p.instance.RuntimeID {
+			t.Fatalf("custody after replayed START = %d %+v %v", custody.Len(), held, exists)
+		}
+		// Revoke durably only. The fencing token is deliberately left alive, so
+		// a backend-only check would still call this lease current. Reclaiming
+		// the worker connection here is the whole point of the conjunction.
+		startMust(t, repository.RevokeExecutionLease(ctx, claim.SlotID, claim.ExecutionEpoch, claim.OwnerID, time.Now().UTC()))
+		startMust(t, backend.Validate(ctx, claim))
+		if err := custody.Revalidate(ctx); !errors.Is(err, lease.ErrLeaseNotCurrent) {
+			t.Fatalf("revalidate after durable revocation = %v", err)
+		}
+		if custody.Len() != 0 {
+			t.Fatal("durable revocation left the worker connection under custody")
+		}
+		if _, exists := custody.Held(p.spec.SlotID); exists {
+			t.Fatal("custody still reports a slot whose lease is gone")
 		}
 	}
 	startMust(t, backend.Revoke(ctx, claim))

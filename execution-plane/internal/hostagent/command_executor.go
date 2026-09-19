@@ -25,8 +25,12 @@ type SlotCommandProvider interface {
 
 // SlotStartup is the authenticated existing-instance START boundary. It must
 // not create a replacement, activate credentials or fall back to raw Start.
+// The trailing string is the execution lease owner carried by the authenticated
+// command. It comes from the control plane, never from node configuration:
+// slots on one node can belong to different lease owners, so a host agent that
+// assumed a single one would be inventing the claim it is meant to prove.
 type SlotStartup interface {
-	Start(context.Context, provider.SlotSpec, provider.Instance) error
+	Start(context.Context, provider.SlotSpec, provider.Instance, string) error
 }
 
 type SlotCommandExecutorConfig struct {
@@ -250,7 +254,7 @@ func (e *SlotCommandExecutor) start(ctx context.Context, command *executionv1.Sl
 		if status.RuntimeID == "" {
 			return nil, errEpochConflict
 		}
-		if err := e.startup.Start(ctx, e.spec(command), status.Instance); err != nil {
+		if err := e.startup.Start(ctx, e.spec(command), status.Instance, commandLeaseOwner(command)); err != nil {
 			return observationFromStatus(status), err
 		}
 		after, err := e.inspectExact(ctx, command)
@@ -362,6 +366,18 @@ func (e *SlotCommandExecutor) spec(command *executionv1.SlotCommand) provider.Sl
 		RuntimeGeneration: commandRuntimeGeneration(command),
 		Resources:         e.resources, Security: e.security, Network: e.network,
 	}
+}
+
+// commandLeaseOwner reads the execution lease owner the control plane attached
+// to this command. An absent or oversized value yields the empty string, which
+// custody refuses: a claim that cannot be stated cannot be proved. The value is
+// not trusted on its own — it is checked against the lease authority.
+func commandLeaseOwner(command *executionv1.SlotCommand) string {
+	owner := command.GetMetadata()["lease_owner_id"]
+	if owner == "" || len(owner) > 128 {
+		return ""
+	}
+	return owner
 }
 
 // SlotCommand metadata is authenticated by NodeControl. The desired generation
