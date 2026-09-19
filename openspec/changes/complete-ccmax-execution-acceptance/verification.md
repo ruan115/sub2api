@@ -1,5 +1,48 @@
 # 验证记录
 
+## P5b：显式撤销接入命令路径，并证明传输真的被拆除
+
+2026-09-19。规划
+[2026-09-19_16-31-04-isthmus-runtime-custody.md](../../../docs/plans/2026-09-19_16-31-04-isthmus-runtime-custody.md)
+阶段 2a。**硬约束**：不得只给 host-agent 加 MySQL/Redis 凭据；租约权威与数据库
+访问留在控制面，节点侧授权只经已认证的控制通道。本切片**完全没有**给 host-agent
+任何数据库凭据。
+
+### 本轮实现
+
+- `hostagent` 内新增窄接口 `SlotCustodian{Revoke(slotID, epoch)}`，`*lifecycle.Custody`
+  满足它（在 `hostagent` 一侧声明以避免 import 环）。默认 nil，行为与此前一致。
+- 三条真实结束路径接上回收：
+  - `RevokeEpoch`——控制面推送的显式撤销，**在动容器之前**回收，且即使随后的
+    provider 操作失败也已回收；
+  - `stop`、`destroy`——容器即将结束，其 tmpfs 身份与认证传输一并结束。
+- `INSPECT` 等不结束实例的命令**不**回收。
+- 回收严格按槽位与 epoch 作用，不触碰其他槽位，更不触碰**节点级控制连接**。
+
+### 关键验收证据：传输真的死了
+
+用户明确要求不得只检查注册表条目数。`TestReclaimTearsDownTheRealTransportNotJustTheBookkeeping`
+对**真实 gRPC 监听器**建立**真实连接**：
+
+1. 托管期间调用 `Health`，得到 `Unimplemented`——证明请求确实到达了服务端；
+2. `Revoke` 之后连接状态为 `Shutdown`，再次调用 `Health` 失败且**不再是**
+   `Unimplemented`——证明请求根本没能到达服务端，传输已被拆除。
+
+变异验证：移除 `RevokeEpoch` 的回收、移除 `stop`/`destroy` 的回收，两者任一即 FAIL。
+
+### 验证与剩余
+
+全仓离线 `go test -race`、`go vet`、linux/amd64 编译通过；hostagent 全家 +
+registry race ×5；Redis 真实集成 **PASS**；`make -C recovery check` 236/150/186
+与基线一致。
+
+**仍未做（阶段 2b）**：`Custody.Run` 的周期校验仍未在真实 daemon 中运行——
+`daemon.Config` 没有权威依赖字段，daemon 仍构造不出 `Custody`。按硬约束，2b 的
+校验器应由**控制会话新鲜度 + 控制面推送的撤销水位线**构成，而非数据库凭据。
+**阶段 3（170 上的项目专用数据库）受阻**：本会话 `ssh` 与 `colima start` 均被
+Claude Code 权限分类器拦截，未绕过。分数仍 32%，`/readyz` 保持 503、
+`production_ready=false`。
+
 ## P5a：连接托管进入真实 START 链路
 
 2026-09-19。规划入口

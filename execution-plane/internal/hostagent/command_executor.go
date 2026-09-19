@@ -33,11 +33,24 @@ type SlotStartup interface {
 	Start(context.Context, provider.SlotSpec, provider.Instance, string) error
 }
 
+// SlotCustodian reclaims authorized runtime connections this node holds. It is
+// declared here, as the narrow shape the executor needs, so that the executor
+// does not depend on the package that composes custody.
+//
+// Revoking a slot must never touch another slot, and never the node's own
+// control connection: that stream is per node and serves every slot on it.
+type SlotCustodian interface {
+	Revoke(slotID string, epoch uint64)
+}
+
 type SlotCommandExecutorConfig struct {
 	Provider SlotCommandProvider
 	// Nil preserves the legacy component path. New runtime composition uses
 	// hostagent/lifecycle.New, which always installs an authenticated startup.
-	Startup      SlotStartup
+	Startup SlotStartup
+	// Nil keeps the previous behaviour, in which no connection is held and so
+	// none has to be reclaimed.
+	Custodian    SlotCustodian
 	Resources    provider.ResourceLimits
 	Security     provider.SecurityPolicy
 	Network      provider.NetworkPolicy
@@ -59,6 +72,7 @@ type NodeSnapshot struct {
 type SlotCommandExecutor struct {
 	provider     SlotCommandProvider
 	startup      SlotStartup
+	custodian    SlotCustodian
 	resources    provider.ResourceLimits
 	security     provider.SecurityPolicy
 	network      provider.NetworkPolicy
@@ -82,7 +96,8 @@ func NewSlotCommandExecutor(config SlotCommandExecutorConfig) (*SlotCommandExecu
 		config.Now = time.Now
 	}
 	return &SlotCommandExecutor{
-		provider: config.Provider, startup: config.Startup, resources: config.Resources, security: config.Security, network: config.Network,
+		provider: config.Provider, startup: config.Startup, custodian: config.Custodian,
+		resources: config.Resources, security: config.Security, network: config.Network,
 		drainTimeout: config.DrainTimeout, maxSlots: config.MaxSlots, now: config.Now,
 		observations: make(map[string]*executionv1.SlotObservation), revokedThrough: make(map[string]uint64),
 		startupProofs: make(map[string]startupProof),
@@ -163,6 +178,10 @@ func (e *SlotCommandExecutor) RevokeEpoch(ctx context.Context, command *executio
 		e.revokedThrough[command.GetSlotId()] = command.GetExecutionEpoch()
 	}
 	e.mu.Unlock()
+	// Reclaim before touching the container. Refusing the next command is not
+	// revocation: an already-authenticated transport has to be closed, and it
+	// has to be closed even if the provider work below fails.
+	e.reclaim(command.GetSlotId(), command.GetExecutionEpoch())
 	if proof, ok := e.startupProofs[command.GetSlotId()]; ok && proof.instance.Epoch <= command.GetExecutionEpoch() {
 		e.forgetStartup(command.GetSlotId())
 	}
@@ -199,6 +218,16 @@ func (e *SlotCommandExecutor) RevokeEpoch(ctx context.Context, command *executio
 	observation := observationFromStatus(status)
 	e.remember(observation)
 	return &executionv1.CommandResult{CommandId: command.GetCommandId(), Succeeded: true, Slot: observation}
+}
+
+// reclaim closes the authorized connection this node holds for one slot at or
+// below an epoch. It is a no-op when no custodian is configured, which is the
+// path where nothing was ever held.
+func (e *SlotCommandExecutor) reclaim(slotID string, epoch uint64) {
+	if e.custodian == nil || slotID == "" || epoch == 0 {
+		return
+	}
+	e.custodian.Revoke(slotID, epoch)
 }
 
 func (e *SlotCommandExecutor) Snapshot() NodeSnapshot {
@@ -300,6 +329,10 @@ func (e *SlotCommandExecutor) stop(ctx context.Context, command *executionv1.Slo
 		return nil, err
 	}
 	e.forgetStartup(status.SlotID)
+	// The container is about to stop, so its tmpfs identity and the transport
+	// authenticated to it are both ending. Reclaim before the stop rather than
+	// leaving a connection to a process that is going away.
+	e.reclaim(status.SlotID, status.Epoch)
 	if err := e.provider.Stop(ctx, status.ProviderRef); err != nil {
 		return observationFromStatus(status), err
 	}
@@ -318,6 +351,7 @@ func (e *SlotCommandExecutor) destroy(ctx context.Context, command *executionv1.
 		return nil, err
 	}
 	e.forgetStartup(status.SlotID)
+	e.reclaim(status.SlotID, status.Epoch)
 	if err := e.provider.Destroy(ctx, status.ProviderRef); err != nil {
 		return observationFromStatus(status), err
 	}

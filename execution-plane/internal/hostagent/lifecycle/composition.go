@@ -59,6 +59,12 @@ func New(config Config) (*hostagent.SlotCommandExecutor, error) {
 	}
 	commands := config.Commands
 	commands.Startup = &startup{controller: controller, custody: config.Custody}
+	if config.Custody != nil {
+		// The same custodian that holds a connection is the one that reclaims
+		// it, so revocation, stop and destroy all end the transport they end
+		// the container for.
+		commands.Custodian = config.Custody
+	}
 	executor, err := hostagent.NewSlotCommandExecutor(commands)
 	if err != nil {
 		return nil, ErrComposition

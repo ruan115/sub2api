@@ -3,13 +3,20 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/lease"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeregistry"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type custodyConnection struct{ closes atomic.Int32 }
@@ -211,6 +218,66 @@ func TestCustodyTakeIsBarredAfterDrain(t *testing.T) {
 	}
 	if connection.closed() {
 		t.Fatal("take closed a connection it refused")
+	}
+}
+
+// Registry bookkeeping is not evidence. This adopts a real gRPC transport to a
+// real listener and proves that reclaiming it actually tears the transport
+// down: an RPC that would otherwise reach the server fails because the client
+// connection is closing, and the connection reports Shutdown.
+func TestReclaimTearsDownTheRealTransportNotJustTheBookkeeping(t *testing.T) {
+	t.Parallel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); _ = listener.Close() })
+
+	connection, err := grpc.NewClient(listener.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithNoProxy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Connect()
+	ready, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for connection.GetState() != connectivity.Ready {
+		if !connection.WaitForStateChange(ready, connection.GetState()) {
+			t.Fatalf("transport never became ready: %s", connection.GetState())
+		}
+	}
+
+	// While held, the transport is live: the server answers, even if only to
+	// say the method is not implemented.
+	client := executionv1.NewWorkerRuntimeServiceClient(connection)
+	callCtx, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer callCancel()
+	_, err = client.Health(callCtx, &executionv1.HealthRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("held transport did not reach the server: %v", err)
+	}
+
+	custody, _ := custodyFixture(t, time.Second)
+	adopted, err := custody.take(context.Background(), custodyInstance(1, 1, "cid-1"), "owner-1", connection)
+	if err != nil || !adopted {
+		t.Fatalf("take = %v, %v", adopted, err)
+	}
+
+	custody.Revoke("slot-1", 1)
+
+	if state := connection.GetState(); state != connectivity.Shutdown {
+		t.Fatalf("reclaimed transport state = %s, want Shutdown", state)
+	}
+	afterCtx, afterCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer afterCancel()
+	_, err = client.Health(afterCtx, &executionv1.HealthRequest{})
+	if err == nil {
+		t.Fatal("an RPC succeeded on a reclaimed transport")
+	}
+	if status.Code(err) == codes.Unimplemented {
+		t.Fatalf("the reclaimed transport still reached the server: %v", err)
 	}
 }
 
