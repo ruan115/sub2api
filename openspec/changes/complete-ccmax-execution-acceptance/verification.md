@@ -1,5 +1,45 @@
 # 验证记录
 
+## P5d：签发门禁改用两库合取，并更正上一轮被高估的结论
+
+2026-09-19。按用户指定的修复顺序，第 1 步。
+
+### 更正：上一轮把节点侧 `revokedThrough` 重启空表说成 fail-open，是**高估**
+
+核实后：节点侧水位线只是纵深防御，**不是**挡住已撤销 epoch 的那一道门。真正的
+门禁在控制面——START 必经 bootstrap 签发，`runtimeenrollment` 的 broker 会用
+`LeaseValidator` 校验租约。host-agent 重启后水位线虽然清空，该门禁依然生效。
+
+### 但核实过程中发现了一个更重要的真洞
+
+`LeaseValidator` 的签名与 `lease.Validator` **完全相同**，而生产只接了
+**Redis 单库**（`leaseValidator{backend: backend}`，backend 是 `RedisBackend`）。
+这正是 [P4a](p4a-lease-authority.md) 指出的分歧：`Coordinator.Revoke` 先写 SQL
+再删令牌，**删令牌失败时**后端会继续把该租约报成 current 直到 TTL——此时签发门禁
+会**照常签出证书**，等于给一个已撤销的租约发放身份。
+
+修复：签发门禁改接 `lease.Coordinator`（令牌 + 持久记录合取）。TTL 参数仅为满足
+构造器，签发路径只校验、从不授予或续期，已在常量处注明。
+
+### 关键验收证据
+
+变异验证把门禁换回 Redis 单库，`TestIssuanceRefusesADurablyRevokedLeaseWhoseTokenSurvives`
+立刻失败并打印 `issuance accepted a durably revoked lease: <nil>`——直接证明旧实现
+会给已撤销租约签发证书。
+
+另覆盖：两库一致时接受；令牌消失时拒绝（原有方向不能退化）；任一库不可读时报
+`ErrBackendUnavailable` 而非拒绝该 claim；依赖关闭后一律拒绝；nil/已取消 context 拒绝。
+
+### 验证与剩余
+
+全仓离线 `go test -race`、`go vet`、linux/amd64 编译通过；
+`service/runtimeenrollment` 与 `lease` race ×5；Redis 真实集成 **PASS**；
+`make -C recovery check` 236/150/186 与基线一致。
+
+**剩余**：第 2 步（打破循环依赖、把 authority + custody + `Custody.Run` 接进
+daemon）与第 3 步（170 上完整双库回收链路验收）尚未开始。分数仍 32%，
+`/readyz` 保持 503、`production_ready=false`。
+
 ## P5c：节点侧会话授权（不持有任何数据库凭据）
 
 2026-09-19。规划

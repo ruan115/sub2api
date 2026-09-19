@@ -21,6 +21,10 @@ var ErrDependencies = errors.New("runtime enrollment dependencies unavailable")
 
 const startupTimeout = 5 * time.Second
 
+// validationOnlyTTL satisfies the coordinator constructor. Issuance never
+// grants or renews a lease, so no lease lifetime is ever derived from it.
+const validationOnlyTTL = time.Minute
+
 type Dependencies struct {
 	config control.RuntimeEnrollmentConfig
 	client redisClient
@@ -64,8 +68,15 @@ func newDependencies(ctx context.Context, c config.RuntimeEnrollmentConfig, data
 	if err != nil || bounded.Err() != nil {
 		return nil, ErrDependencies
 	}
+	// The coordinator is the authority: the fencing token and the durable
+	// record together. The TTL here is never used, because issuance only ever
+	// validates and never grants or renews.
+	authority, err := lease.NewCoordinator(backend, repository, validationOnlyTTL, time.Now)
+	if err != nil || bounded.Err() != nil {
+		return nil, ErrDependencies
+	}
 	d.config = control.RuntimeEnrollmentConfig{Bindings: repository, Receipts: receipts,
-		Leases: leaseValidator{backend: backend, closed: &d.closed}, Timeout: c.Timeout}
+		Leases: leaseValidator{authority: authority, closed: &d.closed}, Timeout: c.Timeout}
 	if bounded.Err() != nil {
 		return nil, ErrDependencies
 	}
@@ -96,16 +107,22 @@ func (d *Dependencies) Close() error {
 
 // Expose only validation, not Backend's Acquire/Renew/Revoke methods. A PING
 // and empty Redis database must never be turned into an authorization grant.
+// leaseValidator gates certificate issuance on the execution lease. It holds
+// the coordinator, not the Redis backend, because either store alone can still
+// authorise a lease the other has already ended: a revocation whose durable
+// write landed but whose token drop failed would keep passing a backend-only
+// check until the TTL ran out, and issuing a certificate on that basis is
+// exactly what must not happen.
 type leaseValidator struct {
-	backend *lease.RedisBackend
-	closed  *atomic.Bool
+	authority lease.Validator
+	closed    *atomic.Bool
 }
 
 func (v leaseValidator) Validate(ctx context.Context, claim lease.Claim) error {
-	if ctx == nil || ctx.Err() != nil || v.backend == nil || v.closed == nil || v.closed.Load() {
+	if ctx == nil || ctx.Err() != nil || v.authority == nil || v.closed == nil || v.closed.Load() {
 		return lease.ErrBackendUnavailable
 	}
-	err := v.backend.Validate(ctx, claim)
+	err := v.authority.Validate(ctx, claim)
 	if ctx.Err() != nil || v.closed.Load() || errors.Is(err, lease.ErrBackendUnavailable) {
 		return lease.ErrBackendUnavailable
 	}
