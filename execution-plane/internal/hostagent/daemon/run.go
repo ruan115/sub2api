@@ -61,8 +61,13 @@ func run(ctx context.Context, health config.Config, cfg Config, logger *slog.Log
 	defer cancel()
 	server := &http.Server{Handler: Handler(), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	controlDone, httpDone := make(chan error, 1), make(chan error, 1)
+	custodyDone := make(chan error, 1)
 	go func() { controlDone <- parts.control.Run(active) }()
 	go func() { httpDone <- server.Serve(listener) }()
+	// Custody re-proves every held runtime against the control plane on an
+	// interval and reclaims the ones it can no longer vouch for. It returns
+	// only when active ends, and drains on the way out.
+	go func() { custodyDone <- parts.custody.Run(active) }()
 	logger.Info("host-agent lifecycle-only runtime started", "production_ready", false)
 	var reason error
 	controlFinished, httpFinished := false, false
@@ -89,6 +94,14 @@ func run(ctx context.Context, health config.Config, cfg Config, logger *slog.Log
 	// fatal shutdown failure, not a successful drain or container cleanup.
 	parts.commands.Seal()
 	cancel()
+	// Nothing may stay authenticated to a worker once this node stops: custody
+	// drains as Run returns, and this waits for that to have happened.
+	select {
+	case <-custodyDone:
+	case <-time.After(cfg.ShutdownTimeout):
+		clean := parts.custody.Len() == 0
+		logger.Warn("runtime custody did not stop in time", "drained", clean)
+	}
 	shutdown, stop := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer stop()
 	clean := true

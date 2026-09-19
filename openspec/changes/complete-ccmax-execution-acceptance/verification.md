@@ -1,5 +1,44 @@
 # 验证记录
 
+## P5e：托管与会话授权接进 daemon（不再是只有测试调用方的模块）
+
+2026-09-19。按用户指定的修复顺序，第 2 步。
+
+### 打破循环依赖
+
+执行器需要 custodian → custody 需要 authority → authority 需要执行器的撤销水位线
+与控制客户端的会话状态 → 回到执行器。用 `nodeFacts` 持有后两者做**后绑定**打破：
+闭包只会在 `prepare` 返回之后被调用，而 `prepare` 在返回前已完成赋值。
+
+未绑定窗口**失败关闭**：`epochRevoked` 返回 `true`（视为已撤销），
+`controlSessionState` 返回「无会话且从未有过」。变异验证把前者改成 `false` 即 FAIL。
+
+### 实际接线
+
+- `composition.go`：构造 `SessionAuthority` + `Custody`，并把 custody 传给
+  `lifecycle.New`（从而同时成为 `SlotCommandExecutor` 的 custodian）。
+- 窗口复用 `health.Timings.NodeOffline`（默认 45s，已校验 ≥ 3×心跳）——控制面对
+  「节点离线」的既有定义，**不新增配置旋钮**；轮询间隔复用 `NodeHeartbeat`。
+- `run.go`：新增 `custody.Run(active)` 协程；停机时 `Seal`+`cancel` 之后等待
+  custody 退出（`Run` 在退出路径上 drain），超时则记录是否已排空。
+- 重新导出 `EpochRevoked`（上轮按 review 删除，因当时无消费者；现 daemon 需要，
+  带 nil 守卫加回并在注释里写明这次反转的理由）。
+
+`NewSessionAuthority`、`NewCustody`、`Custody.Run` **现在都有非测试调用方**。
+
+### 验证与剩余
+
+全仓离线 `go test -race`、`go vet`、linux/amd64 编译通过；hostagent 全家 race ×5；
+`make -C recovery check` 236/150/186 与基线一致。
+
+**边界**：host-agent 仍**默认关闭**（`EXECUTION_HOST_AGENT_RUNTIME_ENABLED`），
+`/readyz` 保持 503、`production_ready=false`。节点侧授权仍是弱信号（会话新鲜度 +
+撤销水位线），真实两库合取仍只在控制面；其可信度依赖 P5c 加的 gRPC keepalive。
+
+**剩余**：第 3 步——170 上完整双库回收链路验收（控制面真实 Coordinator 授予/撤销
+→ 节点回收）尚未开始。远端二进制仍是 `32de688` 的旧版，验收前必须重新交叉编译。
+分数仍 32%。
+
 ## P5d：签发门禁改用两库合取，并更正上一轮被高估的结论
 
 2026-09-19。按用户指定的修复顺序，第 1 步。

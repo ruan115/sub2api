@@ -90,4 +90,17 @@ func (a *SessionAuthority) Validate(_ context.Context, claim lease.Claim) error 
 	return nil
 }
 
+// EpochRevoked exposes the revocation watermark this executor maintains as
+// RevokeEpoch commands arrive, so a session authority composed in another
+// package can read it without reaching inside.
+//
+// This was removed once as unused public surface and is back because the daemon
+// composition now needs it; it is not reachable from outside the module.
+func (e *SlotCommandExecutor) EpochRevoked(slotID string, epoch uint64) bool {
+	if e == nil {
+		return false
+	}
+	return e.epochRevoked(slotID, epoch)
+}
+
 var _ lease.Validator = (*SessionAuthority)(nil)

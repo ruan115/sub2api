@@ -33,6 +33,7 @@ type commandDrain interface {
 type components struct {
 	control   runner
 	commands  commandDrain
+	custody   *lifecycle.Custody
 	expiresAt time.Time
 	close     func()
 }
@@ -124,16 +125,40 @@ func prepare(ctx context.Context, health config.Config, cfg Config) (*components
 	if err != nil {
 		return nil, ErrRuntime
 	}
+	// The executor needs the custodian, custody needs the authority, and the
+	// authority needs the executor's revocation watermark and the client's
+	// session state. The cycle is broken by binding the last two late: the
+	// closures below are only ever called after prepare has returned, and
+	// prepare assigns both fields before it does.
+	facts := &nodeFacts{}
+	authority, err := hostagent.NewSessionAuthority(hostagent.SessionAuthorityConfig{
+		Revoked:      facts.epochRevoked,
+		SessionState: facts.controlSessionState,
+		// The control plane's own definition of an offline node is the right
+		// window for a node to stop acting on what that plane last said.
+		OfflineAfter: health.Timings.NodeOffline,
+	})
+	if err != nil {
+		return nil, ErrRuntime
+	}
+	custody, err := lifecycle.NewCustody(lifecycle.CustodyConfig{
+		Validator: authority, NodeID: health.NodeID,
+		RevalidateInterval: health.Timings.NodeHeartbeat,
+	})
+	if err != nil {
+		return nil, ErrRuntime
+	}
 	executor, err := lifecycle.New(lifecycle.Config{
 		Commands: hostagent.SlotCommandExecutorConfig{Provider: provider, Resources: cfg.Resources,
 			Security: cfg.Security, Network: cfg.Network, DrainTimeout: cfg.ReadyTimeout,
 			MaxSlots: uint32(health.Limits.MaxSlots)},
 		NodeID: health.NodeID, TrustPEM: identity.TrustPEM, NodeCertificate: identity.NodeCertificate,
-		Enrollment: enrollment, ReadyTimeout: cfg.ReadyTimeout,
+		Enrollment: enrollment, ReadyTimeout: cfg.ReadyTimeout, Custody: custody,
 	})
 	if err != nil {
 		return nil, ErrRuntime
 	}
+	facts.executor = executor
 	gate, err := NewLifecycleExecutor(executor)
 	if err != nil {
 		return nil, ErrRuntime
@@ -155,7 +180,33 @@ func prepare(ctx context.Context, health config.Config, cfg Config) (*components
 	if err != nil || startup.Err() != nil {
 		return nil, ErrRuntime
 	}
+	facts.control = control
 	owned = false
-	return &components{control: control, commands: gate, expiresAt: identity.ExpiresAt,
+	return &components{control: control, commands: gate, custody: custody, expiresAt: identity.ExpiresAt,
 		close: func() { _ = connection.Close(); _ = engine.Close() }}, nil
+}
+
+// nodeFacts carries the two control-plane observations the session authority
+// needs. Both are assigned during prepare, before anything can read them: the
+// authority is only consulted once custody is running, and custody only runs
+// after prepare returns.
+type nodeFacts struct {
+	executor *hostagent.SlotCommandExecutor
+	control  *hostagent.ControlClient
+}
+
+func (f *nodeFacts) epochRevoked(slotID string, epoch uint64) bool {
+	if f == nil || f.executor == nil {
+		// Not yet composed. Reporting "revoked" is the fail-closed answer.
+		return true
+	}
+	return f.executor.EpochRevoked(slotID, epoch)
+}
+
+func (f *nodeFacts) controlSessionState() (bool, time.Time) {
+	if f == nil || f.control == nil {
+		// No client means no session, and no session this node ever held.
+		return false, time.Time{}
+	}
+	return f.control.ControlSessionState()
 }
