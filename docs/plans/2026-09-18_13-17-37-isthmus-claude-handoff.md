@@ -236,16 +236,22 @@ git diff --check
   [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p3b实例身份生命周期合同与持久-home-边界)。
   两轮独立 adversarial review 共修 8 项。全仓离线 race/vet、linux/amd64 编译、
   本包 race×5、236/150/186 回归通过。分数仍 32%。
-- **本轮发现、待用户决定的既有缺陷**：被停止的 runtime 容器**目前无法重新
-  bootstrap**。`reconcile.go:218` 把 `ActualStopped + DesiredReady` 路由为
-  `ActionStart`，用原 epoch 且 generation 不变；但停止已抹掉 tmpfs 身份，实例呈递
-  新公钥，与 `(slot, epoch)` 回执钉住的 `PublicKeySHA256` 不符即 `ErrRejected`。
-  关闭它需把 stopped 路由成 destroy→release→place 以分配新 epoch，属控制面行为
-  变更，**未擅自修改**；已用 `TestResumeAtTheSameBindingStaysRejected` 固化冲突。
-- **Claude 下一项**：先请用户就上条缺陷定夺（改 reconcile 路由 / 扩回执唯一键 /
-  暂不处理）。之后 P4 权威租约与 registry，其中撤销传播仍缺——lease 撤销目前只标记
-  DB，不拆除身份或已建立的 worker mTLS 连接（P3a 只回收了出口 tunnel）。
-  若用户授权再做专用 Linux 只读预检
+- **P3c**（2026-09-19，用户选定方案 (a)）：已改 reconcile 路由。`DesiredReady` 下
+  `stopped→destroy`、`destroyed→release`，使被停止的容器走 destroy→release→place
+  取得新 epoch，与既有过时代次分支一致。**同时修复本改动暴露的 CRITICAL**：
+  `ActionPlace` 在无 assignment 时幂等键恒等，而 Place 一经派发即 `completed`
+  且 completed 永不可再 claim，第二次放置会静默失败、槽位永久无 assignment；
+  现以 `NextExecutionEpoch` 作判别量，缺失即拒绝放置。改动前**没有任何测试**覆盖
+  `DesiredReady + ActualStopped`／`+ ActualDestroyed`。
+  [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p3creconcile-停止路由改为销毁释放重新放置)。
+- **相邻缺陷待用户决定**：`provider.go:257` 的 `RestartPolicy: unless-stopped`
+  与 tmpfs 身份模型矛盾。Docker 会绕过 host-agent 自动重启崩溃容器，
+  `bootstrap.Prepare` 不重跑，容器换了新私钥却没有证书、永远不健康；而且崩溃不再
+  表现为 `stopped`，P3c 新路由收不到信号。`sandbox.go` 未校验该字段，也无测试依赖。
+  改成 `"no"` 是与新模型一致的选择，但会改变宿主重启后的运维行为，**未擅自修改**。
+- **Claude 下一项**：先请用户就 `RestartPolicy` 定夺。之后 P4 权威租约与 registry，
+  其中撤销传播仍缺——lease 撤销目前只标记 DB，不拆除身份或已建立的 worker mTLS
+  连接（P3a 只回收了出口 tunnel）。若用户授权再做专用 Linux 只读预检
   （170 先重核 4 个业务容器元数据，不符即停；216 禁止），通过后按
   [S2b5b合同](../../openspec/changes/complete-ccmax-execution-acceptance/s2b5b-provider-lifecycle.md)
   实跑双 Internal 网 Create/START/mTLS 与 cgroup swap；不重做 P1/P2，不推进计费/UI。

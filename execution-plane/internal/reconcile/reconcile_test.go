@@ -31,6 +31,8 @@ func TestPlanDesiredAndActualStateTransitions(t *testing.T) {
 		{name: "absent target drains running runtime", desired: DesiredAbsent, assignment: testAssignment(ActualRunning, true), want: ActionDrain},
 		{name: "absent target destroys drained runtime", desired: DesiredAbsent, assignment: testAssignment(ActualDrained, false), want: ActionDestroy},
 		{name: "absent target releases destroyed assignment", desired: DesiredAbsent, assignment: testAssignment(ActualDestroyed, false), want: ActionRelease},
+		{name: "ready destroys stopped runtime instead of starting it", desired: DesiredReady, assignment: testAssignment(ActualStopped, false), want: ActionDestroy},
+		{name: "ready releases destroyed assignment instead of recreating it", desired: DesiredReady, assignment: testAssignment(ActualDestroyed, false), want: ActionRelease},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -67,6 +69,87 @@ func TestPlanImageReplacementUsesDrainDestroyReleaseSequence(t *testing.T) {
 		if action.Kind != state.want {
 			t.Fatalf("actual %s action = %s, want %s", state.actual, action.Kind, state.want)
 		}
+	}
+}
+
+// A stopped runtime has lost the tmpfs identity it enrolled with, so its epoch
+// cannot host another instance: the enrollment receipt is unique on
+// (slot, epoch) and pinned to the previous public key. The plan must therefore
+// walk the slot out of the assignment entirely rather than start or recreate
+// it in place.
+func TestPlanReplacesStoppedRuntimeRatherThanResumingItsEpoch(t *testing.T) {
+	steps := []struct {
+		actual ActualState
+		want   ActionKind
+	}{
+		{actual: ActualStopped, want: ActionDestroy},
+		{actual: ActualDestroyed, want: ActionRelease},
+	}
+	for _, step := range steps {
+		assignment := testAssignment(step.actual, false)
+		action, err := Plan(Input{Slot: testSlot(DesiredReady), Assignment: assignment})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action.Kind != step.want {
+			t.Fatalf("actual %s action = %s, want %s", step.actual, action.Kind, step.want)
+		}
+		// Neither step may re-run the instance under the assignment it is
+		// leaving; those are exactly the actions that would reuse the epoch.
+		if action.Kind == ActionStart || action.Kind == ActionCreate {
+			t.Fatalf("actual %s resumed the burnt epoch with %s", step.actual, action.Kind)
+		}
+	}
+	// Once released there is no assignment, so the slot is placed afresh and
+	// the store issues a new execution epoch.
+	action, err := Plan(Input{Slot: testSlot(DesiredReady)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Kind != ActionPlace {
+		t.Fatalf("after release action = %s, want %s", action.Kind, ActionPlace)
+	}
+	if action.ExecutionEpoch != 0 {
+		t.Fatalf("placement carried epoch %d, want it assigned by the store", action.ExecutionEpoch)
+	}
+}
+
+// A placement job is completed the instant it is dispatched, and a completed
+// job can never be claimed again. Two placements of the same slot at the same
+// desired generation must therefore not share a job identity, or the second
+// one is silently dropped and the slot is stranded with no assignment. The
+// reservation is keyed on the same identity, so a repeat would also collide on
+// the assignment primary key.
+func TestConsecutivePlacementsGetDistinctJobIdentities(t *testing.T) {
+	slot := testSlot(DesiredReady)
+	slot.NextExecutionEpoch = 4
+	first, err := Plan(Input{Slot: slot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The store advances next_execution_epoch inside ReserveAssignment, so the
+	// following placement of the same slot sees the next value.
+	slot.NextExecutionEpoch = 5
+	second, err := Plan(Input{Slot: slot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Kind != ActionPlace || second.Kind != ActionPlace {
+		t.Fatalf("kinds = %s, %s, want two placements", first.Kind, second.Kind)
+	}
+	if first.IdempotencyKey == second.IdempotencyKey {
+		t.Fatalf("consecutive placements share idempotency key %q", first.IdempotencyKey)
+	}
+	if deterministicJobID(first.IdempotencyKey) == deterministicJobID(second.IdempotencyKey) {
+		t.Fatal("consecutive placements share a job id, so the reservation would collide")
+	}
+
+	// Without a next epoch the key could not move, so planning must refuse
+	// rather than emit a colliding one.
+	stranded := testSlot(DesiredReady)
+	stranded.NextExecutionEpoch = 0
+	if _, err := Plan(Input{Slot: stranded}); err == nil {
+		t.Fatal("Plan placed a slot with no next execution epoch")
 	}
 }
 
@@ -181,6 +264,7 @@ func testSlot(desired DesiredState) Slot {
 	return Slot{
 		ID: "slot-1", AccountID: "account-1", DesiredState: desired,
 		DesiredGeneration: 3, ImageDigest: "sha256:" + strings.Repeat("a", 64),
+		NextExecutionEpoch: 1,
 	}
 }
 

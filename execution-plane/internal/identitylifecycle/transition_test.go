@@ -120,22 +120,16 @@ func TestTransitionContract(t *testing.T) {
 	}
 }
 
-// This pins a conflict with the CURRENT reconcile path, which is a real defect
-// in that path rather than a gap in this contract.
+// Resuming at an unchanged binding is unreachable through enrollment, so this
+// contract could never permit it: stopping the container wipes the tmpfs
+// identity, the instance presents a NEW public key, and the receipt for
+// (slot, epoch) is pinned to the old one via SameReceiptIdentity.
 //
-// reconcile.go routes ActualStopped + DesiredReady to ActionStart;
-// control_executor.go dispatches START carrying the existing ExecutionEpoch and
-// requires RuntimeGeneration == DesiredGeneration, so neither field moves; and
-// hostagent/bootstrap/coordinator.go then re-enrolls at exactly that binding.
-// But stopping the container wiped the tmpfs identity, so the instance presents
-// a NEW public key, while the receipt for (slot, epoch) is pinned to the old
-// one and SameReceiptIdentity compares PublicKeySHA256. The re-enrollment is
-// refused, so a stopped runtime container cannot currently come back at all.
-//
-// Resuming at the same binding is therefore not something this contract could
-// permit: it is unreachable through enrollment. Closing it means routing
-// stopped to destroy/release/place so a new epoch is assigned, which is a
-// control-plane change and is deliberately NOT made here.
+// reconcile.go used to route ActualStopped + DesiredReady to ActionStart,
+// which is exactly this transition and therefore always failed. That routing
+// now walks the slot out through destroy, release and place so the store
+// issues a fresh epoch; see TestPlanReplacesStoppedRuntimeRatherThanResumingIts
+// Epoch in internal/reconcile.
 func TestResumeAtTheSameBindingStaysRejected(t *testing.T) {
 	t.Parallel()
 	asReconcileDispatchesItToday := Transition{

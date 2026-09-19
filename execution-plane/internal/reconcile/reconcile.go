@@ -55,6 +55,13 @@ type Slot struct {
 	DesiredState      DesiredState
 	DesiredGeneration uint64
 	ImageDigest       string
+	// NextExecutionEpoch is the epoch the store will hand to the next
+	// reservation, and it advances on every ReserveAssignment. Placement uses
+	// it to tell one attempt from the next: a placement job is completed the
+	// moment it is dispatched, and a completed job can never be claimed again,
+	// so a placement key that did not move would strand the slot without an
+	// assignment forever.
+	NextExecutionEpoch uint64
 }
 
 type Assignment struct {
@@ -182,6 +189,11 @@ func Plan(input Input) (Action, error) {
 	}
 	if input.Assignment == nil {
 		if input.Slot.DesiredState == DesiredReady {
+			// Fail closed rather than emit a placement key that silently
+			// collides with the previous attempt's completed job.
+			if input.Slot.NextExecutionEpoch == 0 {
+				return Action{}, errors.New("reconcile slot has no next execution epoch to place into")
+			}
 			return newAction(ActionPlace, input), nil
 		}
 		return newAction(ActionNone, input), nil
@@ -213,10 +225,26 @@ func Plan(input Input) (Action, error) {
 	switch input.Slot.DesiredState {
 	case DesiredReady:
 		switch assignment.ActualState {
-		case ActualMissing, ActualDestroyed:
+		case ActualMissing:
+			// The assignment is placed but no container was ever created for
+			// this epoch, so it is still free to enrol.
 			kind = ActionCreate
-		case ActualCreated, ActualStopped:
+		case ActualDestroyed:
+			// A container did exist for this epoch. Recreating under the same
+			// assignment would present a new instance key to an enrollment
+			// receipt that is unique on (slot, epoch) and pinned to the old
+			// key, so the epoch has to be released and replaced.
+			kind = ActionRelease
+		case ActualCreated:
 			kind = ActionStart
+		case ActualStopped:
+			// Identity lives on tmpfs, so a stopped container has lost its key
+			// and cannot resume at this epoch. Destroy leads to release and a
+			// fresh placement rather than a start. This is deliberately
+			// conservative: a created-but-never-started container observed by
+			// INSPECT also reports "stopped", and is replaced rather than
+			// started. That costs one placement and still converges.
+			kind = ActionDestroy
 		case ActualRunning:
 			if assignment.Healthy {
 				kind = ActionNone
@@ -273,7 +301,15 @@ func newAction(kind ActionKind, input Input) Action {
 			action.ImageDigest = input.Assignment.ImageDigest
 		}
 	}
-	if kind != ActionNone {
+	switch {
+	case kind == ActionNone:
+	case kind == ActionPlace:
+		// Placement has no assignment yet, so epoch and actual generation are
+		// both zero and cannot separate one attempt from the next. The epoch
+		// the store is about to issue can, and it is also what the reservation
+		// is keyed on.
+		action.IdempotencyKey = fmt.Sprintf("slot/%s/generation/%d/next-epoch/%d/%s", action.SlotID, action.DesiredGeneration, input.Slot.NextExecutionEpoch, action.Kind)
+	default:
 		actualGeneration := uint64(0)
 		if input.Assignment != nil {
 			actualGeneration = input.Assignment.ActualGeneration

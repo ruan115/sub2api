@@ -54,6 +54,7 @@ func TestRuntimeReconcilePlacesAtomicallyThenDispatchesCreate(t *testing.T) {
 	input := Input{Slot: Slot{
 		ID: desired.ID, AccountID: desired.AccountID, DesiredState: DesiredReady,
 		DesiredGeneration: desired.DesiredGeneration, ImageDigest: desired.ImageDigest,
+		NextExecutionEpoch: desired.NextExecutionEpoch,
 	}}
 	placed, err := controller.Reconcile(context.Background(), input)
 	if err != nil {

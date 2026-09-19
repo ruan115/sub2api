@@ -1,5 +1,63 @@
 # 验证记录
 
+## P3c：reconcile 停止路由改为销毁→释放→重新放置
+
+2026-09-19。用户就 P3b 发现的缺陷选择方案 (a)「改 reconcile 路由」。
+
+### 本轮实现
+
+`Plan()` 在 `DesiredReady` 下的路由：
+
+| 实际状态 | 原 | 现 | 理由 |
+| --- | --- | --- | --- |
+| `missing` | create | create（不变） | 该 epoch 从未创建过容器，仍可签发 |
+| `created` | start | start（不变） | 创建但从未启动，尚未签发 |
+| `stopped` | **start** | **destroy** | tmpfs 身份已毁，无法在该 epoch 恢复 |
+| `destroyed` | **create** | **release** | 该 epoch 已被用过，重建会撞上钉住旧公钥的回执 |
+
+这让常规分支与既有的**过时代次分支**（原本就是 stopped→destroy、destroyed→release）
+一致。`controlAction` 不包含 Place/Release，二者是本地动作。
+
+### 同时修复的 CRITICAL（本改动使其在常规路径可达）
+
+`ActionPlace` 在 `Assignment == nil` 时 epoch 与 actualGeneration 都是 0，幂等键
+退化为 `slot/<S>/generation/<G>/epoch/0/actual/0/place`，对同一槽位同一 desired
+generation **恒等**。而 Place 一经派发即 `completed`，`ClaimProvisioningJob` 只接受
+`pending | failed | running | dispatched`（jobs.go:63-64），**completed 永不可再
+claim**；`RuntimeExecutor` 又把该 job ID 当作 `AssignmentReservation.ID`，即
+`slot_assignments` 主键。因此第二次 Place 会静默失败，槽位永久没有 assignment。
+
+改动前该死锁基本不可达（DesiredReady 下的 Release 只来自过时代次分支，代次通常
+已变而产生新键）；改动后每次 destroy→release 都会落到同一个烧毁的 Place 键上。
+
+修复：`reconcile.Slot` 增加 `NextExecutionEpoch`（store 在 `ReserveAssignment` 内
+递增，SQL 与内存实现一致），Place 的幂等键改用它；缺失时 `Plan` 直接报错而不是
+发出必然碰撞的键。
+
+### 验证与剩余
+
+新增：停止→销毁→释放→放置整序列、两次连续 placement 的幂等键与 job id 必须不同、
+缺 next epoch 时拒绝放置。改动前**没有任何测试**覆盖 `DesiredReady + ActualStopped`
+或 `+ ActualDestroyed`——这正是缺陷得以存活的原因。
+
+独立 adversarial review 确认：前提四条成立（身份在 tmpfs、签发发生在 START 而非
+CREATE、回执唯一键钉住公钥、旧路由必然 `ErrRejected`）；无回归（`controlAction`
+无法下发 STOP，不存在 idle-suspend/scale-to-zero 特性）；状态可达性正确；幂等键
+与旧路由无跨部署碰撞。
+
+全仓离线 `go test -race`、`go vet`、linux/amd64 编译通过，`internal/reconcile`
+race ×5；`make -C recovery check` 236 / 150 / 186 与基线一致。
+
+**已知保守性**：`dockerState` 把所有非 running 非 dead 容器映射为 stopped，因此
+被 INSPECT 观测到的「已创建但从未启动」容器现在会被替换而非启动。多花一次放置，
+仍收敛，不造成身份复用。
+
+**待用户决定的相邻缺陷**：`provider.go:257` 的 `RestartPolicy: unless-stopped`
+与 tmpfs 身份模型矛盾——Docker 会绕过 host-agent 自动重启容器，`bootstrap.Prepare`
+不会重跑，容器换了新私钥却没有证书，永远不健康，而崩溃也就不会表现为 `stopped`，
+本轮新路由因此收不到信号。`sandbox.go` 未校验该字段，也无测试依赖它。**未擅自
+修改**（涉及宿主重启后的运维行为）。
+
 ## P3b：实例身份生命周期合同与持久 home 边界
 
 2026-09-19。规划入口
