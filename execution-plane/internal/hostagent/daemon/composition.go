@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeidentity"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 )
 
 var ErrRuntime = errors.New("host-agent lifecycle runtime failed")
@@ -84,6 +85,15 @@ func prepare(ctx context.Context, health config.Config, cfg Config) (*components
 	dialer := &net.Dialer{Timeout: cfg.StartupTimeout, KeepAlive: 30 * time.Second}
 	connection, err := grpc.DialContext(startup, "passthrough:///"+cfg.ControlAddress,
 		grpc.WithTransportCredentials(credentials.NewTLS(identity.ControlTLS)), grpc.WithNoProxy(), grpc.WithBlock(),
+		// HTTP/2 keepalive is what makes "the control session is open" mean
+		// anything. TCP keepalive is suppressed while unacknowledged data is in
+		// flight, and heartbeats guarantee that it is, so a blackholed peer
+		// would otherwise go unnoticed until TCP retransmission gives up, which
+		// on Linux defaults to roughly fifteen minutes. A node must not keep
+		// holding runtimes on an authorization it can no longer confirm.
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time: 10 * time.Second, Timeout: 20 * time.Second, PermitWithoutStream: false,
+		}),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			// Neither DNS/service config nor process-wide proxy variables choose
 			// the dial destination. TLS still verifies the configured server name.

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
+	"github.com/Wei-Shaw/sub2api/execution-plane/internal/hostagent"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/lease"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/provider"
 	"github.com/Wei-Shaw/sub2api/execution-plane/internal/runtimeregistry"
@@ -278,6 +279,75 @@ func TestReclaimTearsDownTheRealTransportNotJustTheBookkeeping(t *testing.T) {
 	}
 	if status.Code(err) == codes.Unimplemented {
 		t.Fatalf("the reclaimed transport still reached the server: %v", err)
+	}
+}
+
+// Custody ends on either signal the node actually has: the control session
+// going away, or the control plane revoking the epoch. This exercises the
+// SessionAuthority wiring; it is not by itself a statement about where
+// credentials live.
+func TestCustodyEndsWhenTheSessionAuthorityGoesStaleOrRevokes(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(2_000_000_000, 0).UTC()
+	sessionOpen := true
+	closedAt := time.Time{}
+	revoked := map[string]uint64{}
+	authority, err := hostagent.NewSessionAuthority(hostagent.SessionAuthorityConfig{
+		Revoked:      func(slotID string, epoch uint64) bool { return epoch <= revoked[slotID] },
+		SessionState: func() (bool, time.Time) { return sessionOpen, closedAt },
+		OfflineAfter: 45 * time.Second,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	custody, err := NewCustody(CustodyConfig{Validator: authority, NodeID: "node-1", RevalidateInterval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connection := &custodyConnection{}
+	adopted, err := custody.take(context.Background(), custodyInstance(7, 1, "cid-1"), "owner-1", connection)
+	if err != nil || !adopted {
+		t.Fatalf("take under a fresh session = %v, %v", adopted, err)
+	}
+	if err := custody.Revalidate(context.Background()); err != nil {
+		t.Fatalf("a fresh session did not hold: %v", err)
+	}
+	if connection.closed() {
+		t.Fatal("a fresh session reclaimed its runtime")
+	}
+
+	// The control session goes away. Nothing else changes.
+	sessionOpen, closedAt = false, now.Add(-time.Minute)
+	if err := custody.Revalidate(context.Background()); !errors.Is(err, lease.ErrBackendUnavailable) {
+		t.Fatalf("stale session revalidate = %v, want ErrBackendUnavailable", err)
+	}
+	if !connection.closed() || custody.Len() != 0 {
+		t.Fatal("a node that lost the control plane kept holding its runtime")
+	}
+
+	// With the session restored, an explicit revocation is the other way custody
+	// ends, and it ends only the slot the control plane named.
+	sessionOpen, closedAt = true, time.Time{}
+	kept, ended := &custodyConnection{}, &custodyConnection{}
+	if _, err := custody.take(context.Background(), custodyInstance(7, 2, "cid-2"), "owner-1", ended); err != nil {
+		t.Fatalf("re-take after restore: %v", err)
+	}
+	otherSlot := custodyInstance(7, 1, "cid-3")
+	otherSlot.SlotID = "slot-2"
+	if _, err := custody.take(context.Background(), otherSlot, "owner-1", kept); err != nil {
+		t.Fatalf("take of a second slot: %v", err)
+	}
+	revoked["slot-1"] = 7
+	if err := custody.Revalidate(context.Background()); !errors.Is(err, lease.ErrLeaseNotCurrent) {
+		t.Fatalf("revoked revalidate = %v, want ErrLeaseNotCurrent", err)
+	}
+	if !ended.closed() {
+		t.Fatal("the revoked slot kept its runtime")
+	}
+	if kept.closed() {
+		t.Fatal("revoking one slot reclaimed another")
 	}
 }
 

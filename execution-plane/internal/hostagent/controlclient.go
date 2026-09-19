@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	executionv1 "github.com/Wei-Shaw/sub2api/execution-plane/gen/go/execution/v1"
@@ -70,6 +71,51 @@ type ControlClient struct {
 	maxConcurrentCommands int
 	commandQueue          int
 	now                   func() time.Time
+
+	// sessionOpen and closedAt describe whether this node currently has an
+	// authenticated control session, and when it last lost one. This is the
+	// only authorization freshness a node has: the lease stores live on the
+	// control plane and the node holds no credential for them.
+	//
+	// "Open" is trustworthy only because the dial configures HTTP/2 keepalive.
+	// Without it a blackholed peer would leave the stream apparently open until
+	// TCP retransmission gave up, and this signal would be worthless. A
+	// successful Send is deliberately NOT treated as evidence: it proves only
+	// that the message entered the local writer.
+	sessionOpen atomic.Bool
+	closedAt    atomic.Int64 // monotonic nanoseconds since clientStarted
+	started     time.Time
+}
+
+// ControlSessionState reports whether an authenticated control session is open
+// right now, and when the last one closed. A zero closedAt with open=false
+// means this node has never had a session.
+//
+// This is node-side freshness, not the execution lease itself. The two-store
+// authority stays on the control plane; this only tells a custodian when to
+// stop trusting what that authority last said.
+func (c *ControlClient) ControlSessionState() (open bool, closedAt time.Time) {
+	if c.sessionOpen.Load() {
+		return true, time.Time{}
+	}
+	offset := c.closedAt.Load()
+	if offset == 0 {
+		return false, time.Time{}
+	}
+	return false, c.started.Add(time.Duration(offset))
+}
+
+// openSession and closeSession bracket one authenticated session. The elapsed
+// time is measured from a monotonic base so that a wall-clock step cannot make
+// a lost session look fresh.
+func (c *ControlClient) openSession() { c.sessionOpen.Store(true) }
+func (c *ControlClient) closeSession() {
+	c.sessionOpen.Store(false)
+	elapsed := time.Since(c.started)
+	if elapsed <= 0 {
+		elapsed = time.Nanosecond
+	}
+	c.closedAt.Store(int64(elapsed))
 }
 
 type controlCommandEnvelope struct {
@@ -131,6 +177,7 @@ func NewControlClient(config ControlClientConfig) (*ControlClient, error) {
 		enableProbeTickets: config.EnableProbeTickets,
 		nodeID:             config.NodeID, labels: labels, capabilities: capabilities,
 		capacity: cloneCapacity(config.Capacity), heartbeatInterval: config.HeartbeatInterval,
+		started:      time.Now(),
 		reconnectMin: config.ReconnectMin, reconnectMax: config.ReconnectMax,
 		maxConcurrentCommands: config.MaxConcurrentCommands, commandQueue: config.CommandQueue, now: config.Now,
 	}, nil
@@ -176,6 +223,8 @@ func (c *ControlClient) runSession(ctx context.Context) error {
 	if err := stream.Send(&executionv1.NodeControlServiceControlRequest{Event: &executionv1.NodeControlServiceControlRequest_Hello{Hello: c.hello()}}); err != nil {
 		return err
 	}
+	c.openSession()
+	defer c.closeSession()
 
 	type inbound struct {
 		response *executionv1.NodeControlServiceControlResponse
@@ -185,6 +234,8 @@ func (c *ControlClient) runSession(ctx context.Context) error {
 	go func() {
 		for {
 			response, receiveErr := stream.Recv()
+			if receiveErr == nil {
+			}
 			select {
 			case inboundEvents <- inbound{response: response, err: receiveErr}:
 			case <-sessionContext.Done():
@@ -224,6 +275,8 @@ func (c *ControlClient) runSession(ctx context.Context) error {
 			if err := stream.Send(c.heartbeatEvent()); err != nil {
 				return err
 			}
+			// A send that succeeds proves the authenticated transport is still
+			// writable, which keeps an idle but healthy session from ageing out.
 		case pending := <-probeRequests:
 			if request := probeBroker.outbound(pending); request != nil {
 				if err := stream.Send(request); err != nil {

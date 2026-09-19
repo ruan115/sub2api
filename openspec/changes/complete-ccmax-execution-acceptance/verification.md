@@ -1,5 +1,61 @@
 # 验证记录
 
+## P5c：节点侧会话授权（不持有任何数据库凭据）
+
+2026-09-19。规划
+[2026-09-19_16-31-04-isthmus-runtime-custody.md](../../../docs/plans/2026-09-19_16-31-04-isthmus-runtime-custody.md)
+阶段 2b 的授权部分。基线 `41b9f5d`（用户已建独立 MySQL/Redis 并通过三项集成测试）。
+
+### 设计：节点不持有库凭据，授权来自控制面事实
+
+`hostagent.SessionAuthority` 实现 `lease.Validator`，只用两个节点真正能观察到的
+控制面事实：控制会话是否打开，以及控制面推送的撤销水位线。两者任一不满足即
+失败关闭（`ErrBackendUnavailable` / `ErrLeaseNotCurrent`）。
+
+**这比真实租约弱，文档与代码注释都明确写明不得当作权威**。真正的两库合取
+（Redis 令牌 + SQL 持久记录）仍只在控制面一侧。
+
+### Review 发现的最严重缺陷：基于 Send 的新鲜度不成立
+
+初版把「心跳 `stream.Send` 成功」当作会话新鲜的证据。**这是错的**：`Send` 成功
+只证明消息进入了本地 HTTP/2 写缓冲，并不证明对端收到。而且控制拨号**没有配置
+gRPC keepalive**（全仓 grep 无 `keepalive`），`net.Dialer.KeepAlive` 在有未确认
+数据在途时被抑制，而心跳恰好保证了这一点。黑洞式分区因此要等 TCP 重传耗尽才被
+发现，Linux `tcp_retries2=15` 约 **924 秒**；叠加 `OfflineAfter` 后节点可能在失联
+后继续托管约 **20 分钟**，而设计上限是 5 分钟——fail-closed 主张根本不成立。
+
+同时核实：**控制面不回应心跳**（只记录并重置自身超时），所以「最后收到消息」在
+空闲但健康的会话上也会自然变旧，不能单独作为信号。
+
+修复：
+- 控制拨号新增 `grpc.WithKeepaliveParams{Time:10s, Timeout:20s}`——**这是承重的
+  一环**，是「会话打开」这个信号唯一的可信来源，把黑洞分区的发现时间从约 15 分钟
+  压到约 30 秒。
+- 删除所有基于 Send 的新鲜度记录，改为记录**会话开合**：`ControlSessionState()`
+  返回「当前是否打开」与「上次关闭于何时」。
+- 关闭时刻用**单调时钟**基准记录，避免 NTP 回拨让失联会话显得新鲜。
+
+其余已修：`EpochRevoked` 是同包内的死公开面，删除；端到端测试名过度宣称
+（它并未触及 `ControlClient`/执行器/任何存储），已改名为
+`TestCustodyEndsWhenTheSessionAuthorityGoesStaleOrRevokes`。
+
+### 验证与剩余
+
+全仓离线 `go test -race`、`go vet`、linux/amd64 编译通过；hostagent 全家 race ×5；
+Redis 真实集成 **PASS**；`make -C recovery check` 236/150/186 与基线一致。
+
+**仍未接线（阶段 2b 的接线部分）**：`NewSessionAuthority` 与 `Custody.Run` 仍无
+非测试调用方。接线存在循环依赖——执行器需要 custody 作为 custodian，custody 需要
+authority，authority 又需要执行器的撤销水位线与控制客户端的会话状态——需用后绑定
+闭包打破，并补 `daemon.Config` 的 `OfflineAfter` 字段与 `run.go` 的 `custody.Run`
+分支。本轮**不仓促接线**，留作下一步并单独配测试。
+
+**已知 fail-open（接线前必须处理）**：`revokedThrough` 是内存态，host-agent 重启后
+水位线清空，已撤销的 epoch 会在新会话下重新校验通过。今天无害（没有任何东西经
+custody 重新接管容器），但**一旦接线就变成 fail-open**。
+
+分数仍 32%，`/readyz` 保持 503、`production_ready=false`。
+
 ## P5b：显式撤销接入命令路径，并证明传输真的被拆除
 
 2026-09-19。规划
