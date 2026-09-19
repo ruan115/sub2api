@@ -185,14 +185,23 @@ func EvaluateAvailability(lastRenewedAt, now time.Time, timing Timing) (Availabi
 	return Availability{CanRouteNew: age < timing.OfflineAfter, CanFailover: age >= timing.FailoverAfter, Age: age}, nil
 }
 
+// Refresher is the part of a lease authority that renewal needs. Backend
+// satisfies it, and so does Coordinator, which extends the fencing token and
+// the durable expires_at together. Renewal must be given the coordinator in
+// production: refreshing only the token lets the durable row go stale, and the
+// proxy lease check reads that row.
+type Refresher interface {
+	Renew(ctx context.Context, claim Claim, ttl time.Duration) error
+}
+
 type Renewer struct {
-	backend Backend
+	backend Refresher
 	claim   Claim
 	timing  Timing
 	onLost  func(error)
 }
 
-func NewRenewer(backend Backend, claim Claim, timing Timing, onLost func(error)) (*Renewer, error) {
+func NewRenewer(backend Refresher, claim Claim, timing Timing, onLost func(error)) (*Renewer, error) {
 	if backend == nil || claim.Validate() != nil || timing.Validate() != nil {
 		return nil, errors.New("execution lease renewer configuration is invalid")
 	}
@@ -218,8 +227,16 @@ func (r *Renewer) Run(ctx context.Context) error {
 	}
 }
 
+// Validator is the part of a lease authority that fencing needs. Backend
+// satisfies it, and so does Coordinator, which checks the fencing token and the
+// durable record together. Fencing should be given the strongest validator
+// available rather than the backend alone.
+type Validator interface {
+	Validate(ctx context.Context, claim Claim) error
+}
+
 type Fencer struct {
-	backend Backend
+	backend Validator
 
 	mu          sync.Mutex
 	nextID      uint64
@@ -231,7 +248,7 @@ type fencedConnection struct {
 	close func()
 }
 
-func NewFencer(backend Backend) (*Fencer, error) {
+func NewFencer(backend Validator) (*Fencer, error) {
 	if backend == nil {
 		return nil, errors.New("execution lease backend is required")
 	}
@@ -271,9 +288,19 @@ func (f *Fencer) Revalidate(ctx context.Context) error {
 		snapshot[id] = connection
 	}
 	f.mu.Unlock()
+	// Every connection on one slot carries the same claim and therefore the
+	// same verdict. Validating once per distinct claim keeps a slot with many
+	// protected connections from issuing one authority round trip each, which
+	// matters now that a validator may consult a durable store as well.
+	verdicts := make(map[Claim]error, len(snapshot))
 	var firstErr error
 	for id, connection := range snapshot {
-		if err := f.backend.Validate(ctx, connection.claim); err != nil {
+		err, decided := verdicts[connection.claim]
+		if !decided {
+			err = f.backend.Validate(ctx, connection.claim)
+			verdicts[connection.claim] = err
+		}
+		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}

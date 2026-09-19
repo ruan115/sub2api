@@ -257,7 +257,23 @@ git diff --check
   Docker 守护进程或宿主重启后 runtime 容器会保持停止且**无自动恢复路径**，直到
   reconciler 被接线。原先的 `unless-stopped` 只是用一个身份已损坏的容器掩盖了这点，
   不是真正的恢复。归 P4 装配。
-- **Claude 下一项**：P4 权威租约与 registry，
+- **P4a**（2026-09-19）：按 P4 第一条「先写状态转换设计」完成租约权威设计并落地
+  两库合取校验。权威划分：Redis 令牌+TTL 是围栏权威，SQL `execution_leases` 是
+  持久归属与撤销事实；**route TTL 不是执行租约，签发回执不是租约权威**。
+  `Coordinator.Revoke` 先写 SQL 再删令牌，删令牌失败时只问后端的校验会继续授权
+  一个已撤销的租约——`Coordinator.Validate` 因此改为两库合取，任一不可读即失败
+  关闭。`Fencer`/`Renewer` 原本把依赖写死成 `Backend`，等于把「只有 Redis」固化
+  进类型，现放宽为 `Validator`/`Refresher`，`*Coordinator` 均满足。
+  [设计](../../openspec/changes/complete-ccmax-execution-acceptance/p4a-lease-authority.md)，
+  [实证](../../openspec/changes/complete-ccmax-execution-acceptance/verification.md#p4a执行租约权威的状态转换设计与两库合取校验)。
+  Review 修掉两个真缺陷：续期只刷 Redis 会让 SQL `expires_at` 变陈旧，而代理租约
+  校验读的正是它，同一租约被两条路径判定相反；`Revalidate` 的 N+1 加共享超时会
+  级联关闭全部 tunnel。全仓 race/vet/linux 编译、race×10、236/150/186 通过。
+- **Claude 下一项**：P4 主体仍未做——`Coordinator`/`FailoverController` **依旧
+  没有非测试调用方**，生产权威 writer 与续期循环未接线；**runtime registry 不
+  存在**；`control/server.go` 会话表按 NodeID 索引、不绑定 epoch 或租约，所以
+  撤销执行租约**不会**关闭 worker 的 mTLS 流。真实 Redis/MySQL 集成测试因环境
+  变量未设置而整体 skip，幂等/并发/超时未实证。继续 P4 权威租约与 registry，
   其中撤销传播仍缺——lease 撤销目前只标记 DB，不拆除身份或已建立的 worker mTLS
   连接（P3a 只回收了出口 tunnel）。若用户授权再做专用 Linux 只读预检
   （170 先重核 4 个业务容器元数据，不符即停；216 禁止），通过后按

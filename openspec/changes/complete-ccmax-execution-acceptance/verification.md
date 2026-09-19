@@ -1,5 +1,52 @@
 # 验证记录
 
+## P4a：执行租约权威的状态转换设计与两库合取校验
+
+2026-09-19。P4 第一条「先写状态转换设计」。设计与边界
+[p4a-lease-authority.md](p4a-lease-authority.md)。
+
+### 本轮实现
+
+- 设计文档确立权威划分：Redis 令牌 + TTL 是围栏权威，SQL `execution_leases` 是
+  持久归属与撤销事实；**route TTL 不是执行租约，签发回执不是租约权威**。含完整
+  分歧矩阵与失败/竞争恢复规则。
+- `Coordinator.Validate` 由「只问后端」改为**两库合取**。`Revoke` 先写 SQL 再删
+  令牌，删令牌失败时后端会继续把该 claim 报成 current 直到 TTL——只问后端的校验
+  会继续授权一个已撤销的租约。任一库不可读即失败关闭。过期刻意不由持久行再推导，
+  以免时钟漂移变成误撤销。
+- `Fencer` 与 `Renewer` 都曾把依赖写死为 `Backend`，等于把「只有 Redis」固化进
+  类型。现分别放宽为 `Validator` 与 `Refresher`，`*Coordinator` 均满足；
+  `Coordinator.Renew` 相应接收 TTL（此前它用 `c.ttl`，而 `Renewer` 传
+  `timing.OfflineAfter`，两者本就可能不一致）。
+- `Fencer.Revalidate` 按 `Claim` 去重：同槽位所有连接共享同一 claim，每轮每个
+  不同 claim 只发一次权威往返。
+
+### Review 发现并已修的两个真缺陷
+
+1. **跳过过期会造成两库分歧**：`Renewer` 只能接 `Backend`，`Coordinator` 无法
+   驱动它，因此续期只刷新 Redis 令牌、永不更新 SQL `expires_at`；而
+   `ValidateCurrentProxyLease` 读的正是 `el.expires_at > ?`。同一租约会被执行侧
+   判为有效、被代理侧判为失效。修法是让续期能走 `Coordinator`（`Refresher`），
+   使该状态不可达，而不是在校验侧补一个带时钟偏差预算的过期判断。
+2. **`Revalidate` 的 N+1 加共享超时**：逐连接串行校验且不按 claim 去重，加入持久
+   库读取后单项成本上升约一个数量级，慢库会让整轮超出自身 deadline，进而关闭
+   其余**全部** tunnel，自我放大。按 claim 去重后消除。
+
+另修：`%v` 吞掉错误链改为 `%w`；测试桩与真实 SQL 语义漂移（忽略 ownerID、重复
+撤销覆盖首次时间戳、行只按 epoch 索引而未覆盖 slot）。
+
+### 验证与剩余
+
+18 个子测试通过；变异验证非空跑（把合取改回只问后端即 FAIL）。全仓离线
+`go test -race`、`go vet`、linux/amd64 编译通过，`internal/lease` race ×10；
+`make -C recovery check` 236 / 150 / 186 与基线一致。
+
+**仍未做**：`Coordinator`/`FailoverController` **依旧没有非测试调用方**，生产
+权威 writer 与续期循环未接线——这是 P4 主体，未因本设计关闭。**runtime registry
+不存在**。撤销传播仍不完整：`control/server.go` 的会话表按 **NodeID** 索引，不绑定
+epoch 或租约，撤销执行租约**不会**关闭 worker 的 mTLS 流。真实 Redis/MySQL 集成
+测试因环境变量未设置而整体 skip，幂等/并发/超时**未实证**。分数仍 32%。
+
 ## P3d：禁用 Docker 自动重启策略
 
 2026-09-19。用户就 P3c 发现的相邻缺陷指示改为 `"no"`。

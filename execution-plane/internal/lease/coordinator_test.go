@@ -38,7 +38,7 @@ func TestCoordinatorRenewalFailsClosedWhenDurableRenewFails(t *testing.T) {
 	if err := backend.Acquire(context.Background(), claim, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.Renew(context.Background(), claim); err == nil {
+	if err := coordinator.Renew(context.Background(), claim, 45*time.Second); err == nil {
 		t.Fatal("expected durable renewal failure")
 	}
 	if err := backend.Validate(context.Background(), claim); !errors.Is(err, ErrLeaseNotCurrent) {

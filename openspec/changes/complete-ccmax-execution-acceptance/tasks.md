@@ -52,6 +52,7 @@
       - [ ] B2b2 受认证 health/activation/业务分 scope 签票、当前版本约束与双层 lease 续期；不能用 B2b1 receipt 直接授权执行。
         - [x] B2b2a [当前控制命令的只读诊断签票](b2b2a-design.md)：health/credential_key，实际本地 TLS ControlClient/worker RPC 组合、交叉 review/race/vet/离线生成通过；默认关闭，不包含 activation/业务票、续租或生产装配。
         - [ ] B2b2b activation payload/lease 精确授权、业务票版本/代理/模式绑定与使用时复核。
+        - [x] P4a 执行租约权威状态转换设计（[设计](p4a-lease-authority.md)，[实证](verification.md#p4a执行租约权威的状态转换设计与两库合取校验)）：确立 Redis 令牌=围栏权威 / SQL=持久归属与撤销事实，route TTL 与签发回执**均非**租约权威；`Coordinator.Validate` 改为两库合取，任一不可读即失败关闭；`Fencer`/`Renewer` 依赖放宽为 `Validator`/`Refresher` 以便接最强权威；`Revalidate` 按 claim 去重。Review 修掉两个真缺陷（续期只刷 Redis 导致与代理租约判定相反；Revalidate N+1 加共享超时级联关闭）。**生产 writer/续期循环仍未接线，registry 仍不存在，真实 Redis/MySQL 集成测试整体 skip**，不加分。
         - [ ] B2b2c 可信证明驱动的双层续租与持续流失效；不以诊断票替代。
   - [ ] B3 仅连接现有 runtime 的 registry 与失效清理。
   - [ ] B4 host-agent 控制/数据/出口生产级装配与断连恢复证据。

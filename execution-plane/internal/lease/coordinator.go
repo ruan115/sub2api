@@ -45,15 +45,20 @@ func (c *Coordinator) Grant(ctx context.Context, leaseID string, claim Claim) er
 	return nil
 }
 
-func (c *Coordinator) Renew(ctx context.Context, claim Claim) error {
-	if err := claim.Validate(); err != nil {
+// Renew takes the TTL rather than using the grant TTL so that a Renewer can
+// drive the coordinator directly. Renewing only the fencing token would let the
+// durable expires_at go stale while the token lives on, which splits authority:
+// this Validate would allow the lease while ValidateCurrentProxyLease, which
+// reads expires_at, would refuse it.
+func (c *Coordinator) Renew(ctx context.Context, claim Claim, ttl time.Duration) error {
+	if err := validateOperation(claim, ttl); err != nil {
 		return err
 	}
 	now := c.now().UTC()
-	if err := c.backend.Renew(ctx, claim, c.ttl); err != nil {
+	if err := c.backend.Renew(ctx, claim, ttl); err != nil {
 		return err
 	}
-	if err := c.durable.RenewExecutionLease(ctx, claim.SlotID, claim.ExecutionEpoch, claim.OwnerID, now.Add(c.ttl), now); err != nil {
+	if err := c.durable.RenewExecutionLease(ctx, claim.SlotID, claim.ExecutionEpoch, claim.OwnerID, now.Add(ttl), now); err != nil {
 		_ = c.backend.Revoke(context.Background(), claim)
 		return fmt.Errorf("persist execution lease renewal: %w", err)
 	}
@@ -73,6 +78,40 @@ func (c *Coordinator) Revoke(ctx context.Context, claim Claim) error {
 	return nil
 }
 
+// Validate is the conjunction of both stores, because either one alone can
+// still authorise a lease the other has already ended.
+//
+// Revoke writes the durable record first and then drops the fencing token. If
+// the token could not be dropped, the backend keeps reporting the claim as
+// current until its TTL runs out, and a backend-only check would go on
+// authorising a lease that was revoked. Checking the durable record closes that
+// window instead of leaving it bounded by the TTL.
+//
+// The reverse direction is already covered: a token dropped while the durable
+// write failed fails the backend check.
+//
+// Expiry is deliberately NOT re-derived from the durable row. The fencing token
+// TTL is the expiry authority, and comparing a database timestamp against this
+// process's clock would turn skew into spurious revocation.
 func (c *Coordinator) Validate(ctx context.Context, claim Claim) error {
-	return c.backend.Validate(ctx, claim)
+	if err := claim.Validate(); err != nil {
+		return err
+	}
+	if err := c.backend.Validate(ctx, claim); err != nil {
+		return err
+	}
+	durable, err := c.durable.GetExecutionLease(ctx, claim.SlotID, claim.ExecutionEpoch)
+	if err != nil {
+		if errors.Is(err, store.ErrExecutionLeaseNotFound) {
+			return ErrLeaseNotCurrent
+		}
+		// An unreadable durable record is not evidence that the lease is still
+		// held. This costs availability on a store outage, which is the same
+		// trade the backends already make when they are unreachable.
+		return fmt.Errorf("%w: read durable execution lease: %w", ErrBackendUnavailable, err)
+	}
+	if durable.RevokedAt != nil || durable.NodeID != claim.NodeID || durable.OwnerID != claim.OwnerID {
+		return ErrLeaseNotCurrent
+	}
+	return nil
 }
