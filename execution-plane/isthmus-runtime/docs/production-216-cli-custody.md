@@ -3,6 +3,85 @@
 状态：2026-09-23 只读勘察记录。**本文仅描述观察到的线上现状，不是设计方案，也未对
 216.106.185.119 做任何修改。** 全程只执行读取类命令，未写入、未重启、未改配置。
 
+> ## ⚠️ 本文第 1–7 节已是历史基线
+>
+> 2026-09-23 04:01（UTC）同事对 216 执行了**整套运行时的全量更换**，见下方
+> [第 0 节](#0-2026-09-23-全量部署已发生)。第 1–7 节记录的是**部署前**的状态，
+> 保留是因为它是唯一一份部署前基线，可用于比对。**引用现状请以第 0 节为准。**
+>
+> 已被取代的关键事实：CLI 版本（2.1.258 → **2.1.280**）、runtime 构建
+> （57/20 分裂 → **全机群收敛为单一构建**）、`/opt/isthmus/bin/` 下多个脚本、
+> 容器启动时间。
+
+## 0. 2026-09-23 全量部署（已发生）
+
+本节为 2026-09-23 08:16 UTC 的只读审计结果。操作者为用户同事，非本会话。
+
+### 0.1 时间线（UTC）
+
+| 时间 | 操作 |
+| --- | --- |
+| 09-22 20:42 | 上传 `/opt/isthmus/isthmus_exp26092302_encrypted.zip`（40,036,394 B） |
+| 09-23 00:48 | 替换 `isthmus-supervisor.sh`（16,688 → **18,383** B）、`Dockerfile.vm`（5,098 → **5,958** B）、`setup-env.sh`、`install-apparmor.sh`、`isthmus-pidns.apparmor` |
+| 09-23 02:03 | 替换 `deploy-vm.sh`（85,030 → **88,886** B） |
+| 09-23 02:43:34 | 写入 Claude Code **2.1.280**；02:43:36 重指 `bin/claude` 符号链接 |
+| 09-23 04:00–04:01 | 重签 `grpcs-certs`，重新下发全部 77 个 VM home（新 `isthmus.pkg`、transport/oauth/pkg 配置、gRPC 证书），**批量重启 77 个容器**（2 分钟内完成，非滚动） |
+| 09-23 04:19 | 更新 `/opt/isthmus/dist/isthmus.pkg` |
+
+容器为**重启**而非重建：`Created` 仍为 2026-09-12，`RestartCount=0`，属显式 stop/start。
+
+### 0.2 CLI：官方正版，已核验
+
+```text
+/home/claude/.local/bin/claude -> .../versions/2.1.280   (233,709,640 字节)
+sha256 1e08503dbdf3c2cb0d706d32f3408277388d1c76ef108673e8fe42c1b322925b
+```
+
+与官方 `manifest.json` 的 `linux-x64` 条目**哈希与大小双双精确匹配**
+（version 2.1.280，commit `80abbfe7d723`，构建于 2026-09-21T20:55:27Z）。
+
+**旧版 2.1.258 未删除**，仍在 `versions/` 下，回滚路径完好。
+
+### 0.3 runtime：全机群已收敛为单一构建
+
+```text
+sha256 775a2f7a6eb09a93eca5f90b716b1e09599ff7f2cfb31b0ac12a14468fda0f1c
+       39,585,577 字节
+```
+
+76/76 个 VM home 的 `isthmus.pkg` 大小一致；抽样 vm-1 / vm-60 / vm-76 与
+`/opt/isthmus/dist/isthmus.pkg` 四处哈希完全相同。
+
+**本文第 6 节所述「57 个未分析构建 vs 20 个已分析构建」的分裂已不存在。**
+原先列为头号阻塞的那项调查，其前提已被本次部署消解。
+
+### 0.4 运行状态：结构健康，端到端未证实
+
+- 77 个容器 `Up 4 hours`，启动时刻集中在 04:00–04:01。
+- 231 个 isthmus 进程（77 × 3：supervisor + launcher + runtime），容器内实测
+  `etimes=15425`（≈4.28 小时），与重启时刻吻合——**supervisor 的崩溃重启逻辑
+  自部署以来一次都未触发**。
+- 容器内 `claude --version` 正常返回 `2.1.280 (Claude Code)`。
+- `state/claude/locks/2.1.280.lock` 于 07:48:09 被持有（pid 3422），证明 CLI
+  子进程可以正常拉起。
+
+⚠️ **但「拉得起来」不等于「请求跑得通」**：`.cache/claude-cli-nodejs/` 下最后一条
+会话记录是 **2026-09-22 09:26**（部署之前）；审计时刻（08:16）CLI 进程数为 **0**，
+而 9/14 核查在活跃时段观察到 35–37 个。**本次部署的端到端有效性尚未证实**，
+需由真实请求或操作者的验证记录确认。只读审计无法回答此项（不读业务日志）。
+
+### 0.5 待确认项
+
+1. **端到端是否跑通**（见 0.4）。
+2. 包名 `isthmus_exp26092302_encrypted.zip` 中的 `exp` 是否意为 experimental——
+   若是实验构建直接上了全部 77 个生产实例，应确认为有意为之。
+3. **仓库与线上已脱节**：lockfile 及 5 处版本闸门仍钉死 2.1.258
+   （`image/artifacts/binaries.py:49`、`image/lab/acquire.py:104`、
+   `image/lab/toolchain.py:61`、`image/lab/cli.py:51`、
+   `image/locks/toolchain-linux-2026-09-17.json`）。runtimekit 流程现在会直接失败。
+4. `isthmus-supervisor.sh` 增加的 1,695 字节与 `deploy-vm.sh` 增加的 3,856 字节
+   具体改了什么，尚未比对。本文第 4 节引用的 supervisor 行号基于**旧版**，已失效。
+
 **前序工作**：[2026-09-14 线上 CLI / 转发层配置核查](../../../recovery/docs/online-cli-forwarder-config-2026-09-14.md)
 已对同一主机做过更深入的采集（转发层环境、77 个 runtime 的 argv、CLI 进程参数、
 核心哈希分组）。本文聚焦**二进制完整性与升级影响面**，是对该核查的补充而非替代；
