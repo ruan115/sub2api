@@ -3,6 +3,11 @@
 状态：2026-09-23 只读勘察记录。**本文仅描述观察到的线上现状，不是设计方案，也未对
 216.106.185.119 做任何修改。** 全程只执行读取类命令，未写入、未重启、未改配置。
 
+**前序工作**：[2026-09-14 线上 CLI / 转发层配置核查](../../../recovery/docs/online-cli-forwarder-config-2026-09-14.md)
+已对同一主机做过更深入的采集（转发层环境、77 个 runtime 的 argv、CLI 进程参数、
+核心哈希分组）。本文聚焦**二进制完整性与升级影响面**，是对该核查的补充而非替代；
+凡二者重叠处，以 9/14 的实测值为准，本文已据此修正多处推断。
+
 > **边界冲突声明**：[2026-09-19 托管规划](../../../docs/plans/2026-09-19_16-31-04-isthmus-runtime-custody.md)
 > 第 28、95 行写明「不动 216」「216.106.185.119 保持不动」。本轮勘察由用户在
 > 2026-09-23 会话中明确指派，属于对该边界的一次显式豁免，且限定为只读。
@@ -72,24 +77,52 @@ CLI 布局（原生安装器形态，非 npm 全局安装）：
 内存执行）→ Claude Agent SDK → `claude` 子进程。supervisor 第 4 行注释原文：
 "The Claude Agent SDK's claude subprocess can crash mid-stream"。
 
-supervisor 通过 `EXTRA_ARGS` 向 isthmus 透传的部署期开关（`isthmus-supervisor.sh:102-114`，
-默认值取自同段注释）：
+supervisor 通过 `EXTRA_ARGS` 向 isthmus 透传部署期开关。下表**左列为 supervisor
+注释所载默认值**（`isthmus-supervisor.sh:102-114`），**右列为 77 个 runtime 的实测值**
+（引自 [2026-09-14 线上核查](../../../recovery/docs/online-cli-forwarder-config-2026-09-14.md) 第 109-128 行）：
 
-| 开关 / 能力 | 默认 |
-| --- | --- |
-| `--entrypoint=` | `claude-vscode` |
-| `--refusal-cutoff` | off |
-| `--telemetry-features=` | none |
-| `--pulse` | off（3000ms 请求触发 Ping，主进程启动 1000 Pings）|
-| tools MCP server | off |
-| host-managed OAuth refresh | lazy |
-| 请求并发上限 / 最小预热数 | 1024 / 0 |
-| session-id isolation | strict on |
-| PID namespace | on |
+| 开关 | 注释默认 | **线上实测** |
+| --- | --- | --- |
+| `ISTHMUS_ENTRYPOINT` | `claude-vscode` | `claude-vscode` |
+| `ISTHMUS_REFUSAL_CUTOFF` | off | `0` |
+| `ISTHMUS_TELEMETRY_FEATURES` | none | **`tengu_sysprompt_block`** |
+| `ISTHMUS_TOOLS_MCP_SERVER` | off | **`1`（开启）** |
+| `ISTHMUS_STRICT_ISOLATION` | strict on | **`0`（关闭）** |
+| `ISTHMUS_PID_NAMESPACE` | on | **`0`（关闭）** |
+| `ISTHMUS_CONTINUOUS_TOOL_LOOP` | off | **`1`** |
+| `ISTHMUS_MAX_PROCS` / `MIN_PROCS` | 1024 / 0 | `1024` / `0` |
+| `ISTHMUS_PROVIDER_TRANSPORT` | — | `grpcs`（端口 10765）|
+| `DISABLE_AUTOUPDATER` | — | **`1`** |
 
-注释同时点名的能力：**session-id isolation、selected telemetry corrections、
-refusal interception、tools MCP exec bridge、body-rewrite threading、
-child identity profile**。
+**注释默认值与线上实际有 5 处不一致**，不能拿 supervisor 注释当线上事实。
+
+### 4.1 CLI 子进程的实测启动参数
+
+同一核查第 136-154 行记录了 35–37 个 Claude 进程的实际 argv，版本均为 `2.1.258`：
+
+```text
+--input-format stream-json  --output-format stream-json
+--max-thinking-tokens 31999  --permission-prompt-tool stdio
+--setting-sources=user,project,local
+--enable-auth-status --include-partial-messages --replay-user-messages
+--no-chrome --debug --debug-to-stderr --verbose
+```
+
+环境侧：`CLAUDE_CODE_MAX_RETRIES=0`、`DISABLE_AUTO_COMPACT=1`、
+**`DISABLE_AUTOUPDATER=1`**、`MCP_TOOL_TIMEOUT=2147483647`（约 24.9 天）、
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 同值、
+`CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`、
+`CLAUDE_CODE_SKIP_PROMPT_HISTORY=1`、`CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE=100000000`。
+
+**`DISABLE_AUTOUPDATER=1` 已在线上确认**，本文第 7 节的「自动更新漂移」风险据此关闭。
+
+### 4.2 body-rewrite 的实际作用面
+
+同一核查第 168 行：保全核心处理 `max_tokens`、`stop_sequences`、`temperature`、
+`top_p`、`top_k`、`thinking`、`output_config`、`context_management`、
+`tools` / `tool_choice`，且「缓存相关分支存在删除部分 `cache_control` 或调整 `scope`
+的行为」。**改写面是 Anthropic Messages API 的请求字段**，而非 CLI 私有结构——这一层
+相对稳定，跨 CLI 小版本受影响的概率低于流式事件层。
 
 配置层已核验为干净的部分：
 
@@ -114,15 +147,35 @@ child identity profile**。
 
 ## 6. 仓库侧对 2.1.258 的硬耦合
 
-⚠️ **范围限定**：本节全部来自仓库内 `isthmus-runtime/`，而该 slice 按
-[fake-transport-slice.md](fake-transport-slice.md) 自述为「synthetic fixtures only，
-does not turn the recovered bundle into a service」——它是**探针/实验台**，不是线上
-运行的那个 isthmus。佐证：`src/runtime/cli/config.ts` 用 `SYNTHETIC_TOKEN`、
-`PROBE_MODEL = "claude-sonnet-5"`、`max_tokens` 固定 128；且 supervisor 透传的
-`--entrypoint` / `--refusal-cutoff` / body-rewrite 在该 slice 内**完全没有实现**。
+⚠️ **范围限定（已确证）**：线上的 `isthmus.pkg` **不是本仓库构建产物**。
 
-线上跑的是加密的 `/opt/isthmus/dist/isthmus.pkg`（经 `isthmus-unpack` 内存执行），
-其源码是否在本仓库内尚未确认。**因此本节结论不能直接外推到生产行为。**
+证据链：
+
+1. 仓库内**不存在** `deploy-vm.sh`、`isthmus-supervisor.sh`、`isthmus-unpack`
+   或任何 `.pkg`——全部只存在于 216 的 `/opt/isthmus/`。
+2. `isthmus-runtime/README.md:3-8` 自述为 "a recovery foundation, **not the recovered
+   production isthmus service**"，且每个响应都打 `x-isthmus-runtime: fake`。
+3. `contracts/grpc/provenance.json` 记录 proto 来源为
+   `kind: "statically-extracted-embedded-proto"`，取自 `isthmus.readable.mjs`
+   第 30558-30660 行——线上 isthmus 是一个**早已存在的 JS bundle**，本仓库是在对它做
+   静态分析后的恢复/重写。原始资产在仓库外 `isthmus-static-analysis.HjfIFn`。
+4. `src/runtime/cli/config.ts` 用 `SYNTHETIC_TOKEN`、`PROBE_MODEL = "claude-sonnet-5"`、
+   `max_tokens` 固定 128、`--setting-sources ""`；而线上实测是真实 OAuth、
+   `--setting-sources=user,project,local`（见 4.1）。二者是不同东西。
+
+**更进一步——线上自身就不是一个构建。** [2026-09-14 核查](../../../recovery/docs/online-cli-forwarder-config-2026-09-14.md)
+第 172-179 行按可执行文件大小把 77 个 runtime 分成两组：
+
+| 进程数 / 大小 | 抽样 SHA-256 | 与保全 ELF |
+| --- | --- | --- |
+| **57** / 90,920,136 B | `d2f3110af974e22e…` | **不同** |
+| 20 / 90,924,232 B | `facf05c48b9addcd…` | 相同 |
+
+即 **77 个实例里只有 20 个对应已被分析过的那份核心，另外 57 个是未经分析的构建**。
+原文亦注明每组只抽样一次哈希，不能保证同组内部完全一致。
+
+因此本节以下内容**仅描述仓库 slice 的自我约束，对线上无约束力**；线上耦合面的权威
+参考是上述 9/14 核查，而非本仓库代码。
 
 ### 6.1 版本闸门（4 处硬编码）
 
@@ -161,31 +214,46 @@ does not turn the recovered bundle into a service」——它是**探针/实验�
 
 按风险排序：
 
-1. **无法灰度**。77 VM 共享单副本，切换是原子全量的。这是架构层面的硬限制，
-   与 CLI 版本无关。
-2. **协议契约破裂**。若线上 isthmus 也采用 6.3 式的穷举白名单，2.1.258 → 2.1.267
-   跨 9 个版本，新增事件/字段的概率不低，表现为整批 VM 同时报错。
-3. **新旧混跑窗口**。Linux inode 引用计数使已运行进程继续持有旧文件，但新拉起的
-   子进程立即是新版。勘察时 `pgrep -fc "versions/2.1.258"` 为 **0**，无活跃会话。
-4. **供应链校验断裂**。手工替换会使线上与 6.1 的 5 处闸门全部失配，阻塞后续
+1. **57/77 实例的行为无人知晓**。它们跑的核心从未被静态分析过（见第 6 节）。在这些
+   实例上换 CLI 版本等于盲飞——既不知道它们解析 CLI 输出的严格程度，也不知道
+   body-rewrite 分支与 20 个已分析实例是否一致。**这是当前最大的单点风险。**
+2. **无法灰度**。77 VM 共享单副本二进制，切换是原子全量的。架构层硬限制，与 CLI
+   版本无关；即使想只在 20 个已知实例上试，也做不到。
+3. **`tengu_sysprompt_block` 的耦合**。线上 `ISTHMUS_TELEMETRY_FEATURES` 实测为该值
+   （非注释所称的 none）。`tengu` 是 Claude Code 的内部代号，该 feature 名几乎必然
+   匹配 CLI 内部标识符，属典型的跨版本易变面。
+4. **新旧混跑窗口**。Linux inode 引用计数使已运行进程继续持有旧文件，新拉起的子进程
+   立即是新版。本轮勘察时 `pgrep -fc "versions/2.1.258"` 为 **0**（无活跃会话），但
+   9/14 核查观察到 35–37 个 CLI 进程，说明该数值随业务波动，需在操作前即时复查。
+5. **供应链校验断裂**。手工替换会使线上与 6.1 的 5 处闸门全部失配，阻塞后续
    runtimekit 流程。
 
-**此前列为高风险的「自动更新漂移」应予降级**：仓库 `config.ts:44-54` 在 spawn CLI 时
-显式注入 `DISABLE_AUTOUPDATER: "1"`（同时还有 `DISABLE_TELEMETRY`、
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`、`CLAUDE_CODE_DISABLE_CRON` 等）。
-容器镜像层 Env 里看不到它，是因为它由 isthmus **逐进程注入**而非镜像固化。
-线上是否同样注入未核验，但从 9/9 至 9/23 零漂移看，大概率已生效。
+相对**低**的风险（此前高估，现修正）：
 
-## 8. 未核验项
+- **自动更新漂移——已关闭**。线上实测 `DISABLE_AUTOUPDATER=1`（见 4.1），不会自更新。
+- **body-rewrite 破裂**——改写面是 Messages API 请求字段（见 4.2），非 CLI 私有结构，
+  跨小版本相对稳定。
+
+## 8. 升级前的前置条件
+
+按依赖顺序：
+
+1. 先弄清 **57 个未分析实例**跑的是什么构建、与 20 个已分析实例差异何在。不解决这条，
+   任何升级评估都无效。
+2. 确认 `tengu_sysprompt_block` 在目标 CLI 版本中是否仍然有效。
+3. 取得一个**受控合成请求**的逐跳参数对照（9/14 核查第 201 行亦列为待办），以确认
+   当前请求路径的实际行为，而非静态分支推断。
+
+## 9. 未核验项
 
 - 四个 `.isthmus-*.env` 的变量集合与取值。
-- **线上 `isthmus.pkg` 的源码归属**——第 6 节全部结论悬于此。若线上是另一套代码，
-  耦合面需重新测绘。这是升级决策的**首要前置条件**。
-- 线上 spawn CLI 时是否真的注入 `DISABLE_AUTOUPDATER=1`。
+- 57 个未分析核心的静态差异（9/14 核查第 201 行「另一核心构建的静态差异」同列此项，
+  至今未闭合）。
+- 转发流量实际指向 blue 还是 green。
 - 容器到 `downloads.claude.ai` 的实际出网连通性。
 - 官方清单 GPG 验签。
 
-## 9. 安全事项
+## 10. 安全事项
 
 [托管规划第 163-168 行](../../../docs/plans/2026-09-19_16-31-04-isthmus-runtime-custody.md)
 已记载：2026-09-19 会话中出现过对应 216 的 SSH 私钥文本，按项目边界应视为**已泄露**，
