@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "kind": "isthmus-toolchain-artifacts",
+  "artifacts": [
+    {
+      "name": "bun",
+      "role": "candidate",
+      "version": "1.4.2",
+      "platform": "linux/amd64",
+      "format": "zip",
+      "file": "bun-1.4.2-linux-x64.zip",
+      "source_url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
+      "size": 36646985,
+      "sha256": "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
+      "member": "bun-linux-x64/bun"
+    },
+    {
+      "name": "bun",
+      "role": "candidate",
+      "version": "1.4.2",
+      "platform": "linux/arm64",
+      "format": "zip",
+      "file": "bun-1.4.2-linux-aarch64.zip",
+      "source_url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-aarch64.zip",
+      "size": 36602920,
+      "sha256": "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7",
+      "member": "bun-linux-aarch64/bun"
+    },
+    {
+      "name": "bun",
+      "role": "control",
+      "version": "1.3.9",
+      "platform": "linux/amd64",
+      "format": "zip",
+      "file": "bun-1.3.9-linux-x64.zip",
+      "source_url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.9/bun-linux-x64.zip",
+      "size": 38812800,
+      "sha256": "4680e80e44e32aa718560ceae85d22ecfbf2efb8f3641782e35e4b7efd65a1aa",
+      "member": "bun-linux-x64/bun"
+    },
+    {
+      "name": "bun",
+      "role": "control",
+      "version": "1.3.9",
+      "platform": "linux/arm64",
+      "format": "zip",
+      "file": "bun-1.3.9-linux-aarch64.zip",
+      "source_url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.9/bun-linux-aarch64.zip",
+      "size": 38309593,
+      "sha256": "a2c2862bcc1fd1c0b3a8dcdc8c7efb5e2acd871eb20ed2f17617884ede81c844",
+      "member": "bun-linux-aarch64/bun"
+    },
+    {
+      "name": "claude",
+      "role": "cli",
+      "version": "2.1.280",
+      "platform": "linux/amd64",
+      "format": "elf",
+      "file": "claude-2.1.280-linux-x64",
+      "source_url": "https://downloads.claude.ai/claude-code-releases/2.1.280/linux-x64/claude",
+      "size": 233709640,
+      "sha256": "1e08503dbdf3c2cb0d706d32f3408277388d1c76ef108673e8fe42c1b322925b",
+      "member": null
+    },
+    {
+      "name": "claude",
+      "role": "cli",
+      "version": "2.1.280",
+      "platform": "linux/arm64",
+      "format": "elf",
+      "file": "claude-2.1.280-linux-arm64",
+      "source_url": "https://downloads.claude.ai/claude-code-releases/2.1.280/linux-arm64/claude",
+      "size": 233103352,
+      "sha256": "92f2b4fd05d0bdcf7b9a0d4e0ecef4a1e4b368b290cd8fd07cff9a50013f45a2",
+      "member": null
+    }
+  ]
+}

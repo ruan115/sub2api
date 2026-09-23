@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CLI_PATH, cliCommand, cliInput, parseCliRequest, PROBE_MODEL, SYNTHETIC_TOKEN } from "./config";
+import { CLI_PATH, cliCommand, cliInput, cliPathForVersion, parseCliRequest, PROBE_MODEL, SYNTHETIC_TOKEN } from "./config";
 
 const body = { model: PROBE_MODEL, max_tokens: 128, messages: [{ role: "user", content: "synthetic only" }], stream: true };
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -34,6 +34,25 @@ describe("CLI probe input and execution contract", () => {
       expect(() => parseCliRequest(encode(value))).toThrow();
     }
     expect(() => parseCliRequest(new Uint8Array([255]))).toThrow();
+  });
+  test("differential runs a versioned sibling, and nothing else is spellable", () => {
+    const url = "http://127.0.0.1:18765/capture-" + "c".repeat(24);
+    expect(cliPathForVersion("2.1.280")).toBe("/opt/isthmus-probe/cli/2.1.280/claude");
+    for (const version of ["2.1.258", "2.1.280"]) {
+      const path = cliPathForVersion(version);
+      expect(cliCommand(url, path).cmd.slice(0, 3)).toEqual(["/usr/bin/setsid", "--", path]);
+    }
+    // Same argv and environment regardless of version: the contract is what is under test.
+    const { cmd: a, env: ea } = cliCommand(url, cliPathForVersion("2.1.258"));
+    const { cmd: b, env: eb } = cliCommand(url, cliPathForVersion("2.1.280"));
+    expect(a.slice(3)).toEqual(b.slice(3));
+    expect(ea).toEqual(eb);
+    for (const path of ["/opt/isthmus-probe/cli/2.1.280/../../../bin/sh", "/bin/sh",
+      "/opt/isthmus-probe/cli//claude", "/opt/isthmus-probe/cli/2.1.280/claude ",
+      "/opt/isthmus-probe/cli/latest/claude", "opt/isthmus-probe/bin/claude",
+      "/opt/isthmus-probe/bin/claude\0/bin/sh", ""]) {
+      expect(() => cliCommand(url, path)).toThrow();
+    }
   });
   test("only literal loopback with a random synthetic path is allowed", () => {
     const suffix = "/capture-" + "b".repeat(24);

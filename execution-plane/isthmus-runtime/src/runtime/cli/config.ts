@@ -1,6 +1,8 @@
 import { TurnError } from "../turn/errors";
 
 export const CLI_PATH = "/opt/isthmus-probe/bin/claude";
+/** Versioned siblings of CLI_PATH, staged one per release for contract differential. */
+export const cliPathForVersion = (version: string) => `/opt/isthmus-probe/cli/${version}/claude`;
 export const PROBE_MODEL = "claude-sonnet-5";
 export const SYNTHETIC_TOKEN = "synthetic-probe-token-not-a-real-credential";
 export interface CliRequest { prompt: string; stream: boolean }
@@ -28,13 +30,17 @@ export function parseCliRequest(bytes: Uint8Array): CliRequest {
   return { prompt: message.content, stream: value.stream === true };
 }
 
-export function cliCommand(baseURL: string) {
+export function cliCommand(baseURL: string, cliPath: string = CLI_PATH) {
   // Literal spelling is checked before URL normalization (127.1, encoded paths,
   // queries and URL credentials must not become a permitted endpoint).
   if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/capture-[a-f0-9]{24,64}$/.test(baseURL)
       || Number(new URL(baseURL).port) > 65535) throw new Error("cli_probe_loopback_required");
+  // The executable is staged, never caller-supplied: only the default probe path
+  // or a versioned sibling. Relative segments and other roots stay unspellable.
+  if (!/^\/opt\/isthmus-probe\/(bin|cli\/[0-9]+\.[0-9]+\.[0-9]+)\/claude$/.test(cliPath))
+    throw new Error("cli_probe_executable_rejected");
   return {
-    cmd: ["/usr/bin/setsid", "--", CLI_PATH, "--print", "--safe-mode", "--tools", "",
+    cmd: ["/usr/bin/setsid", "--", cliPath, "--print", "--safe-mode", "--tools", "",
       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--setting-sources", "",
       "--no-session-persistence", "--max-turns", "1", "--thinking", "disabled",
       "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",

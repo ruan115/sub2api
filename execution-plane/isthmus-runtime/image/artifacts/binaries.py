@@ -22,6 +22,11 @@ from recoverykit.evidence.filesystem import absolute_path, file_descriptor, open
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 MAX_BINARY_BYTES = 256 * 1024 * 1024
 _CHUNK = 1024 * 1024
+# Reviewed CLI releases. A lock still pins one version at a time: validate_lock
+# requires exactly six artifacts, which is two platforms of one CLI version plus
+# the two Bun builds. Contract differential acquires each version separately so
+# every one keeps its own signed manifest verification.
+CLAUDE_VERSIONS = ("2.1.258", "2.1.280")
 _FIELDS = {"name", "role", "version", "platform", "format", "file", "source_url", "size", "sha256", "member"}
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _DEST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -46,7 +51,7 @@ def _spec(value):
         expected = {"role": "candidate" if version == "1.4.2" else "control", "format": "zip",
                     "file": f"bun-{version}-linux-{arch}.zip", "member": f"bun-linux-{arch}/bun",
                     "source_url": f"https://github.com/oven-sh/bun/releases/download/bun-v{version}/bun-linux-{arch}.zip"}
-    elif name == "claude" and version == "2.1.258":
+    elif name == "claude" and version in CLAUDE_VERSIONS:
         arch = "x64" if platform == "linux/amd64" else "arm64"
         expected = {"role": "cli", "format": "elf", "member": None,
                     "file": f"claude-{version}-linux-{arch}",

@@ -15,8 +15,20 @@ import urllib.request
 from artifacts.binaries import validate_lock, stage_binary
 from lab.host import bounded_process, environment
 
-CLAUDE_ROOT = "https://downloads.claude.ai/claude-code-releases/2.1.258/"
+# Literal host and path prefix. Only the version segment comes from the lock,
+# and validate_lock has already constrained that to a reviewed release, so the
+# lock cannot redirect the download anywhere else.
+CLAUDE_RELEASES = "https://downloads.claude.ai/claude-code-releases/"
 FINGERPRINT = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+
+
+def claude_release(lock):
+    """The single CLI version this lock pins; acquisition verifies its manifest."""
+    versions = {spec["version"] for spec in lock["artifacts"] if spec["name"] == "claude"}
+    if len(versions) != 1:
+        raise ValueError("release_lock_version_ambiguous")
+    version = versions.pop()
+    return version, CLAUDE_RELEASES + version + "/"
 
 
 @contextmanager
@@ -72,13 +84,14 @@ def fetch(url, dest, limit, *, expected_size=None, expected_sha=None):
 
 def acquire(lab, lock_path):
     lock = validate_lock(json.loads(Path(lock_path).read_text()))
+    claude_version, claude_root = claude_release(lock)
     root = lab.root / "toolchain-inputs"
     root.mkdir(mode=0o700)
     binaries = lab.root / "toolchain-bin"
     binaries.mkdir(mode=0o700)
     records = {}
-    for filename, url in (("manifest.json", CLAUDE_ROOT + "manifest.json"),
-                          ("manifest.json.sig", CLAUDE_ROOT + "manifest.json.sig"),
+    for filename, url in (("manifest.json", claude_root + "manifest.json"),
+                          ("manifest.json.sig", claude_root + "manifest.json.sig"),
                           ("claude-code.asc", "https://downloads.claude.ai/keys/claude-code.asc")):
         records[filename] = fetch(url, root / filename, 256 * 1024)
     keydir = root / "gnupg"
@@ -101,7 +114,7 @@ def acquire(lab, lock_path):
     if result.returncode or len(signatures) != 1 or FINGERPRINT not in (signatures[0][2], signatures[0][-1]):
         raise ValueError("release_manifest_signature_failed")
     manifest = json.loads((root / "manifest.json").read_text())
-    if manifest.get("version") != "2.1.258":
+    if manifest.get("version") != claude_version:
         raise ValueError("release_manifest_version_mismatch")
     for spec in lock["artifacts"]:
         if spec["name"] == "claude":
