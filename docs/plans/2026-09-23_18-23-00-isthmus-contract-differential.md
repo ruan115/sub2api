@@ -2,7 +2,9 @@
 
 时间：Asia/Shanghai（UTC+08:00）。承接
 [业务逻辑总结 §10b.5](2026-09-23_18-05-00-isthmus-business-logic-summary.md)。
-本文把该节的方法论建议细化为可执行方案。**尚未开工。**
+本文把该节的方法论建议细化为可执行方案。
+
+**进度：阶段 1.1 已完成（`15edfa9`）。** 详见 §13 执行记录。
 
 ## 0. 为什么要换锚点
 
@@ -254,9 +256,50 @@ golden，说明方案过重，应当砍掉用例矩阵先求通路。
 
 ## 12. 前置未决项
 
-- 两个 CLI 版本的容器化跑道需要 Linux 环境；`process.ts` 注明「需要单独验证过的
-  Linux 容器」。本机 Colima 曾被权限策略拦截，需确认可用宿主。
-- `acquire.py` 的版本维度需先参数化（**非放宽**，见 §3.1.1），否则阶段 1.1
-  无法取得 2.1.280 制品。GPG 指纹与五步信任链保持不变。
+- **[阻塞阶段 1.2]** 两个 CLI 版本的容器化跑道需要 Linux 环境；`process.ts`
+  注明「需要单独验证过的 Linux 容器」。本机 Colima 曾被权限策略拦截，
+  **需用户确认可用宿主**。在此之前无法采集任何 golden。
+- ~~`acquire.py` 的版本维度需先参数化~~ —— **已完成**，见 §13.1。
 - 规范化规则（剥离时间戳/uuid/耗时）需要先看过一条真实 golden 才能写准，
   属阶段 1.3 的产出而非前提。
+
+## 13. 执行记录
+
+### 13.1 阶段 1.1 完成（2026-09-23，`15edfa9`）
+
+**目标**：让两个 CLI 版本可以并存取得并分别运行，信任链不削弱。
+
+改动四处，共 +165/−10：
+
+| 文件 | 改动 |
+| --- | --- |
+| `image/artifacts/binaries.py` | 新增 `CLAUDE_VERSIONS = ("2.1.258", "2.1.280")`；`_spec` 的版本判定由等值改为允许集 |
+| `image/lab/acquire.py` | `CLAUDE_ROOT` 常量改为 `CLAUDE_RELEASES` 前缀 + 新函数 `claude_release(lock)`；`:104` 断言改为比对 lock 派生的版本 |
+| `image/locks/toolchain-linux-cli-2.1.280-2026-09-23.json` | 新增 2.1.280 lockfile，哈希取自官方签名清单 |
+| `src/runtime/cli/config.ts` | `cliCommand(baseURL, cliPath = CLI_PATH)`；新增 `cliPathForVersion()`；新增可执行文件路径校验 |
+
+**关键设计决定**：版本改为**从 lockfile 派生**而非模块常量，顺带实现了原定阶段 3
+的「单一真源」。安全性要点——**host 与路径前缀保持字面量**，只有版本段来自 lock，
+而 lock 的版本已被 `binaries.py` 允许集约束，因此 lockfile 无法重定向下载。
+
+**一个技术约束促成的设计**：`manifest.json` 是按版本的，一次 acquire 只能验一份
+清单。因此**一个 lockfile = 一个 CLI 版本**；混入两个版本直接报
+`release_lock_version_ambiguous`，而不是拿错清单去验。两个版本各走完整五步链。
+
+**负向验证**（全部按预期拒绝）：
+
+| 攻击 | 结果 |
+| --- | --- |
+| 未审查版本 `9.9.9` | `unsupported_binary_identity` |
+| lockfile 内 URL 篡改 | `binary_source_or_identity_mismatch` |
+| 单 lock 混入两个 CLI 版本 | `release_lock_version_ambiguous` |
+| lockfile 内哈希篡改 | `validate_lock` 放行 → 由 `acquire.py:106-111` 的签名清单反向比对拦截（设计如此，lock 的 docstring 明示哈希是 caller-trusted） |
+
+可执行文件路径侧另覆盖：目录穿越、`/bin/sh`、`latest` 别名、尾随空格、
+NUL 截断、相对路径——均拒绝。
+
+**回归**：`bun test` **151 pass / 0 fail**（17 个文件，1040 次断言）。
+新增断言确认**两个版本的 argv 与 env 完全一致**——对拍的前提是只有 CLI 本身在变。
+
+**未做**：尚未真正下载任何 2.1.280 制品（需 Linux 宿主，见 §12），
+因此**五步信任链在 2.1.280 上尚未实跑验证**，只验证了版本派生与 lock 校验逻辑。
