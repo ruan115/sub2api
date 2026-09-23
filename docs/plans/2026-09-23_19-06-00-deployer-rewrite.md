@@ -2,10 +2,14 @@
 
 时间：Asia/Shanghai（UTC+08:00）。承接
 [业务逻辑总结 §1.2](2026-09-23_18-05-00-isthmus-business-logic-summary.md)。
-范围由用户指定：**完整重写 Deployer 的全部职责**。**尚未开工。**
+范围由用户指定：**完整重写 Deployer 的全部职责**。
 
-**2026-09-23 核实**：旧服务器上**只有部署制品，没有源代码**，因此确定为重写路线。
-制品仍是信息量最大的单一资产，阶段 0 的首要动作是判定其形态（见 §0.1）。
+**进度：阶段 0 已完成**（2026-09-23 晚，经 WebSSH 中继勘察）。Deployer 已定位、
+形态已判定、真实数据模型已取得。详见 §13 执行记录。
+
+**结论提要**：制品是 **Bun `--compile` 二进制，JS 源码内嵌可提取**——阶段 0 原本
+最坏的假设（啃裸二进制）没有发生，路线是「读源码」。真实 schema 已取得，
+本文 §4 的数据模型已据此重写，原先基于字符串推测的内容作废。
 
 ## 0. 先纠正一个认知：我们还没有契约
 
@@ -32,11 +36,15 @@
 **因此：Deployer 的接口清单目前是未知的，归属判定是阶段 1 的首要任务。**
 本计划的任何「接口设计」在阶段 1 完成前都只是占位。
 
+> **§0 的时效性**：本节写于阶段 0 之前，描述的是「当时证据有多弱」。阶段 0 已取得
+> 真实 schema（§13.4），接口路径的推测问题仍然成立——**schema 不等于 HTTP 契约**，
+> 端点清单仍待阶段 1 从调用点确认。本节保留作为证据强度的记录。
+
 ### 已确证的事实（仅此而已）
 
 ```text
 PORTUNEX__DEPLOYER__ENABLED=true
-PORTUNEX__DEPLOYER__BASE_URL=https://14.1.29.250:8443/
+PORTUNEX__DEPLOYER__BASE_URL=https://14.1.29.250:8443/   ← 旧栈（216）指向
 PORTUNEX__DEPLOYER__API_TOKEN=<Bearer 令牌，未读取>
 PORTUNEX__DEPLOYER__VERIFICATION_MODEL=claude-haiku-4-5-20251001
 PORTUNEX__DEPLOYER__ALLOW_INSECURE_LOOPBACK=true
@@ -140,39 +148,138 @@ Rust 的 serde 结构体名通常保留在二进制里（已见 `deployment_id s
 **注意**：账号健康维护常被误并入 Deployer，实际在 216 的 `portunex-monitor`。
 两者的分工边界需在阶段 1 一并确认（谁写 `deployment_status`？谁写 `account_status`？）。
 
-## 4. 数据模型（已观测字段，类型待定）
+## 4. 数据模型（真实 schema，2026-09-23 取得）
 
-从 `portunex-server` 提取的字段名，**这些是事实**；类型、可空性、关系是推断：
+> 原先本节是从 `portunex-server` 二进制提取的字段名推测。阶段 0 取得了
+> **Deployer 自己的 SQLite schema**，以下为实测结果，推测版本作废。
+> 取法：`strings deployer.sqlite | grep -i 'CREATE TABLE <名>'`（SQLite 以明文
+> 保存表定义），**只读表结构，未读任何数据行**。
+
+### 4.1 全部 20 张表
 
 ```text
-部署：deployment_id / deployment_status / deployment_message / deployment_tasks
-      (attempt, reason) / deployment_reservations / deployment_sessions
-      / deployment_sessions_expiry / deployment_status_check / last_checked_at
-      / rpm_limit / successful_request* / occurred_at / deleted*
-授权：oauth_state / oauth_identity / oauth_service / code_verifier / accounts
+管理后台    admins / sessions / settings
+账户授权    oauth_sessions
+拓扑        servers / jump_hosts / targets / target_folders / server_targets
+部署        managed_deployments / managed_deployment_history
+任务        jobs / job_receipts
+传输分阶段  access_stages / access_stage_chunks
+VM 迁移     target_move_stages / target_move_stage_items / target_move_stage_chunks
+控制        service_control
+密钥        vault
 ```
 
-可读出的语义：
+### 4.2 已取得完整定义的表
 
-- **有预留（reservation）机制** —— 说明部署前要先占位，避免并发超卖。
-- **任务带 attempt 与 reason** —— 有重试与失败归因。
-- **会话带 expiry** —— 授权会话有寿命，需过期清理。
-- **有 status_check 与 last_checked_at** —— 主动健康轮询，非一次性创建。
-- **PKCE** —— `code_verifier` 存在，说明是授权码 + PKCE，不是隐式流。
+```sql
+CREATE TABLE jobs (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL, server_id TEXT NOT NULL,
+  target_id TEXT NOT NULL, input_hash TEXT NOT NULL, status TEXT NOT NULL,
+  error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  result_encrypted TEXT,
+  operation TEXT NOT NULL DEFAULT 'create',
+  deployment_id TEXT NOT NULL DEFAULT '',
+  UNIQUE(server_id, request_id)
+);
+
+CREATE TABLE managed_deployments (
+  id TEXT PRIMARY KEY, server_id TEXT NOT NULL, provider_id TEXT,
+  target_id TEXT NOT NULL, backend TEXT NOT NULL, instance_id INTEGER NOT NULL,
+  revision INTEGER NOT NULL, metadata_encrypted TEXT NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE servers (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, ip TEXT NOT NULL,
+  enabled INTEGER NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+  access_revision INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE vault (id INTEGER PRIMARY KEY CHECK(id=1), marker TEXT NOT NULL);
+
+CREATE INDEX idx_oauth_sessions_expiry
+  ON oauth_sessions(COALESCE(retain_until, expires_at));
+```
+
+`oauth_sessions`、`jump_hosts` 的完整定义跨 SQLite 页边界被 `strings` 截断，
+仅知其存在且 `oauth_sessions` 含 `retain_until` 与 `expires_at` 两个时间字段。
+**待补**（见 §11）。
+
+### 4.3 从 schema 读出的五个设计决定
+
+这些是重写时**应当照搬**的，原版在这几点上做对了：
+
+1. **`vault` 不是密钥库，是主密钥校验哨兵。**
+   `CHECK(id=1)` 强制单行，只有一个 `marker` 字段。语义是：启动时用外部提供的主
+   密钥解 `marker`，解得开才算密钥正确。**主密钥不在库内**，因此库被整体拖走也解
+   不开 `metadata_encrypted` / `result_encrypted`。这个模式直接沿用。
+
+2. **`jobs` 幂等靠 `UNIQUE(server_id, request_id)`。**
+   同一请求重投不会重复执行；`input_hash` 用于识别「同一 request_id 但参数不同」
+   的冲突——这是幂等实现里最容易漏掉的一环，原版做了。
+
+3. **字段级加密，不是整库加密。**
+   `metadata_encrypted`、`result_encrypted` 是 TEXT 密文列，其余字段明文可索引。
+   兼顾了查询能力与静态保护。
+
+4. **`revision` / `access_revision` 双版本号。**
+   部署有 `revision`，服务器有 `access_revision`——后者配合 `access_stages`，
+   说明访问凭据/配置是**分阶段下发并带版本**的，可增量同步而非全量重推。
+
+5. **双时效字段 `COALESCE(retain_until, expires_at)` 建索引。**
+   授权会话有「过期」和「保留至」两个概念，清理任务按合并值扫描。
+   说明会话过期后仍可能需要保留一段时间（审计或重试），不是到期即删。
+
+### 4.4 schema 演进痕迹
+
+文件中同时存在两个版本的 `jobs` 与 `servers` 定义（旧页未被回收）：
+
+```text
+jobs     旧：无 operation / deployment_id
+         新：+ operation TEXT DEFAULT 'create', + deployment_id TEXT DEFAULT ''
+servers  旧：无 access_revision
+         新：+ access_revision INTEGER DEFAULT 0
+```
+
+说明这套系统是**演进出来的**，不是一次成型；且迁移方式是「加列 + 给默认值」，
+未做破坏性变更。重写时的迁移策略可参照。
 
 ## 5. 安全设计（重写的最大风险面）
 
 这是本计划中**最需要慎重**的部分。Deployer 同时是 **CA** 和**多账号凭据库**，
-一旦实现有缺陷，影响面覆盖全部 77 个 VM 与全部接入账号。
+一旦实现有缺陷，影响面覆盖全部 VM 与全部接入账号。
 
 ### 5.1 CA
 
-- 根密钥**离线生成**，不落在应用进程可读路径；建议硬件或至少独立加密存储。
+**现状**（阶段 0 实测）：自签私有根，非外部 CA 派生。
+
+```text
+subject = CN=Isthmus private grpcs CA, O=Isthmus
+issuer  = 同上（自签）
+有效期  = 2026-08-28 → 2036-08-28（10 年）
+分发    = /opt/isthmus/grpcs-certs/{ca.crt, server.key, portunex-client.crt}
+          由 deploy-vm.sh 拷入每个 VM 的 .isthmus-grpcs/
+```
+
+全盘（`/opt`、`/etc`，深度 3）只找到 `ca.crt`，**未找到 `ca.key`**。可能在
+`settings` 表加密列中，或在更深路径。
+
+> **风险已降级（用户 2026-09-23 裁定）**：此前本文把「根私钥不可得」列为最高风险，
+> 理由是需给全部 VM 换信任根。该评估**有误**——本项目的目标本就是重写 VM 体系，
+> **重装 VM + 重签证书是常规操作而非灾难**；`targets` / `target_move_stages` 等表
+> 的存在也印证了批量重建是设计内的能力。因此根私钥是否可得**不构成阻塞**：
+> 可得则平滑延续，不可得则新建根并随重装分发。
+
+重写时的要求（与私钥是否可得无关）：
+
+- 根密钥**离线生成**，不落在应用进程可读路径；建议独立加密存储。
 - 签发必须有**授权门禁**——参考 `1b0db23` 的教训：签发门禁曾只校验 Redis 单库，
   会给已撤销租约签出证书，后改为两库合取。**新 CA 不得重蹈**。
-- 证书**短期化 + 可轮换**，而非一次签发长期有效。
+- 证书**短期化 + 可轮换**，而非一次签发长期有效（现状是 10 年根 + 未知期限叶证书）。
 - 必须有**撤销路径**，且撤销要能真正阻断（不能只删记录）。
 - 签发全程审计日志（签给谁、何时、依据什么授权）。
+- **换根演练**：既然重装重签是常规操作，就应把「换根」做成可重复、可验证的流程，
+  而不是一次性手工操作。这同时也是灾难恢复能力。
 
 ### 5.2 凭据存储
 
@@ -222,6 +329,12 @@ Rust 的 serde 结构体名通常保留在二进制里（已见 `deployment_id s
 ├─ CA 模块（密钥隔离）
 └─ 存储：Postgres（事务 + 状态机）
 ```
+
+> **存储选型需重新评估**：原版用的是 **SQLite（WAL 模式）**，不是 Postgres。
+> 对单实例、内网、以 SSH 外呼为主的编排器来说，SQLite 是合理选择——无需额外
+> 进程、事务简单、备份就是拷文件。上表的 Postgres 是本文初稿的默认假设。
+> 除非确有多写入实例的需求，**建议沿用 SQLite**，把复杂度留给业务逻辑。
+> 注意原版主库 401 KB 而 WAL 4.1 MB，说明 checkpoint 不频繁，写入量不小。
 
 ### 6.2 语言选型
 
@@ -290,19 +403,30 @@ Rust 的 serde 结构体名通常保留在二进制里（已见 `deployment_id s
 
 ## 11. 未决项与风险
 
-1. ~~原版可得性未知~~ —— **已核实：只有部署制品，无源码**，确定为重写。
-   制品形态（Python/JS/Go/Rust）仍待判定，见 §0.1，**这是阶段 0 的第一个动作**。
-2. **[阻塞阶段 1]** Deployer 接口归属未判定（见文首 §0）。这是全部实现的前提。
-3. **[高优先] CA 材料的可迁移性**：`deploy-vm.sh` 不签发，签发方是否为 Deployer
-   仍需坐实。更关键的是——**若根私钥不可得，全部 77 个 VM 的证书链需要整体重建**，
-   这会把切换从「换服务」升级为「换信任根」，风险与工作量完全不同。
-   阶段 0.2 必须优先查清此项。
-4. **与同事的变更协调**：同事以每日多次的节奏改线上。Deployer 切换是全局单点，
+1. ~~原版可得性未知~~ —— **已闭合**：无源码，但制品是 Bun 二进制，JS 可提取。
+2. ~~[高优先] CA 材料可迁移性~~ —— **已降级**，见 §5.1 用户裁定：重装重签是常规操作。
+3. **[阻塞阶段 2] HTTP 端点清单仍未知。**
+   阶段 0 拿到的是**数据库 schema**，不是 HTTP 契约——两者不能互相替代。
+   端点、请求/响应结构、状态码仍需从 Portunex 调用点或提取出的 JS 中确认。
+   这是全部实现的前提。
+4. **[待查] 服务器侧认证方向存疑。**
+   `servers.token_hash` 表明每台服务器持有独立令牌（哈希存储），暗示**存在从服务器
+   到 Deployer 的反向调用**；但 `jump_hosts` 又表明 Deployer 会主动 SSH 外呼。
+   究竟是单向推送、单向拉取还是双向，**尚未判定**。
+   > 记录一次修正：勘察中曾据 `jump_hosts` 断言「SSH 推式，节点不知道 Deployer
+   > 存在」，随后 `servers.token_hash` 推翻了该断言。此处保持存疑，不写成结论。
+5. **[待补] `oauth_sessions` 与 `jump_hosts` 完整定义**——被 SQLite 页边界截断。
+   `oauth_sessions` 是账户授权的核心表，**优先补齐**。
+6. **与同事的变更协调**：同事以每日多次的节奏改线上。Deployer 切换是全局单点，
    **没有共享变更计划就不应该切**。这是组织问题，不是技术问题，但会决定成败。
-5. **账号健康维护的分工**：`portunex-monitor` 与 Deployer 谁写哪些状态字段，
+7. **账号健康维护的分工**：`portunex-monitor` 与 Deployer 谁写哪些状态字段，
    阶段 1 须一并查清，否则重写后会出现双写冲突。
-6. **安全待办仍未处理**：216 的 SSH 私钥（9/19 判定应换发）、API key 明文、
-   用户邮箱 PII。重写 Deployer 会引入更多凭据，**建议先把存量清干净**。
+8. **安全待办仍未处理**（存量已达 4 项）：216 的 SSH 私钥（9/19 判定应换发）、
+   Portunex API key 明文、终端用户邮箱 PII、执行节点安装代理口令。
+   重写 Deployer 会引入更多凭据，**建议先把存量清干净**。
+9. **[非本计划但需处置] 阿里云执行节点 Postgres 暴露**：
+   勘察中发现某执行节点 `5432` 绑定 `0.0.0.0`，另有 110 个 gRPCS 端口同样绑 `0.0.0.0`。
+   是否被安全组拦住需确认。**这与重写无关，但优先级高于重写。**
 
 ## 12. 不做什么
 
@@ -311,3 +435,100 @@ Rust 的 serde 结构体名通常保留在二进制里（已见 `deployment_id s
 - 不把账号健康维护并进 Deployer——那是 `portunex-monitor` 的职责。
 - 不做指纹伪装。
 - 不在没有回滚预案、没有与同事协调的情况下切换。
+
+## 13. 执行记录
+
+### 13.1 阶段 0 完成（2026-09-23 晚）
+
+**方式**：用户经 WebSSH 中继执行命令并回贴输出；本会话无该机直连权限。
+全程只读，未修改任何文件、未重启任何服务。
+
+### 13.2 Deployer 定位
+
+```text
+主机     iZ0xi1n1blszphvfva6hfmZ（内网堡垒机）
+进程     portunex-deploy（原生进程，非容器）
+监听     172.16.44.68:8443   ← 绑内网 IP，非 0.0.0.0
+制品     /opt/portunex-deployer/portunex-deployer-linux-x64
+工作目录 /opt/portunex-deployer
+```
+
+**同机还跑着整套网关**，均带 `-2` 后缀，是与 216 并行的第二套部署：
+
+```text
+portunex-web-2      caddy      3001 → 80     ← 管理前端
+portunex-traefik-2  traefik    8090 / 8091
+portunex-green-2    转发层蓝
+portunex-blue-2     转发层绿
+```
+
+这验证了用户的判断：**前端与授权服务同机**。也解释了此前在执行节点上遍寻
+Deployer 配置而不得——**执行节点不持有该配置**，方向本就错了。
+
+新旧栈的 Deployer 地址不同：216 那套指向公网 `14.1.29.250:8443`，这套指向内网
+`172.16.44.68:8443`。
+
+### 13.3 制品形态：Bun 编译二进制（关键结论）
+
+```text
+file   ELF 64-bit LSB executable, x86-64, dynamically linked, not stripped
+大小   96,446,592 字节
+特征   bun-v1.3.14 / /$bunfs/root/
+```
+
+`/$bunfs/root/` 是 Bun `--compile` 的内嵌虚拟文件系统路径——**JS 源码内嵌在二进制
+里，可提取**。96 MB 的体积即 Bun 运行时（~90 MB）+ 应用代码；旁证是同生态的
+isthmus 核心也在 90 MB 量级。`not stripped` 意味着符号表完整，可读性更好。
+
+**因此阶段 0 的最坏假设（啃裸二进制）没有发生**，路线是「读源码」，
+与 `isthmus.readable.mjs` 同路。
+
+### 13.4 数据层
+
+```text
+/opt/portunex-deployer/data/   (0700)
+  deployer.sqlite       401 KB
+  deployer.sqlite-wal   4.1 MB   ← 活跃写入
+  deployer.sqlite-shm    32 KB
+```
+
+**只有 SQLite，无任何密钥文件。** 20 张表的 schema 见 §4，五个可照搬的设计决定
+见 §4.3。存储选型据此重新评估（§6.1）。
+
+### 13.5 CA
+
+自签私有根 `CN=Isthmus private grpcs CA, O=Isthmus`，2026-08-28 起 10 年期。
+签发时间早于 216 的部署（9 月），说明该 CA 建立更早。
+全盘未找到 `ca.key`。风险评级经用户裁定后降级，见 §5.1。
+
+### 13.6 勘察中的两次自我修正
+
+如实记录，避免后续误引：
+
+1. **接口清单**：曾把 `portunex-server` 中 grep 出的
+   `/oauth/sessions/providers/isthmus/deployments/` 拆为两个端点。该串实为字符串表
+   中相邻常量被一并提取，**拆分无依据**，已在 §0 更正。
+2. **认证方向**：曾据 `jump_hosts` 断言「SSH 推式，节点不知道 Deployer 存在」，
+   随后 `servers.token_hash` 显示每台服务器持有独立令牌，**推翻该断言**。
+   现列为待查项（§11.4），不写成结论。
+
+### 13.7 勘察中的凭据暴露
+
+`grep -ohE 'https?://...'` 在执行节点上命中了一条内联凭据的代理 URL
+（`http://<user>:<pass>@...`，来自 `.bootstrap-profile` 的 `install_proxy`），
+该口令已进入会话记录，**应视为泄露并轮换**。
+
+教训：提取 URL 时应排除 userinfo 部分。后续命令改用只出键名或只出主机名的写法。
+
+### 13.8 下一步
+
+按依赖顺序：
+
+1. **提取内嵌 JS**（§13.3）——这是阶段 1 的最短路径。拿到源码后，HTTP 端点清单、
+   请求/响应结构、状态机转移条件可一次性取得，无需再从 Portunex 侧反推。
+2. 补齐 `oauth_sessions` / `jump_hosts` 定义（§11.5）。
+3. 判定认证方向（§11.4）。
+4. 产出《Deployer 契约规格》，进入阶段 2。
+
+提取方法待定：Bun 内嵌内容位于二进制尾部，可在目标机上就地提取，也可传回本地
+分析。**制品含业务逻辑，传输与存放按仓库外私有目录处理，不入 Git。**
